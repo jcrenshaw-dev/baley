@@ -26,7 +26,7 @@ pub const UNKNOWN_DRAFT: &str = "unknown-draft";
 pub const STALE_DRAFT: &str = "stale-draft";
 
 const ROOT_MEMBERS: &[&str] = &["description", "stories", "roadmap"];
-const DESCRIPTION_MEMBERS: &[&str] = &["what", "core_value", "constraints"];
+pub(super) const DESCRIPTION_MEMBERS: &[&str] = &["what", "core_value", "constraints"];
 const STORY_MEMBERS: &[&str] = &["label", "sentence", "status"];
 const PHASE_MEMBERS: &[&str] = &["name", "goal", "detail", "depends_on", "stories"];
 
@@ -78,7 +78,7 @@ impl StoryStatus {
         }
     }
 
-    fn parse(text: &str) -> Option<Self> {
+    pub(super) fn parse(text: &str) -> Option<Self> {
         match text {
             "active" => Some(Self::Active),
             "deferred" => Some(Self::Deferred),
@@ -191,9 +191,9 @@ pub fn judge_submission(value: &Value) -> Result<Submission, SubmissionRefusal> 
     })
 }
 
-type Judged<T> = Result<T, SubmissionRefusal>;
+pub(super) type Judged<T> = Result<T, SubmissionRefusal>;
 
-fn malformed(section: &str, field: &str) -> SubmissionRefusal {
+pub(super) fn malformed(section: &str, field: &str) -> SubmissionRefusal {
     SubmissionRefusal::Malformed {
         section: section.into(),
         field: field.into(),
@@ -202,7 +202,10 @@ fn malformed(section: &str, field: &str) -> SubmissionRefusal {
 
 /// The first member, by name, that `allowed` lacks. By name rather than by
 /// position, so member order never changes the answer.
-fn unknown_member<'a>(object: &'a Map<String, Value>, allowed: &[&str]) -> Option<&'a str> {
+pub(super) fn unknown_member<'a>(
+    object: &'a Map<String, Value>,
+    allowed: &[&str],
+) -> Option<&'a str> {
     object
         .keys()
         .map(String::as_str)
@@ -211,7 +214,7 @@ fn unknown_member<'a>(object: &'a Map<String, Value>, allowed: &[&str]) -> Optio
 }
 
 /// The object at `field`, refusing an unknown member before any other fault.
-fn object<'a>(
+pub(super) fn object<'a>(
     value: Option<&'a Value>,
     section: &str,
     field: &str,
@@ -227,14 +230,18 @@ fn object<'a>(
 }
 
 /// Text that is not empty or only whitespace, kept as written.
-fn text(value: Option<&Value>, section: &str, field: &str) -> Judged<String> {
+pub(super) fn text(value: Option<&Value>, section: &str, field: &str) -> Judged<String> {
     match value {
         Some(Value::String(text)) if !text.trim().is_empty() => Ok(text.clone()),
         _ => Err(malformed(section, field)),
     }
 }
 
-fn list<'a>(value: Option<&'a Value>, section: &str, field: &str) -> Judged<&'a [Value]> {
+pub(super) fn list<'a>(
+    value: Option<&'a Value>,
+    section: &str,
+    field: &str,
+) -> Judged<&'a [Value]> {
     match value {
         Some(Value::Array(items)) => Ok(items),
         _ => Err(malformed(section, field)),
@@ -244,22 +251,33 @@ fn list<'a>(value: Option<&'a Value>, section: &str, field: &str) -> Judged<&'a 
 fn judge_description(value: Option<&Value>) -> Judged<Description> {
     const SECTION: &str = "description";
     let object = object(value, SECTION, SECTION, DESCRIPTION_MEMBERS)?;
-    let what = text(object.get("what"), SECTION, "description.what")?;
-    let core_value = text(object.get("core_value"), SECTION, "description.core_value")?;
-    let entries = list(
-        object.get("constraints"),
-        SECTION,
-        "description.constraints",
-    )?;
+    description_members(object, Some(SECTION))
+}
+
+/// The description's members judged with the start's rule. `within` is
+/// the member holding them, which then names every fault; at the top level
+/// each fault is named by its own member.
+pub(super) fn description_members(
+    object: &Map<String, Value>,
+    within: Option<&str>,
+) -> Judged<Description> {
+    let path = |member: &str, field: String| match within {
+        Some(section) => (section.to_owned(), format!("{section}.{field}")),
+        None => (member.to_owned(), field),
+    };
+    let judged_text = |entry: Option<&Value>, member: &str, field: String| {
+        let (section, field) = path(member, field);
+        text(entry, &section, &field)
+    };
+    let what = judged_text(object.get("what"), "what", "what".into())?;
+    let core_value = judged_text(object.get("core_value"), "core_value", "core_value".into())?;
+    let (section, field) = path("constraints", "constraints".into());
+    let entries = list(object.get("constraints"), &section, &field)?;
     let constraints = entries
         .iter()
         .enumerate()
         .map(|(index, entry)| {
-            text(
-                Some(entry),
-                SECTION,
-                &format!("description.constraints[{index}]"),
-            )
+            judged_text(Some(entry), "constraints", format!("constraints[{index}]"))
         })
         .collect::<Judged<_>>()?;
     Ok(Description {

@@ -1,5 +1,6 @@
 //! Scope records' pure half (design 0004 sections 5 and 6): the judgement
-//! of a start submission and its digest, the judgement of an approval, the
+//! of a start submission and its digest, the judgement of a change
+//! submission with its digest and target, the judgement of an approval, the
 //! six scope events, and the `draft`, `roadmap`, `phase`, `phase_detail` and
 //! `backlog` views.
 //!
@@ -11,6 +12,7 @@ use serde_json::{Value, json};
 
 mod approval;
 mod backlog;
+mod change;
 mod draft;
 mod event;
 mod phase;
@@ -21,6 +23,10 @@ pub use approval::{
     ApprovalFacts, ApprovalRefusal, NumbersExhausted, judge_approval, start_events,
 };
 pub use backlog::{BACKLOG_VIEW, BacklogProjector, backlog_key, backlog_spec};
+pub use change::{
+    ChangeKind, ChangeSubmission, Decision, Destination, PhaseDeclaration, PhaseFields,
+    ScopeChange, judge_change,
+};
 pub use draft::{DRAFT_NEWEST_INDEX, DRAFT_VIEW, DraftProjector, draft_key, draft_spec};
 pub use event::{
     PHASE_DECLARED, PHASE_DECLARED_VERSION, PHASE_REORDERED, PHASE_REORDERED_VERSION,
