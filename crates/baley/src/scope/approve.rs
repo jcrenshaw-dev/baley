@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 
 use baley_core::scope::{
     ApprovalFacts, ApprovalRefusal, DRAFT_NEWEST_INDEX, DRAFT_VIEW, NumbersExhausted,
-    PHASE_DECLARED, PROJECT_STREAM, ROADMAP_VIEW, SCOPE_SUBMITTED, START_KIND, STORY_DECLARED,
-    Submission, draft_key, judge_approval, judge_submission, roadmap_key, start_events,
+    PHASE_DECLARED, PROJECT_STREAM, ROADMAP_VIEW, SCOPE_SUBMITTED, START_KIND, START_TARGET,
+    STORY_DECLARED, Submission, draft_key, judge_approval, judge_submission, roadmap_key,
+    start_events,
 };
 use baley_store::{
     Absence, Actor, Command, Decision, Document, EventMatch, Hash, HistoryFilter, IndexQuery,
@@ -224,11 +225,15 @@ fn confirm(tx: &mut dyn Transaction, judged: &Judged) -> Result<(), StoreError> 
     Ok(())
 }
 
-/// The first page of one start draft, newest first.
+/// The first page of one start draft, newest first: the start's kind and
+/// target, so it reads only the start's change.
 fn newest_query() -> IndexQuery {
     IndexQuery {
         index: DRAFT_NEWEST_INDEX.into(),
-        equals: vec![KeyValue::Text(START_KIND.into())],
+        equals: vec![
+            KeyValue::Text(START_KIND.into()),
+            KeyValue::Text(START_TARGET.into()),
+        ],
         page: PageRequest {
             limit: 1,
             after: None,

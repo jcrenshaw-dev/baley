@@ -1,7 +1,8 @@
-//! The `draft` view: one document per submitted digest, holding the
-//! sequence of that digest's latest submission, so the newest draft of a
-//! kind is the first document its index gives (design 0004 section 5), and
-//! the purge state of a body its project released (design 0001 Views).
+//! The `draft` view: one document per submitted digest, holding its kind,
+//! its target and the sequence of that digest's latest submission, so the
+//! newest draft of one change, its kind and target, is the first document
+//! its index gives (design 0004 section 5), and the purge state of a body
+//! its project released (design 0001 Views).
 
 use baley_store::{
     Change, DocKey, Event, FieldKind, FieldSpec, Hash, IndexField, IndexSpec, KeyValue, Order,
@@ -14,22 +15,26 @@ use super::mark_purged;
 
 /// The view's name.
 pub const DRAFT_VIEW: &str = "draft";
-/// The index that gives a kind's drafts newest first.
+/// The index that gives one change's drafts, by kind and target, newest
+/// first.
 pub const DRAFT_NEWEST_INDEX: &str = "newest";
 
 /// The key field: the submission's digest in lowercase hex.
 const DIGEST_FIELD: &str = "digest";
 /// The change kind the index leads with.
 const KIND_FIELD: &str = "kind";
+/// What the draft is filed under within its kind, second in the index.
+const TARGET_FIELD: &str = "target";
 /// The latest submission's sequence, newest first in the index.
 const SEQ_FIELD: &str = "seq";
 
 /// The view's declaration: the digest as a text key and one index over the
-/// change kind, then the latest submission's sequence descending.
+/// change kind, then the target, then the latest submission's sequence
+/// descending.
 pub fn draft_spec() -> ViewSpec {
     ViewSpec {
         name: DRAFT_VIEW.into(),
-        version: 2,
+        version: 3,
         key: vec![FieldSpec {
             name: DIGEST_FIELD.into(),
             kind: FieldKind::Text,
@@ -39,6 +44,11 @@ pub fn draft_spec() -> ViewSpec {
             fields: vec![
                 IndexField {
                     name: KIND_FIELD.into(),
+                    kind: FieldKind::Text,
+                    order: Order::Ascending,
+                },
+                IndexField {
+                    name: TARGET_FIELD.into(),
                     kind: FieldKind::Text,
                     order: Order::Ascending,
                 },
@@ -61,8 +71,8 @@ pub fn draft_key(digest: Hash) -> DocKey {
 /// Keeps the `draft` view current from `scope.submitted` and the store's
 /// `payload.purged`.
 ///
-/// A document holds the digest, the change kind, the sequence and time of
-/// the digest's latest submission and the hex hash of its body. Submitting
+/// A document holds the digest, the change kind, the target, the sequence
+/// and time of the digest's latest submission and the hex hash of its body. Submitting
 /// a digest again replaces its document, so it is the newest draft again.
 /// None of the body is copied in.
 ///
@@ -144,6 +154,10 @@ impl Projector for DraftProjector {
             Some(Value::String(kind)) if !kind.is_empty() => kind,
             _ => return Err(refuse("kind is missing, not text or empty")),
         };
+        let target = match event.payload.get(TARGET_FIELD) {
+            Some(Value::String(target)) if !target.is_empty() => target,
+            _ => return Err(refuse("target is missing, not text or empty")),
+        };
         let Some(body) = event.payload.get("body").and_then(PayloadRef::from_value) else {
             return Err(refuse("body is missing or not a reference object"));
         };
@@ -152,6 +166,7 @@ impl Projector for DraftProjector {
             body: json!({
                 DIGEST_FIELD: digest.to_hex(),
                 KIND_FIELD: kind,
+                TARGET_FIELD: target,
                 SEQ_FIELD: event.seq,
                 "recorded_at": event.recorded_at,
                 "hash": body.hash.to_hex(),
@@ -204,10 +219,11 @@ mod tests {
         format!("2026-10-13T09:00:{seq:02}Z")
     }
 
-    /// A `scope.submitted` payload for digest `digest`, whose body hashes to
-    /// `body`.
+    /// A start's `scope.submitted` payload for digest `digest`, whose body
+    /// hashes to `body`.
     fn payload(digest: u8, body: u8) -> Value {
         json!({"digest": format!("{digest:02x}").repeat(32), "kind": "start",
+            "target": "project",
             "body": PayloadRef { hash: Hash([body; 32]), bytes: 300,
                 class: RetentionClass::Record }.to_value()})
     }
@@ -241,12 +257,12 @@ mod tests {
         assert_eq!(view.len(), 2);
         assert_eq!(
             view[&key("aa")],
-            json!({"digest": "aa".repeat(32), "kind": "start", "seq": 6,
+            json!({"digest": "aa".repeat(32), "kind": "start", "target": "project", "seq": 6,
                 "recorded_at": "2026-10-13T09:00:06Z", "hash": "1a".repeat(32)})
         );
         assert_eq!(
             view[&key("bb")],
-            json!({"digest": "bb".repeat(32), "kind": "start", "seq": 5,
+            json!({"digest": "bb".repeat(32), "kind": "start", "target": "project", "seq": 5,
                 "recorded_at": "2026-10-13T09:00:05Z", "hash": "1b".repeat(32)})
         );
     }
@@ -301,20 +317,20 @@ mod tests {
         fold(&mut view, &purge);
         assert_eq!(
             view[&key("aa")],
-            json!({"digest": "aa".repeat(32), "kind": "start", "seq": 6,
+            json!({"digest": "aa".repeat(32), "kind": "start", "target": "project", "seq": 6,
                 "recorded_at": "2026-10-13T09:00:06Z", "hash": "aa".repeat(32),
                 "state": "purged", "reason": "pasted a secret"})
         );
         assert_eq!(
             view[&key("bb")],
-            json!({"digest": "bb".repeat(32), "kind": "start", "seq": 5,
+            json!({"digest": "bb".repeat(32), "kind": "start", "target": "project", "seq": 5,
                 "recorded_at": "2026-10-13T09:00:05Z", "hash": "bb".repeat(32)})
         );
         // Submitting the same bytes again attaches a new reference to them.
         fold(&mut view, &submitted(8, payload(0xaa, 0xaa)));
         assert_eq!(
             view[&key("aa")],
-            json!({"digest": "aa".repeat(32), "kind": "start", "seq": 8,
+            json!({"digest": "aa".repeat(32), "kind": "start", "target": "project", "seq": 8,
                 "recorded_at": "2026-10-13T09:00:08Z", "hash": "aa".repeat(32)})
         );
     }
@@ -339,6 +355,11 @@ mod tests {
                     order: Order::Ascending,
                 },
                 IndexField {
+                    name: "target".into(),
+                    kind: FieldKind::Text,
+                    order: Order::Ascending,
+                },
+                IndexField {
                     name: "seq".into(),
                     kind: FieldKind::Integer,
                     order: Order::Descending,
@@ -348,8 +369,63 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_index_that_ignores_the_target_is_caught() {
+        let spec = draft_spec();
+        assert_eq!(spec.version, 3);
+        assert_eq!(spec.indexes[0].name, "newest");
+        assert_eq!(
+            spec.indexes[0].fields,
+            [
+                IndexField {
+                    name: "kind".into(),
+                    kind: FieldKind::Text,
+                    order: Order::Ascending,
+                },
+                IndexField {
+                    name: "target".into(),
+                    kind: FieldKind::Text,
+                    order: Order::Ascending,
+                },
+                IndexField {
+                    name: "seq".into(),
+                    kind: FieldKind::Integer,
+                    order: Order::Descending,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_draft_document_without_its_target_or_from_a_payload_without_one_is_caught() {
+        let body = PayloadRef {
+            hash: Hash([0x1c; 32]),
+            bytes: 40,
+            class: RetentionClass::Record,
+        };
+        let edit = json!({"digest": "33".repeat(32), "kind": "phase-edit", "target": "1",
+            "body": body.to_value()});
+        let current = |seq: u64, payload: Value| Event {
+            type_version: 2,
+            ..submitted(seq, payload)
+        };
+        let mut view = BTreeMap::new();
+        fold(&mut view, &current(7, edit.clone()));
+        assert_eq!(
+            view[&DocKey(vec![KeyValue::Text("33".repeat(32))])],
+            json!({"digest": "33".repeat(32), "kind": "phase-edit", "target": "1", "seq": 7,
+                "recorded_at": "2026-10-13T09:00:07Z", "hash": "1c".repeat(32)})
+        );
+        let mut untargeted = edit;
+        untargeted.as_object_mut().unwrap().remove("target");
+        let error = DraftProjector::new()
+            .apply(&current(8, untargeted), &[])
+            .expect_err("a payload without a target");
+        assert!(error.0.contains("target"), "{}", error.0);
+    }
+
+    #[test]
     fn a_submission_payload_without_a_digest_kind_or_body_projected_is_caught() {
-        for member in ["digest", "kind", "body"] {
+        for member in ["digest", "kind", "target", "body"] {
             let mut incomplete = payload(0xaa, 0x1a);
             incomplete.as_object_mut().unwrap().remove(member);
             let error = DraftProjector::new()
