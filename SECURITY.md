@@ -25,30 +25,14 @@ Two workflows run on every pull request.
 
 ## The full audit
 
-The full audit runs on the maintainer's machine through sentinel's `/snt:audit`, never in CI, so findings stay private until they are fixed. Every step reads THREAT-MODEL.md as the definition of what matters.
+The full audit runs on the maintainer's machine through sentinel's `/snt:audit`, never in CI, so findings stay private until they are fixed. It runs in three steps and stops after each one until the maintainer says to go on.
 
-1. **Mechanical checks:** the same `check.sh`.
-2. **Context map:** the Trail of Bits `audit-context-building` skill maps the code. Every later reviewer reads the map first.
-3. **Claude Security scan** of the whole repository.
-4. **Lenses:** eight review prompts, one concern each, run over a read-only copy of the repository.
+1. **Mechanical checks:** the same `check.sh`, with its output saved to `audit/check.txt`.
+2. **Claude Security scan:** one codebase scan of the whole repository.
+3. **Findings log:** one row per step: which mechanical checks failed, and how many findings the scan reported at each severity.
 
-   | Lens | Concern |
-   |------|---------|
-   | crypto-and-state | Anything hashed, signed or encrypted, identifiers, randomness, and secrets stored on disk |
-   | data-exposure | Secrets, personal data or paths leaking into logs, output, files, the network, error messages or MCP responses |
-   | hook-execution | Anything the tool runs or lets Claude Code run: how commands are built, how arguments are escaped, what it assumes about `PATH` |
-   | path-handling | Traversal, symlinks, races between check and use, canonicalization, writes outside the data folder, temporary files |
-   | permissions | File modes, umask, world-readable state, lock files and sockets |
-   | resource-limits | Unbounded reads, memory growth, regular expression blowup, runaway processes, filling the disk, missing timeouts |
-   | supply-chain | Dependencies, build scripts, vendored code, submodules, downloads and update mechanisms |
-   | untrusted-input | How settings, command-line arguments, environment variables and MCP input are parsed, bounded and decoded, and whether they can inject into a command, SQL or a prompt |
+The audit finds and records. It fixes no code, writes no tests and commits nothing. What happens to each finding is the maintainer's decision.
 
-   By default each lens runs three times on Claude and once on OpenAI's Codex, 32 runs in all. The Claude Security findings join as one more run of each lens. A merge groups each lens's reports that cite the same lines and counts how many runs reported each one.
-5. **Adjudication:** a fresh reviewer judges the findings in batches of ten. A finding is confirmed only by a failing test that enters through a way in that THREAT-MODEL.md names. The rest are marked unproven, or dropped with a reason.
-6. **Refutation:** another fresh reviewer sees only the confirmed and dropped rulings and tries to prove each one wrong. It reruns every confirmed test and checks every drop's reason against the code. Every ruling that does not hold goes to the maintainer.
-7. **Variant analysis:** for each confirmed finding, the Trail of Bits `variant-analysis` skill looks for the same pattern elsewhere, and new hits go through steps 5 and 6.
-8. **Findings log:** one row per step.
+## Fixed findings
 
-## Every confirmed finding becomes a regression test
-
-The failing test that confirms a finding is kept. Until the fix lands, it sits in a git-ignored `tests/security-unfixed/` folder and is skipped by default, so an open vulnerability is never published. The fix moves it to `tests/security/`, where it runs with the rest of the suite and keeps the bug from coming back.
+Every finding that is fixed gets a regression test. The test goes into the test suite of the crate the finding is in, it fails before the fix and passes after, and it stays there so the same bug cannot come back unnoticed.
