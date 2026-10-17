@@ -31,9 +31,10 @@ pub use draft::{DRAFT_NEWEST_INDEX, DRAFT_VIEW, DraftProjector, draft_key, draft
 pub use event::{
     PHASE_DECLARED, PHASE_DECLARED_VERSION, PHASE_REORDERED, PHASE_REORDERED_VERSION,
     PROJECT_DESCRIBED, PROJECT_DESCRIBED_VERSION, PROJECT_STREAM, ROADMAP_STREAM, SCOPE_APPROVED,
-    SCOPE_APPROVED_VERSION, SCOPE_SUBMITTED, SCOPE_SUBMITTED_VERSION, START_KIND, STORY_DECLARED,
-    STORY_DECLARED_VERSION, approved_payload, described_payload, phase_declared_payload,
-    phase_reordered_payload, register_scope_events, story_declared_payload, submitted_payload,
+    SCOPE_APPROVED_VERSION, SCOPE_SUBMITTED, SCOPE_SUBMITTED_VERSION, START_KIND, START_TARGET,
+    STORY_DECLARED, STORY_DECLARED_VERSION, approved_payload, described_payload,
+    phase_declared_payload, phase_reordered_payload, register_scope_events, story_declared_payload,
+    submitted_payload,
 };
 pub use phase::{
     PHASE_DETAIL_VIEW, PHASE_STATUS_INDEX, PHASE_VIEW, PhaseDetailProjector, PhaseProjector,

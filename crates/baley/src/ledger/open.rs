@@ -602,7 +602,11 @@ pub(crate) mod tests {
                 "phase.reordered",
             ] {
                 assert!(opened.schema.reads(name, 1), "{name}");
-                assert!(!opened.schema.reads(name, 2), "{name}");
+                assert_eq!(
+                    opened.schema.reads(name, 2),
+                    name == "scope.submitted",
+                    "{name}"
+                );
             }
             assert_eq!(opened.view_set_version, NonZeroU32::new(9).unwrap());
             let mut names = view_names(&opened);

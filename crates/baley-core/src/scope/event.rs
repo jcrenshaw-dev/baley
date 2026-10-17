@@ -9,19 +9,21 @@ use baley_store::{Hash, PayloadRef};
 use serde_json::{Value, json};
 
 use super::submission::{Description, StoryStatus};
-use crate::registry::{Registry, RegistryError};
+use crate::registry::{Registry, RegistryError, UpcastError, Upcaster};
 
 /// The stream a project's submissions, description and approvals go on.
 pub const PROJECT_STREAM: &str = "project";
 /// The stream a project's stories and phases go on.
 pub const ROADMAP_STREAM: &str = "roadmap";
 
-/// A scope submission held as a draft: `{digest, kind, body}`, the body a
-/// reference to a `record` payload holding the submission's canonical JSON.
-/// Accepted scope never changes on it.
+/// A scope submission held as a draft: `{digest, kind, target, body}`, the
+/// target what the draft is filed under among its kind's drafts, and the
+/// body a reference to a `record` payload holding the submission's
+/// canonical JSON. Accepted scope never changes on it. Version 1 had no
+/// target, and only starts were recorded at it.
 pub const SCOPE_SUBMITTED: &str = "scope.submitted";
 /// The current `scope.submitted` payload version.
-pub const SCOPE_SUBMITTED_VERSION: u32 = 1;
+pub const SCOPE_SUBMITTED_VERSION: u32 = 2;
 /// The project description an approval accepted:
 /// `{what, core_value, constraints, submission}`.
 pub const PROJECT_DESCRIBED: &str = "project.described";
@@ -49,11 +51,20 @@ pub const PHASE_REORDERED_VERSION: u32 = 1;
 
 /// The change kind of a submission that starts a project.
 pub const START_KIND: &str = "start";
+/// The target every start draft is filed under, since a project has one
+/// start.
+pub const START_TARGET: &str = "project";
 
-/// Registers the six scope types at version 1, with no upcasters.
+/// Registers the six scope types: `scope.submitted` at version 2, read
+/// from version 1 by adding the start's target, and the others at version
+/// 1 with no upcasters.
 pub fn register_scope_events(registry: &mut Registry) -> Result<(), RegistryError> {
+    registry.register(
+        SCOPE_SUBMITTED,
+        SCOPE_SUBMITTED_VERSION,
+        [(1, submitted_v1_to_v2 as Upcaster)],
+    )?;
     for (name, version) in [
-        (SCOPE_SUBMITTED, SCOPE_SUBMITTED_VERSION),
         (PROJECT_DESCRIBED, PROJECT_DESCRIBED_VERSION),
         (SCOPE_APPROVED, SCOPE_APPROVED_VERSION),
         (STORY_DECLARED, STORY_DECLARED_VERSION),
@@ -65,12 +76,30 @@ pub fn register_scope_events(registry: &mut Registry) -> Result<(), RegistryErro
     Ok(())
 }
 
+/// Reads a version-1 `scope.submitted` as version 2. Only start drafts
+/// were recorded at version 1, so each gets the start's target, and any
+/// other kind there is refused rather than filed under a guessed target.
+fn submitted_v1_to_v2(payload: Value) -> Result<Value, UpcastError> {
+    let Value::Object(mut payload) = payload else {
+        return Err(UpcastError("the payload is not an object".into()));
+    };
+    if payload.get("kind").and_then(Value::as_str) != Some(START_KIND) {
+        return Err(UpcastError(
+            "only starts were recorded at version 1, and this submission is not one".into(),
+        ));
+    }
+    payload.insert("target".into(), json!(START_TARGET));
+    Ok(Value::Object(payload))
+}
+
 /// The payload of `scope.submitted`: the submission's digest, its change
-/// kind and the reference to its stored body, never the body's text.
-pub fn submitted_payload(digest: Hash, kind: &str, body: &PayloadRef) -> Value {
+/// kind, the target its draft is filed under and the reference to its
+/// stored body, never the body's text.
+pub fn submitted_payload(digest: Hash, kind: &str, target: &str, body: &PayloadRef) -> Value {
     json!({
         "digest": digest.to_hex(),
         "kind": kind,
+        "target": target,
         "body": body.to_value(),
     })
 }
@@ -155,8 +184,8 @@ mod tests {
 
     use super::*;
 
-    const NAMES: [&str; 6] = [
-        "scope.submitted",
+    /// The scope types still at version 1.
+    const NAMES: [&str; 5] = [
         "project.described",
         "scope.approved",
         "story.declared",
@@ -184,16 +213,46 @@ mod tests {
             assert_eq!(registry.current_version(name), Some(1), "{name}");
             assert!(!registry.reads(name, 2), "{name}");
         }
+        assert_eq!(registry.current_version("scope.submitted"), Some(2));
+        assert!(!registry.reads("scope.submitted", 3));
         assert!(register_scope_events(&mut registry).is_err());
     }
 
     #[test]
     fn a_submission_event_carrying_its_body_or_missing_its_digest_is_caught() {
         assert_eq!(
-            submitted_payload(digest(), START_KIND, &reference(300)),
-            json!({"digest": "5c".repeat(32), "kind": "start",
+            submitted_payload(digest(), START_KIND, START_TARGET, &reference(300)),
+            json!({"digest": "5c".repeat(32), "kind": "start", "target": "project",
                 "body": {"payload": "ab".repeat(32), "bytes": 300, "class": "record"}})
         );
+    }
+
+    #[test]
+    fn a_submission_event_without_its_target_is_caught() {
+        assert_eq!(
+            submitted_payload(digest(), "phase-edit", "2", &reference(300)),
+            json!({"digest": "5c".repeat(32), "kind": "phase-edit", "target": "2",
+                "body": {"payload": "ab".repeat(32), "bytes": 300, "class": "record"}})
+        );
+        let mut registry = Registry::new();
+        register_scope_events(&mut registry).unwrap();
+        assert_eq!(registry.current_version("scope.submitted"), Some(2));
+        assert!(registry.reads("scope.submitted", 1));
+    }
+
+    #[test]
+    fn a_version_1_start_draft_upcast_without_the_start_target_is_caught() {
+        let body = json!({"payload": "ab".repeat(32), "bytes": 300, "class": "record"});
+        let start = json!({"digest": "5c".repeat(32), "kind": "start", "body": body});
+        assert_eq!(
+            submitted_v1_to_v2(start),
+            Ok(
+                json!({"digest": "5c".repeat(32), "kind": "start", "target": "project",
+                "body": body})
+            )
+        );
+        let edit = json!({"digest": "5c".repeat(32), "kind": "phase-edit", "body": body});
+        assert!(submitted_v1_to_v2(edit).is_err());
     }
 
     #[test]

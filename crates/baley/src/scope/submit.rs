@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use baley_core::scope::{
     PROJECT_ALREADY_STARTED, PROJECT_STREAM, SCOPE_APPROVED, SCOPE_SUBMITTED,
-    SCOPE_SUBMITTED_VERSION, START_KIND, Submission, submitted_payload,
+    SCOPE_SUBMITTED_VERSION, START_KIND, START_TARGET, Submission, submitted_payload,
 };
 use baley_store::{
     Absence, Command, Decision, EVENT_PAGE_BOUND, EventMatch, HistoryFilter, Ledger, NewEvent,
@@ -122,7 +122,7 @@ pub fn record<L: Ledger + ?Sized>(
             type_name: SCOPE_SUBMITTED.into(),
             type_version: SCOPE_SUBMITTED_VERSION,
             git: None,
-            payload: submitted_payload(submission.digest(), START_KIND, &body),
+            payload: submitted_payload(submission.digest(), START_KIND, START_TARGET, &body),
             attachments: vec![body],
         })?;
         Ok(Decision {
@@ -216,7 +216,7 @@ mod tests {
         // reference is the event's one attachment.
         assert_eq!(
             submitted[0].payload,
-            json!({"digest": M_DIGEST, "kind": "start",
+            json!({"digest": M_DIGEST, "kind": "start", "target": "project",
                 "body": {"payload": M_DIGEST, "bytes": 202, "class": "record"}})
         );
         let body = PayloadRef::from_value(&submitted[0].payload["body"]).unwrap();
