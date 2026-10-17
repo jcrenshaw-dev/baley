@@ -430,33 +430,35 @@ mod tests {
 
     #[test]
     fn a_backlog_story_change_lost_or_moving_its_place_is_caught() {
+        // Each change targets a story that is not last, so a handler that
+        // removes its story and appends it again shows in the order.
         let digest = Hash([0x5c; 32]);
         let stories = after_s1(vec![
             event(
                 14,
                 "story.corrected",
                 story_corrected_payload(
-                    3,
-                    "Teammates read the backlog",
-                    StoryStatus::Deferred,
+                    1,
+                    "Every step is recorded in order",
+                    StoryStatus::Active,
                     digest,
                 ),
             ),
             event(
                 15,
                 "story.reassigned",
-                story_reassigned_payload(3, StoryStatus::Active, Some(2), digest),
+                story_reassigned_payload(2, StoryStatus::Deferred, None, digest),
             ),
             event(16, "story.dropped", story_dropped_payload(1, digest)),
         ]);
         assert_eq!(ids(&stories), [1, 2, 3]);
-        let third = entry(&stories, 3);
-        assert_eq!(third["sentence"], "Teammates read the backlog");
-        assert_eq!(third["status"], "active");
-        assert_eq!(third["phase"], 2);
         let first = entry(&stories, 1);
+        assert_eq!(first["sentence"], "Every step is recorded in order");
         assert_eq!(first["status"], "dropped");
         assert_eq!(first["phase"], Value::Null);
+        let second = entry(&stories, 2);
+        assert_eq!(second["status"], "deferred");
+        assert_eq!(second["phase"], Value::Null);
         for story in stories.as_array().unwrap() {
             assert_eq!(story["refinement"], "unrefined", "{story}");
             assert_eq!(story["truths"], 0, "{story}");
