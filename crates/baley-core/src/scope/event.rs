@@ -48,6 +48,34 @@ pub const PHASE_DECLARED_VERSION: u32 = 1;
 pub const PHASE_REORDERED: &str = "phase.reordered";
 /// The current `phase.reordered` payload version.
 pub const PHASE_REORDERED_VERSION: u32 = 1;
+/// One phase withdrawn, kept with status `withdrawn`:
+/// `{number, submission}`.
+pub const PHASE_WITHDRAWN: &str = "phase.withdrawn";
+/// The current `phase.withdrawn` payload version.
+pub const PHASE_WITHDRAWN_VERSION: u32 = 1;
+/// One story's corrected wording and status:
+/// `{id, sentence, status, submission}`.
+pub const STORY_CORRECTED: &str = "story.corrected";
+/// The current `story.corrected` payload version.
+pub const STORY_CORRECTED_VERSION: u32 = 1;
+/// One story moved to a phase, or to the backlog when `phase` is null:
+/// `{id, status, phase, submission}`.
+pub const STORY_REASSIGNED: &str = "story.reassigned";
+/// The current `story.reassigned` payload version.
+pub const STORY_REASSIGNED_VERSION: u32 = 1;
+/// One story dropped, with status `dropped`: `{id, status, submission}`.
+pub const STORY_DROPPED: &str = "story.dropped";
+/// The current `story.dropped` payload version.
+pub const STORY_DROPPED_VERSION: u32 = 1;
+/// The full priority order of story ids after a change:
+/// `{order, submission}`.
+pub const STORY_REPRIORITIZED: &str = "story.reprioritized";
+/// The current `story.reprioritized` payload version.
+pub const STORY_REPRIORITIZED_VERSION: u32 = 1;
+
+/// The status a dropped story has. Only events and views hold it, so no
+/// submission can state it.
+const DROPPED: &str = "dropped";
 
 /// The change kind of a submission that starts a project.
 pub const START_KIND: &str = "start";
@@ -55,7 +83,7 @@ pub const START_KIND: &str = "start";
 /// start.
 pub const START_TARGET: &str = "project";
 
-/// Registers the six scope types: `scope.submitted` at version 2, read
+/// Registers the eleven scope types: `scope.submitted` at version 2, read
 /// from version 1 by adding the start's target, and the others at version
 /// 1 with no upcasters.
 pub fn register_scope_events(registry: &mut Registry) -> Result<(), RegistryError> {
@@ -70,6 +98,11 @@ pub fn register_scope_events(registry: &mut Registry) -> Result<(), RegistryErro
         (STORY_DECLARED, STORY_DECLARED_VERSION),
         (PHASE_DECLARED, PHASE_DECLARED_VERSION),
         (PHASE_REORDERED, PHASE_REORDERED_VERSION),
+        (PHASE_WITHDRAWN, PHASE_WITHDRAWN_VERSION),
+        (STORY_CORRECTED, STORY_CORRECTED_VERSION),
+        (STORY_REASSIGNED, STORY_REASSIGNED_VERSION),
+        (STORY_DROPPED, STORY_DROPPED_VERSION),
+        (STORY_REPRIORITIZED, STORY_REPRIORITIZED_VERSION),
     ] {
         registry.register(name, version, [])?;
     }
@@ -169,6 +202,64 @@ pub fn phase_declared_payload(
 
 /// The payload of `phase.reordered`: the full order of phase numbers.
 pub fn phase_reordered_payload(order: &[u32], submission: Hash) -> Value {
+    json!({
+        "order": order,
+        "submission": submission.to_hex(),
+    })
+}
+
+/// The payload of `phase.withdrawn` for phase `number`.
+pub fn phase_withdrawn_payload(number: u32, submission: Hash) -> Value {
+    json!({
+        "number": number,
+        "submission": submission.to_hex(),
+    })
+}
+
+/// The payload of `story.corrected`: story `id`'s new wording and its
+/// status after the correction.
+pub fn story_corrected_payload(
+    id: u32,
+    sentence: &str,
+    status: StoryStatus,
+    submission: Hash,
+) -> Value {
+    json!({
+        "id": id,
+        "sentence": sentence,
+        "status": status.as_str(),
+        "submission": submission.to_hex(),
+    })
+}
+
+/// The payload of `story.reassigned`: story `id` in `phase`, or in the
+/// backlog when `phase` is `None`, with its status after the move.
+pub fn story_reassigned_payload(
+    id: u32,
+    status: StoryStatus,
+    phase: Option<u32>,
+    submission: Hash,
+) -> Value {
+    json!({
+        "id": id,
+        "status": status.as_str(),
+        "phase": phase,
+        "submission": submission.to_hex(),
+    })
+}
+
+/// The payload of `story.dropped` for story `id`.
+pub fn story_dropped_payload(id: u32, submission: Hash) -> Value {
+    json!({
+        "id": id,
+        "status": DROPPED,
+        "submission": submission.to_hex(),
+    })
+}
+
+/// The payload of `story.reprioritized`: the full priority order of story
+/// ids.
+pub fn story_reprioritized_payload(order: &[u32], submission: Hash) -> Value {
     json!({
         "order": order,
         "submission": submission.to_hex(),
@@ -306,6 +397,58 @@ mod tests {
         assert_eq!(
             phase_reordered_payload(&[1, 2], digest()),
             json!({"order": [1, 2], "submission": "5c".repeat(32)})
+        );
+    }
+
+    #[test]
+    fn a_change_event_left_unregistered_or_at_another_version_is_caught() {
+        let mut registry = Registry::new();
+        register_scope_events(&mut registry).unwrap();
+        for name in [
+            "phase.withdrawn",
+            "story.corrected",
+            "story.reassigned",
+            "story.dropped",
+            "story.reprioritized",
+        ] {
+            assert_eq!(registry.current_version(name), Some(1), "{name}");
+            assert!(!registry.reads(name, 2), "{name}");
+        }
+        assert!(register_scope_events(&mut registry).is_err());
+    }
+
+    #[test]
+    fn a_change_event_payload_missing_a_member_or_carrying_another_is_caught() {
+        let submission = "5c".repeat(32);
+        assert_eq!(
+            phase_withdrawn_payload(2, digest()),
+            json!({"number": 2, "submission": submission})
+        );
+        assert_eq!(
+            story_corrected_payload(
+                3,
+                "Teammates read the backlog",
+                StoryStatus::Deferred,
+                digest()
+            ),
+            json!({"id": 3, "sentence": "Teammates read the backlog", "status": "deferred",
+                "submission": submission})
+        );
+        assert_eq!(
+            story_reassigned_payload(3, StoryStatus::Active, Some(2), digest()),
+            json!({"id": 3, "status": "active", "phase": 2, "submission": submission})
+        );
+        assert_eq!(
+            story_reassigned_payload(1, StoryStatus::Active, None, digest()),
+            json!({"id": 1, "status": "active", "phase": null, "submission": submission})
+        );
+        assert_eq!(
+            story_dropped_payload(3, digest()),
+            json!({"id": 3, "status": "dropped", "submission": submission})
+        );
+        assert_eq!(
+            story_reprioritized_payload(&[2, 1, 3], digest()),
+            json!({"order": [2, 1, 3], "submission": submission})
         );
     }
 }
