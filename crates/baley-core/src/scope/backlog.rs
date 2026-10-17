@@ -6,7 +6,11 @@ use baley_store::{
 };
 use serde_json::{Value, json};
 
-use super::event::STORY_DECLARED;
+use super::event::{
+    PHASE_DECLARED, STORY_CORRECTED, STORY_DECLARED, STORY_DROPPED, STORY_REASSIGNED,
+    STORY_REPRIORITIZED,
+};
+use super::roadmap::reprioritized;
 
 /// The view's name.
 pub const BACKLOG_VIEW: &str = "backlog";
@@ -21,7 +25,7 @@ const PROJECT_KEY: &str = "project";
 pub fn backlog_spec() -> ViewSpec {
     ViewSpec {
         name: BACKLOG_VIEW.into(),
-        version: 1,
+        version: 2,
         key: vec![FieldSpec {
             name: KEY_FIELD.into(),
             kind: FieldKind::Text,
@@ -36,12 +40,18 @@ pub fn backlog_key() -> DocKey {
     DocKey(vec![KeyValue::Text(PROJECT_KEY.into())])
 }
 
-/// Keeps the `backlog` view current from `story.declared`.
+/// Keeps the `backlog` view current from the story events and
+/// `phase.declared`.
 ///
 /// The stories are kept in declaration order, which is priority order
 /// until stories are reprioritized. Each is unrefined with no truths and no
 /// size until refinement and sizing record them. A later declaration of an
 /// id already held replaces that entry in place, so it keeps its priority.
+/// A correction, a move and a drop change a story in place; a dropped
+/// story stays with status `dropped` and no phase. A reprioritization puts
+/// the stories it lists first and every other story after them in its
+/// current relative order. A phase declaration commits each story it lists
+/// to that phase and returns to the backlog each story it no longer lists.
 pub struct BacklogProjector {
     spec: ViewSpec,
 }
@@ -67,7 +77,14 @@ impl Projector for BacklogProjector {
     }
 
     fn handles(&self) -> &[&str] {
-        &[STORY_DECLARED]
+        &[
+            STORY_DECLARED,
+            PHASE_DECLARED,
+            STORY_CORRECTED,
+            STORY_REASSIGNED,
+            STORY_DROPPED,
+            STORY_REPRIORITIZED,
+        ]
     }
 
     fn keys(&self, _event: &Event) -> Vec<DocKey> {
@@ -87,25 +104,14 @@ impl Projector for BacklogProjector {
         };
         let payload = &event.payload;
         let fault = || refuse("a member is missing or of the wrong type");
-        let id = payload
-            .get("id")
-            .and_then(Value::as_u64)
-            .ok_or_else(fault)?;
-        let phase = match payload.get("phase") {
-            Some(Value::Null) => Value::Null,
-            Some(phase) => json!(phase.as_u64().ok_or_else(fault)?),
-            None => return Err(fault()),
-        };
+        let no_story = || refuse("the story is not declared");
+        let whole = |name: &str| payload.get(name).and_then(Value::as_u64).ok_or_else(fault);
         let text = |name: &str| payload.get(name).and_then(Value::as_str).ok_or_else(fault);
-        let entry = json!({
-            "id": id,
-            "sentence": text("sentence")?,
-            "status": text("status")?,
-            "phase": phase,
-            "refinement": "unrefined",
-            "truths": 0,
-            "size": null,
-        });
+        let phase = || match payload.get("phase") {
+            Some(Value::Null) => Ok(Value::Null),
+            Some(phase) => Ok(json!(phase.as_u64().ok_or_else(fault)?)),
+            None => Err(fault()),
+        };
         let mut stories = match documents.first() {
             Some((_, document)) => document
                 .get("stories")
@@ -114,15 +120,77 @@ impl Projector for BacklogProjector {
                 .ok_or_else(|| refuse("the backlog document holds no story list"))?,
             None => Vec::new(),
         };
-        match stories.iter().position(|story| story["id"] == id) {
-            Some(at) => stories[at] = entry,
-            None => stories.push(entry),
+        match event.type_name.as_str() {
+            STORY_DECLARED => {
+                let id = whole("id")?;
+                let entry = json!({
+                    "id": id,
+                    "sentence": text("sentence")?,
+                    "status": text("status")?,
+                    "phase": phase()?,
+                    "refinement": "unrefined",
+                    "truths": 0,
+                    "size": null,
+                });
+                match stories.iter().position(|story| story["id"] == id) {
+                    Some(at) => stories[at] = entry,
+                    None => stories.push(entry),
+                }
+            }
+            PHASE_DECLARED => {
+                let number = whole("number")?;
+                let listed: Vec<u64> = payload
+                    .get("stories")
+                    .and_then(Value::as_array)
+                    .and_then(|ids| ids.iter().map(Value::as_u64).collect())
+                    .ok_or_else(fault)?;
+                for story in &mut stories {
+                    let held = story["id"].as_u64().is_some_and(|id| listed.contains(&id));
+                    if held {
+                        story["phase"] = json!(number);
+                    } else if story["phase"] == number {
+                        story["phase"] = Value::Null;
+                    }
+                }
+            }
+            STORY_CORRECTED => {
+                let (sentence, status) = (text("sentence")?, text("status")?);
+                let story = story_mut(&mut stories, whole("id")?).ok_or_else(no_story)?;
+                story["sentence"] = json!(sentence);
+                story["status"] = json!(status);
+            }
+            STORY_REASSIGNED => {
+                let (status, phase) = (text("status")?, phase()?);
+                let story = story_mut(&mut stories, whole("id")?).ok_or_else(no_story)?;
+                story["status"] = json!(status);
+                story["phase"] = phase;
+            }
+            STORY_DROPPED => {
+                let status = text("status")?;
+                let story = story_mut(&mut stories, whole("id")?).ok_or_else(no_story)?;
+                story["status"] = json!(status);
+                story["phase"] = Value::Null;
+            }
+            STORY_REPRIORITIZED => {
+                let order: Vec<u64> = payload
+                    .get("order")
+                    .and_then(Value::as_array)
+                    .and_then(|ids| ids.iter().map(Value::as_u64).collect())
+                    .ok_or_else(fault)?;
+                stories = reprioritized(stories, &order).ok_or_else(no_story)?;
+            }
+            _ => return Err(refuse("not a backlog event")),
         }
         Ok(vec![Change::Put {
             key: backlog_key(),
             body: json!({KEY_FIELD: PROJECT_KEY, "stories": stories}),
         }])
     }
+}
+
+/// The entry of story `id`.
+fn story_mut(stories: &mut [Value], id: u64) -> Option<&mut Value> {
+    stories.iter_mut().find(|story| story["id"] == id)
 }
 
 #[cfg(test)]
@@ -132,20 +200,31 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use baley_store::{Actor, Hash, ProjectId, RequestId};
+    use baley_store::{Actor, Hash, PayloadRef, ProjectId, RequestId, RetentionClass};
     use serde_json::json;
 
-    use super::super::event::story_declared_payload;
+    use super::super::event::{
+        phase_declared_payload, story_corrected_payload, story_declared_payload,
+        story_dropped_payload, story_reassigned_payload, story_reprioritized_payload,
+    };
     use super::super::submission::StoryStatus;
     use super::*;
 
     fn story(seq: u64, id: u32, sentence: &str, status: StoryStatus, phase: Option<u32>) -> Event {
+        event(
+            seq,
+            "story.declared",
+            story_declared_payload(id, sentence, status, phase, Hash([0x5c; 32])),
+        )
+    }
+
+    fn event(seq: u64, type_name: &str, payload: Value) -> Event {
         Event {
             project_id: ProjectId("6f1c2a4e-8b1d-4c3a-9e2f-0a5b7c9d1e3f".into()),
             seq,
             stream: "roadmap".into(),
             stream_version: seq,
-            type_name: "story.declared".into(),
+            type_name: type_name.into(),
             type_version: 1,
             actor: Actor::Owner,
             caller: None,
@@ -153,7 +232,7 @@ mod tests {
             request_id: RequestId("9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f".into()),
             git: None,
             policy_version: 0,
-            payload: story_declared_payload(id, sentence, status, phase, Hash([0x5c; 32])),
+            payload,
             prev_hash: None,
             hash: Hash([0; 32]),
         }
@@ -285,8 +364,129 @@ mod tests {
         );
     }
 
+    /// Phase `number` declared with `stories`.
+    fn phase(seq: u64, number: u32, stories: &[u32]) -> Event {
+        let detail = PayloadRef {
+            hash: Hash([0xab; 32]),
+            bytes: 24,
+            class: RetentionClass::Record,
+        };
+        event(
+            seq,
+            "phase.declared",
+            phase_declared_payload(
+                number,
+                "Phase",
+                "A goal",
+                &detail,
+                &[],
+                stories,
+                Hash([0x5c; 32]),
+            ),
+        )
+    }
+
+    /// The stories after the approved S1, then `events`.
+    fn after_s1(events: Vec<Event>) -> Value {
+        let mut all = approved_s1();
+        all.extend(events);
+        fold(&all)
+    }
+
+    fn ids(stories: &Value) -> Vec<u64> {
+        stories
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|story| story["id"].as_u64().unwrap())
+            .collect()
+    }
+
+    fn entry(stories: &Value, id: u64) -> Value {
+        stories
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|story| story["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("story {id} in {stories}"))
+    }
+
     #[test]
-    fn a_backlog_changed_by_anything_but_a_story_declaration_is_caught() {
-        assert_eq!(BacklogProjector::new().handles(), ["story.declared"]);
+    fn a_backlog_changed_by_an_event_it_does_not_handle_is_caught() {
+        assert_eq!(
+            BacklogProjector::new().handles(),
+            [
+                "story.declared",
+                "phase.declared",
+                "story.corrected",
+                "story.reassigned",
+                "story.dropped",
+                "story.reprioritized"
+            ]
+        );
+        assert_eq!(backlog_spec().version, 2);
+    }
+
+    #[test]
+    fn a_backlog_story_change_lost_or_moving_its_place_is_caught() {
+        let digest = Hash([0x5c; 32]);
+        let stories = after_s1(vec![
+            event(
+                14,
+                "story.corrected",
+                story_corrected_payload(
+                    3,
+                    "Teammates read the backlog",
+                    StoryStatus::Deferred,
+                    digest,
+                ),
+            ),
+            event(
+                15,
+                "story.reassigned",
+                story_reassigned_payload(3, StoryStatus::Active, Some(2), digest),
+            ),
+            event(16, "story.dropped", story_dropped_payload(1, digest)),
+        ]);
+        assert_eq!(ids(&stories), [1, 2, 3]);
+        let third = entry(&stories, 3);
+        assert_eq!(third["sentence"], "Teammates read the backlog");
+        assert_eq!(third["status"], "active");
+        assert_eq!(third["phase"], 2);
+        let first = entry(&stories, 1);
+        assert_eq!(first["status"], "dropped");
+        assert_eq!(first["phase"], Value::Null);
+        for story in stories.as_array().unwrap() {
+            assert_eq!(story["refinement"], "unrefined", "{story}");
+            assert_eq!(story["truths"], 0, "{story}");
+            assert_eq!(story["size"], Value::Null, "{story}");
+        }
+    }
+
+    #[test]
+    fn a_reprioritized_backlog_out_of_order_or_losing_a_dropped_story_is_caught() {
+        let digest = Hash([0x5c; 32]);
+        let stories = after_s1(vec![
+            event(14, "story.dropped", story_dropped_payload(3, digest)),
+            event(
+                15,
+                "story.reprioritized",
+                story_reprioritized_payload(&[2, 1], digest),
+            ),
+        ]);
+        assert_eq!(ids(&stories), [2, 1, 3]);
+        assert_eq!(entry(&stories, 3)["status"], "dropped");
+    }
+
+    #[test]
+    fn a_story_a_declaration_commits_left_in_the_backlog_is_caught() {
+        let stories = after_s1(vec![
+            story(14, 4, "Reports show progress", StoryStatus::Active, None),
+            phase(15, 3, &[4]),
+            phase(16, 2, &[]),
+        ]);
+        assert_eq!(entry(&stories, 4)["phase"], 3);
+        assert_eq!(entry(&stories, 2)["phase"], Value::Null);
     }
 }
