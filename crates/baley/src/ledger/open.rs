@@ -24,15 +24,17 @@ use crate::update::events::register_update_events;
 /// Registers exactly the anchor types, `project.initialized`, the four
 /// `models.*` types, `policy.effective`, `checkout.seen`, `capture.recorded`,
 /// `guard.answered`, `guard.policy_recorded`, `install.recorded`,
-/// `update.checked`, `update.failed`, `providers.acknowledged` and the six
+/// `update.checked`, `update.failed`, `providers.acknowledged` and the eleven
 /// scope types `scope.submitted`, `project.described`, `scope.approved`,
-/// `story.declared`, `phase.declared` and `phase.reordered` understood by
-/// the CLI, and declares view set version 9: `backlog capture checkout
-/// claim_scope draft guard guard_policy install model_catalog phase
-/// phase_detail policy request roadmap`. The install view holds only
+/// `story.declared`, `story.corrected`, `story.reassigned`,
+/// `story.reprioritized`, `story.dropped`, `phase.declared`,
+/// `phase.reordered` and `phase.withdrawn` understood by the CLI, and
+/// declares view set version 10: `backlog capture checkout claim_scope
+/// draft guard guard_policy install model_catalog phase phase_detail policy
+/// request roadmap`. The install view holds only
 /// install records. Update outcomes and provider acknowledgements are read
 /// from their streams and have no projector.
-/// A project brought to view set 9 is read-only for older binaries.
+/// A project brought to view set 10 is read-only for older binaries.
 /// The startup `quick_check` is off for command-line callers.
 pub(crate) fn options() -> Options {
     let mut registry = Registry::new();
@@ -63,7 +65,7 @@ pub(crate) fn options() -> Options {
             Box::new(PhaseDetailProjector::new()),
             Box::new(BacklogProjector::new()),
         ],
-        view_set_version: NonZeroU32::new(9).expect("nonzero"),
+        view_set_version: NonZeroU32::new(10).expect("nonzero"),
         ..Options::default()
     }
 }
@@ -244,8 +246,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// The domain views of view set 9, sorted.
-    const VIEW_SET_9: [&str; 12] = [
+    /// The domain views of view set 10, sorted: the twelve of view set 9,
+    /// whose scope views were raised.
+    const VIEW_SET_10: [&str; 12] = [
         "backlog",
         "capture",
         "checkout",
@@ -549,10 +552,10 @@ pub(crate) mod tests {
                     "{name}"
                 );
             }
-            assert_eq!(opened.view_set_version, NonZeroU32::new(9).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(10).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_9);
+            assert_eq!(names, VIEW_SET_10);
         }
     }
 
@@ -577,24 +580,28 @@ pub(crate) mod tests {
                     .schema
                     .reads(PROVIDERS_ACKNOWLEDGED, PROVIDERS_ACKNOWLEDGED_VERSION + 1)
             );
-            assert_eq!(opened.view_set_version, NonZeroU32::new(9).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(10).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_9);
+            assert_eq!(names, VIEW_SET_10);
         }
     }
 
-    // Catches a scope event the store would refuse at append, a scope view
-    // left out, or views added without raising the set version.
+    // Catches a change event the store would refuse at append, a scope view
+    // left out, or the views raised without raising the set version.
     #[test]
-    fn a_scope_type_left_unregistered_or_a_scope_view_left_out_of_view_set_9_is_caught() {
+    fn a_change_type_left_unregistered_or_the_view_set_left_at_9_is_caught() {
         for opened in [
             options(),
             server_options(),
             guard_options(Duration::from_millis(1_500)),
         ] {
             for name in [
-                "scope.submitted",
+                "phase.withdrawn",
+                "story.corrected",
+                "story.reassigned",
+                "story.dropped",
+                "story.reprioritized",
                 "project.described",
                 "scope.approved",
                 "story.declared",
@@ -602,17 +609,85 @@ pub(crate) mod tests {
                 "phase.reordered",
             ] {
                 assert!(opened.schema.reads(name, 1), "{name}");
-                assert_eq!(
-                    opened.schema.reads(name, 2),
-                    name == "scope.submitted",
-                    "{name}"
-                );
+                assert!(!opened.schema.reads(name, 2), "{name}");
             }
-            assert_eq!(opened.view_set_version, NonZeroU32::new(9).unwrap());
+            assert!(opened.schema.reads("scope.submitted", 1));
+            assert!(opened.schema.reads("scope.submitted", 2));
+            assert!(!opened.schema.reads("scope.submitted", 3));
+            assert_eq!(opened.view_set_version, NonZeroU32::new(10).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_9);
+            assert_eq!(names, VIEW_SET_10);
         }
+    }
+
+    // Catches a version-1 start draft upcast without the start's target, so
+    // the start's newest-draft read misses a draft recorded before targets.
+    #[test]
+    fn a_start_draft_recorded_before_targets_filed_apart_from_new_ones_is_caught() {
+        use baley_core::scope::{
+            DRAFT_NEWEST_INDEX, DRAFT_VIEW, PROJECT_STREAM, SCOPE_SUBMITTED, draft_key,
+        };
+        use baley_store::{
+            Actor, Command, CommandKind, Decision, Hash, IndexQuery, KeyValue, NewEvent, Observed,
+            OutcomeKind, PageRequest, RequestId, RetentionClass, StreamName, Views,
+        };
+        use serde_json::json;
+
+        use crate::scope::fixtures::{M_CANONICAL, M_DIGEST, project, store};
+
+        let (_dir, store) = store();
+        let command = Command {
+            project: project(),
+            kind: CommandKind("test.submit".into()),
+            request_id: RequestId("4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a".into()),
+            digest: Hash([0x11; 32]),
+            scope: Vec::new(),
+            policy_version: 0,
+            recorded_at: "2026-10-13T09:00:01Z".into(),
+            actor: Actor::Baley,
+            caller: None,
+        };
+        store
+            .transact(&command, &mut |tx| {
+                let body = tx.put_payload(M_CANONICAL.as_bytes(), RetentionClass::Record)?;
+                tx.append(NewEvent {
+                    stream: StreamName(PROJECT_STREAM.into()),
+                    type_name: SCOPE_SUBMITTED.into(),
+                    type_version: 1,
+                    git: None,
+                    payload: json!({"digest": M_DIGEST, "kind": "start", "body": body.to_value()}),
+                    attachments: vec![body],
+                })?;
+                Ok(Decision {
+                    kind: OutcomeKind::Done,
+                    answer: json!({}),
+                    sensitive: false,
+                    observed: Observed::default(),
+                    git: None,
+                })
+            })
+            .unwrap();
+
+        let digest = Hash::from_hex(M_DIGEST).unwrap();
+        let document = store
+            .get(&project(), DRAFT_VIEW, &draft_key(digest))
+            .unwrap()
+            .expect("the start's draft");
+        assert_eq!(document.body["target"], "project");
+        let query = IndexQuery {
+            index: DRAFT_NEWEST_INDEX.into(),
+            equals: vec![
+                KeyValue::Text("start".into()),
+                KeyValue::Text("project".into()),
+            ],
+            page: PageRequest {
+                limit: 1,
+                after: None,
+            },
+        };
+        let page = store.find(&project(), DRAFT_VIEW, &query).unwrap();
+        assert_eq!(page.items[0].body["digest"], M_DIGEST);
     }
 
     // Catches a raise that fences the previous binary's ledger, or scope
