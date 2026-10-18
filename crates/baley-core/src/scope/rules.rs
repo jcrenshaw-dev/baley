@@ -368,8 +368,9 @@ pub fn judge_scope_change(
             judge_progress(change, scope, progress)
         }
         ScopeChange::BacklogReorder { order } => judge_backlog_order(order, scope),
+        ScopeChange::StoryDeclare { .. } => judge_progress(change, scope, progress),
         // A description has no rule of its own past the start's.
-        ScopeChange::ProjectDescribe(_) | ScopeChange::StoryDeclare { .. } => Ok(()),
+        ScopeChange::ProjectDescribe(_) => Ok(()),
     }
 }
 
@@ -603,11 +604,13 @@ fn reach(from: u32, edges: &BTreeMap<u32, Vec<u32>>) -> BTreeSet<u32> {
 /// Judges a change against what has happened in its phases (PRJ-R13): a
 /// complete phase is never withdrawn and its stories never change, a phase
 /// with execution present is withdrawn only once that execution is undone,
-/// and a story a complete phase served is never moved or dropped. Every
-/// other change passes.
+/// a story a complete phase served is never moved or dropped, and no story
+/// is declared into, reassigned to or moved by a withdrawal to a complete
+/// phase. Every other change passes.
 ///
 /// Completion is judged before execution, since a complete phase is never
-/// withdrawn whatever its execution.
+/// withdrawn whatever its execution. The phase a story would go to is
+/// judged last.
 pub fn judge_progress(
     change: &ChangeSubmission,
     scope: &AcceptedScope,
@@ -649,7 +652,24 @@ pub fn judge_progress(
         }
         _ => {}
     }
-    Ok(())
+    // A story given to a complete phase would change its stories too.
+    let given_to = match &change.change {
+        ScopeChange::PhaseWithdraw { decisions, .. } => decisions
+            .iter()
+            .filter_map(|decision| match decision.to {
+                Destination::Phase(to) => Some(to),
+                Destination::Drop => None,
+            })
+            .find(|to| of(*to).complete),
+        ScopeChange::StoryReassign { phase, .. } | ScopeChange::StoryDeclare { phase, .. } => {
+            phase.filter(|to| of(*to).complete)
+        }
+        _ => None,
+    };
+    match given_to {
+        Some(phase) => Err(ScopeRefusal::PhaseComplete { phase }),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -755,7 +775,15 @@ pub(super) mod tests {
         );
         let drop_2 = change(ChangeKind::StoryDrop, json!({"story": 2}));
         let reassign_1 = change(ChangeKind::StoryReassign, json!({"story": 1, "phase": 2}));
+        let unassign_1 = change(
+            ChangeKind::StoryReassign,
+            json!({"story": 1, "phase": null}),
+        );
         let drop_1 = change(ChangeKind::StoryDrop, json!({"story": 1}));
+        let declare_2 = change(
+            ChangeKind::StoryDeclare,
+            json!({"sentence": "s", "status": "active", "phase": 2}),
+        );
         let judged = |change: &ChangeSubmission, progress: &BTreeMap<u32, PhaseProgress>| {
             judge_progress(change, &a0, progress).map_err(|refusal| answer(&refusal))
         };
@@ -785,12 +813,28 @@ pub(super) mod tests {
                 shipped.value()
             );
         }
-        assert_eq!(judged(&reassign_1, &f1), Ok(()));
+        // A story executing phase 1 served is not shipped, but a complete
+        // phase takes no new story.
+        assert_eq!(judged(&unassign_1, &f1), Ok(()));
         assert_eq!(judged(&drop_1, &f1), Ok(()));
+        for given in [&reassign_1, &declare_2] {
+            assert_eq!(
+                judged(given, &f1),
+                Err(("phase-complete", Some(json!({"phase": 2})))),
+                "{}",
+                given.value()
+            );
+        }
 
         // Completion is judged on its own, not only where execution is.
+        let f2 = f2();
         assert_eq!(
-            judged(&withdraw_1, &f2()),
+            judged(&withdraw_1, &f2),
+            Err(("phase-complete", Some(json!({"phase": 1}))))
+        );
+        // Withdrawing phase 2 would move its story to complete phase 1.
+        assert_eq!(
+            judged(&withdraw_2, &f2),
             Err(("phase-complete", Some(json!({"phase": 1}))))
         );
 
@@ -803,7 +847,9 @@ pub(super) mod tests {
             &reassign_2,
             &drop_2,
             &reassign_1,
+            &unassign_1,
             &drop_1,
+            &declare_2,
         ] {
             assert_eq!(judged(passes, &f0), Ok(()), "{}", passes.value());
         }

@@ -63,7 +63,7 @@ In the component view of [0002](0002-system-design.md) (Figure 4) this area is o
 | PRJ-R10 | A phase's number is assigned when it is declared, as the next whole number, and never changes. Its order is a separate recorded fact, changed by `phase reorder`. Inserting a phase is declaring it and reordering it. Decimal numbers do not exist. | Every reference to a phase in the record stays true forever. | EVD-R2 | Active |
 | PRJ-R11 | One phase declaration shape is used by the start, by `phase declare` and by every later edit: name, goal, detail text, dependencies on other phases, and the stories it serves. Editing records a new declaration and keeps the earlier one. | One shape to validate and serve. | PRJ-R3 | Active |
 | PRJ-R12 | A phase with no execution recorded (declared, context approved, or plans approved) may be withdrawn directly. The owner decides, for each active story it served, the phase it moves to or that it is dropped, and approves the previewed roadmap and story changes. | Scope can shrink, and every promise it carried is accounted for. | PRJ-R4, PRJ-R13 | Active |
-| PRJ-R13 | A phase whose execution has started is withdrawn only after its execution is undone (`phase.undone`, [0011](0011-milestones-landing-undo-pause.md)). Until then `phase withdraw` is refused with `execution-present`, naming the phase and the undo it needs. A complete phase is never withdrawn; the request is refused with `phase-complete`. | Removing a phase from the roadmap must not leave its code in the repository unaccounted for, and finished work stays finished. | SYS-P4 | Active |
+| PRJ-R13 | A phase whose execution has started is withdrawn only after its execution is undone (`phase.undone`, [0011](0011-milestones-landing-undo-pause.md)). Until then `phase withdraw` is refused with `execution-present`, naming the phase and the undo it needs. A complete phase is never withdrawn; the request is refused with `phase-complete`. A complete phase also takes no new story: a `story declare` or `story reassign` into it, or a `phase withdraw` moving a story to it, is refused with `phase-complete`, naming the complete phase. | Removing a phase from the roadmap must not leave its code in the repository unaccounted for, and finished work stays finished. | SYS-P4 | Active |
 | PRJ-R14 | A story's truths may be revised after they were approved, including after a phase that committed the story has started execution. A truth whose text changes gets the next version; an unchanged truth keeps its version; earlier versions are kept. The operation is [0005](0005-context-plans-and-acceptance.md)'s `story truths submit`. | The owner's understanding changes, and the record must follow it without losing history. | EVD-R2 | Active |
 | PRJ-R15 | After a revision, a plan bound to an older truth version is no longer approved for execution; the phase is re-planned before more work runs, and committed code stays. A completion based on older truths stops applying. | Work is measured against the truths in force. | PRJ-R14, PLN-R4, [0007](0007-verification.md) | Active |
 | PRJ-R16 | A revision is refused with `dispatch-active` while a worker is dispatched on a phase that committed the story. | A running worker must finish or be stopped under the truths it was given. | PRJ-R14 | Active |
@@ -181,6 +181,7 @@ When another submission or approval lands between a call's judgement and its tra
   | `no-such-phase` | The phase does not exist | PRJ-R18 |
   | `execution-present` | Execution has started and is not undone (names the phase and the undo) | PRJ-R13 |
   | `phase-complete` | The phase is complete | PRJ-R13 |
+  | `phase-complete` | A story is moved to a complete phase (names that phase) | PRJ-R13 |
   | `story-undecided` | An active story it serves has no decision (names it) | PRJ-R12 |
   | `no-such-phase` | A story is moved to a phase that does not exist | PRJ-R18 |
 
@@ -196,6 +197,7 @@ When another submission or approval lands between a call's judgement and its tra
   | `no-such-phase` | The phase does not exist | PRJ-R18 |
   | `story-not-served` | `edit` on a dropped or excluded story | PRJ-R17 |
   | `story-shipped` | `reassign` or `drop` on a story a complete phase served | PRJ-R13 |
+  | `phase-complete` | `declare` or `reassign` into a complete phase (names it) | PRJ-R13 |
   | `malformed-submission` | Blank sentence or unknown status | PRJ-R3 |
 
 ### backlog reorder
