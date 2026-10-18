@@ -376,8 +376,8 @@ mod tests {
     fn a_served_operations_argument_left_out_of_the_tool_schema_is_caught() {
         // Design 0012: help takes name, schema takes tool and for, instruction
         // and document take identity, all four take part, and capture takes
-        // request_id, kind, text, phase and instruction, and scope-submit takes
-        // request_id and submission.
+        // request_id, kind, text, phase and instruction, and scope-submit and
+        // each change operation take request_id and submission.
         let names = |tool| {
             let schema = input_schema(tool);
             let mut names: Vec<String> = schema["properties"]
@@ -455,11 +455,43 @@ mod tests {
                 "{request_ids:?}"
             );
         }
-        assert!(
-            description(&apply["properties"]["submission"])
-                .ends_with("Taken by scope-submit (required).")
-        );
+        // Each operation's submission has its own shape, so each names only
+        // its own operation.
+        let submissions: Vec<String> = alternatives(&apply["properties"]["submission"])
+            .iter()
+            .map(description)
+            .collect();
+        for taker in [
+            "scope-submit",
+            "project-describe",
+            "phase-declare",
+            "phase-edit",
+            "phase-reorder",
+            "phase-withdraw",
+            "story-declare",
+            "story-edit",
+            "story-reassign",
+            "story-drop",
+            "backlog-reorder",
+        ] {
+            let sentence = format!(" Taken by {taker} (required).");
+            assert!(
+                submissions.iter().any(|d| d.ends_with(&sentence)),
+                "{submissions:?}"
+            );
+        }
+        assert_eq!(submissions.len(), 11, "{submissions:?}");
         assert!(description(&apply["properties"]["phase"]).ends_with("Taken by capture."));
+    }
+
+    #[test]
+    fn a_submission_served_without_the_object_type_is_caught() {
+        let apply = input_schema(Tool::Apply);
+        let submissions = alternatives(&apply["properties"]["submission"]);
+        assert_eq!(submissions.len(), 11, "{submissions:?}");
+        for submission in &submissions {
+            assert_eq!(submission["type"], "object", "{submission}");
+        }
     }
 
     #[test]

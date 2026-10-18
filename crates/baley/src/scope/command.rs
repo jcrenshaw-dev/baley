@@ -1,22 +1,29 @@
 //! The owner's scope commands (design 0004 sections 5 and 6, D-20): `baley
-//! scope approve <digest>` approves the newest start draft as the owner, the
-//! only way scope is approved (D-24), and `baley scope preview|show`, `baley
-//! phase show`, `baley backlog show` and `baley story show` print what the
-//! ledger holds through the same reads as `document`, recording nothing. A
-//! submission comes only from a session, so no command here submits scope.
+//! scope approve <digest>` approves the newest draft of a start or a change
+//! as the owner, the only way scope is approved (D-24); `baley phase
+//! reorder|withdraw`, `baley story reassign|drop` and `baley backlog reorder`
+//! submit the id-only changes as drafts the owner then approves; and `baley
+//! scope preview|show`, `baley phase show`, `baley backlog show` and `baley
+//! story show` print what the ledger holds through the same reads as
+//! `document`, recording nothing. Declarations, edits and `project describe`
+//! come only from a session, since an agent drafts their text.
 //!
 //! Gathering finds the project and opens the ledger; judging, the arguments,
-//! the command an approval is recorded under and what is printed, is done by
-//! the pure functions below. Every text from the ledger is printed as
-//! `escape_debug` writes it, so a recorded line break cannot forge a line.
+//! the commands an approval or a submission is recorded under and what is
+//! printed, is done by the pure functions below. Every text from the ledger
+//! is printed as `escape_debug` writes it, so a recorded line break cannot
+//! forge a line.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use baley_core::capture::NO_SUCH_PHASE;
 use baley_core::policy::recorded::recorded_policy;
-use baley_core::policy::{CONFIG_UNAVAILABLE, SettingsFile};
-use baley_core::scope::{UNKNOWN_DRAFT, judge_submission};
+use baley_core::policy::{CONFIG_UNAVAILABLE, EffectivePolicy, SettingsFile};
+use baley_core::scope::{
+    ChangeKind, ChangeSubmission, Destination, START_KIND, ScopeChange, UNKNOWN_DRAFT,
+    judge_change, judge_submission,
+};
 use baley_store::{
     Actor, Admin, CanonicalError, Command, CommandKind, Hash, ProjectId, RequestId, request_digest,
 };
@@ -30,13 +37,14 @@ use crate::ledger::clock::SystemClock;
 use crate::ledger::commands::new_request_id;
 use crate::ledger::display::{self, Render};
 use crate::mcp::prepare::{LEDGER_UNAVAILABLE, NOT_A_PROJECT, PROJECT_NOT_IN_LEDGER};
+use crate::mcp::scope::change_kind;
 use crate::providers::identity;
 use crate::scope::approve::{self, APPROVE_COMMAND};
 use crate::scope::read::{
     self, BacklogStory, Detail, Draft, NO_SUCH_STORY, Phase, PreviewError, ReadError, Roadmap,
     Story,
 };
-use crate::scope::submit;
+use crate::scope::submit::{self, SUBMIT_COMMAND};
 use crate::{init, policy_step, settings};
 
 /// `baley scope`: the owner's approval of scope, and its reads.
@@ -48,17 +56,18 @@ pub struct ScopeArgs {
 
 #[derive(clap::Subcommand, Debug)]
 enum ScopeCommand {
-    /// Approve the newest start draft by its digest, as the owner. Phase
-    /// numbers and story ids are assigned now and printed.
+    /// Approve the newest draft of a start or a change by its digest, as the
+    /// owner. Phase numbers and story ids a start or a declaration gets are
+    /// assigned now, and the phases and stories it changed are printed.
     Approve {
-        /// The draft's digest from the scope-submit receipt: 64 lowercase
+        /// The draft's digest from its submission's receipt: 64 lowercase
         /// hexadecimal characters.
         #[arg(value_name = "DIGEST")]
         digest: String,
     },
     /// Print a draft by its digest, exactly as an approval would record it.
     Preview {
-        /// The draft's digest from the scope-submit receipt.
+        /// The draft's digest from its submission's receipt.
         #[arg(value_name = "DIGEST")]
         digest: String,
     },
@@ -66,7 +75,8 @@ enum ScopeCommand {
     Show,
 }
 
-/// `baley phase`: the owner's reads of accepted phases.
+/// `baley phase`: the owner's reads of accepted phases, and the phase
+/// changes the owner submits.
 #[derive(clap::Args, Debug)]
 pub struct PhaseArgs {
     #[command(subcommand)]
@@ -81,9 +91,27 @@ enum PhaseCommand {
         #[arg(value_name = "NUMBER")]
         number: String,
     },
+    /// Submit a new phase order as a draft, which the owner approves with
+    /// baley scope approve.
+    Reorder {
+        /// Every phase in the roadmap's order, each once, in the new order.
+        #[arg(value_name = "NUMBER", required = true)]
+        numbers: Vec<String>,
+    },
+    /// Submit a phase's withdrawal as a draft, which the owner approves with
+    /// baley scope approve.
+    Withdraw {
+        /// The phase to withdraw.
+        #[arg(value_name = "NUMBER")]
+        number: String,
+        /// One decision for each story the phase serves: STORY=PHASE moves
+        /// the story to that phase, STORY=drop drops it.
+        #[arg(value_name = "DECISION")]
+        decisions: Vec<String>,
+    },
 }
 
-/// `baley backlog`: the owner's read of the backlog.
+/// `baley backlog`: the owner's read of the backlog, and its reorder.
 #[derive(clap::Args, Debug)]
 pub struct BacklogArgs {
     #[command(subcommand)]
@@ -94,9 +122,18 @@ pub struct BacklogArgs {
 enum BacklogCommand {
     /// Print every accepted story in priority order.
     Show,
+    /// Submit a new priority order as a draft, which the owner approves with
+    /// baley scope approve.
+    Reorder {
+        /// Every active and deferred story's id, each once, in the new
+        /// priority order.
+        #[arg(value_name = "ID", required = true)]
+        ids: Vec<String>,
+    },
 }
 
-/// `baley story`: the owner's reads of accepted stories.
+/// `baley story`: the owner's reads of accepted stories, and the story
+/// changes the owner submits.
 #[derive(clap::Args, Debug)]
 pub struct StoryArgs {
     #[command(subcommand)]
@@ -108,6 +145,23 @@ enum StoryCommand {
     /// Print one accepted story.
     Show {
         /// The story id Baley assigned at approval.
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Submit a story's move to another phase or the backlog as a draft,
+    /// which the owner approves with baley scope approve.
+    Reassign {
+        /// The story to move.
+        #[arg(value_name = "ID")]
+        id: String,
+        /// The phase number that serves it now, or backlog.
+        #[arg(value_name = "PHASE")]
+        to: String,
+    },
+    /// Submit a story's drop as a draft, which the owner approves with baley
+    /// scope approve.
+    Drop {
+        /// The story to drop.
         #[arg(value_name = "ID")]
         id: String,
     },
@@ -128,27 +182,40 @@ pub fn run(args: ScopeArgs) -> ExitCode {
 
 /// Runs one `baley phase` command and prints its result.
 pub fn run_phase(args: PhaseArgs) -> ExitCode {
-    let PhaseCommand::Show { number } = args.command;
-    emit(judge_number(&number).and_then(|number| {
-        reading(|store, project| phase_render(read::phase(store, project, number)))
-    }))
+    emit(match args.command {
+        PhaseCommand::Show { number } => judge_number(&number).and_then(|number| {
+            reading(|store, project| phase_render(read::phase(store, project, number)))
+        }),
+        PhaseCommand::Reorder { numbers } => submit_change(&ChangeWords::PhaseReorder(numbers)),
+        PhaseCommand::Withdraw { number, decisions } => {
+            submit_change(&ChangeWords::PhaseWithdraw {
+                phase: number,
+                decisions,
+            })
+        }
+    })
 }
 
 /// Runs one `baley backlog` command and prints its result.
 pub fn run_backlog(args: BacklogArgs) -> ExitCode {
-    let BacklogCommand::Show = args.command;
-    emit(reading(|store, project| {
-        backlog_render(read::backlog(store, project))
-    }))
+    emit(match args.command {
+        BacklogCommand::Show => {
+            reading(|store, project| backlog_render(read::backlog(store, project)))
+        }
+        BacklogCommand::Reorder { ids } => submit_change(&ChangeWords::BacklogReorder(ids)),
+    })
 }
 
 /// Runs one `baley story` command and prints its result.
 pub fn run_story(args: StoryArgs) -> ExitCode {
-    let StoryCommand::Show { id } = args.command;
-    emit(
-        judge_number(&id)
+    emit(match args.command {
+        StoryCommand::Show { id } => judge_number(&id)
             .and_then(|id| reading(|store, project| story_render(read::story(store, project, id)))),
-    )
+        StoryCommand::Reassign { id, to } => {
+            submit_change(&ChangeWords::StoryReassign { story: id, to })
+        }
+        StoryCommand::Drop { id } => submit_change(&ChangeWords::StoryDrop(id)),
+    })
 }
 
 fn emit(result: Result<Render, Render>) -> ExitCode {
@@ -244,40 +311,7 @@ fn approve(digest: &str) -> Result<Render, Render> {
     let project = &checkout.project;
     let judged =
         approve::judge(&store, project, digest).map_err(|answer| answer_render(&answer))?;
-
-    let reads = policy_step::gather(
-        &checkout.folders.config,
-        &checkout.root,
-        checkout.working.as_ref(),
-        &mut crate::process::System,
-    );
-    let policy = policy_step::build(&reads, None).map_err(|e| Render::refusal(e.to_string()))?;
-    let recorded =
-        recorded_policy(&checkout.root, &policy).map_err(|e| Render::refusal(e.to_string()))?;
-    let site = Site {
-        root: &checkout.root,
-        policy: &policy,
-        path: &recorded.checkout,
-    };
-    gather_and_admit(
-        &store,
-        project,
-        &site,
-        &mut crate::process::System,
-        new_request_id(),
-        &SystemClock::now(),
-        None,
-    )
-    .map_err(|e| display::entry_error(&e, &project.0))?;
-    let version = policy_step::step(
-        &store,
-        project,
-        &recorded,
-        new_request_id(),
-        &SystemClock::now(),
-        None,
-    )
-    .map_err(|e| display::store_error(&e, Some(&project.0)))?;
+    let (policy, version) = admitted(&store, &checkout)?;
 
     let owner = identity::owner(identity::owner_name(&policy), &mut crate::process::System)
         .map_err(Render::refusal)?;
@@ -293,15 +327,83 @@ fn approve(digest: &str) -> Result<Render, Render> {
     Ok(answer_render(&submit::answer(recorded, &store)))
 }
 
+/// One of the owner's change commands: the words are judged before anything
+/// is read, and the change is checked against accepted scope before checkout
+/// admission and the policy step, so a refused change records nothing at all.
+/// It is then recorded as the owner under the version in force, in a
+/// transaction that confirms the scope the check read has not moved (D-09).
+fn submit_change(words: &ChangeWords) -> Result<Render, Render> {
+    let change = command_change(words)?;
+    let checkout = checkout()?;
+    let store = open(&checkout)?;
+    let project = &checkout.project;
+    let read = submit::check_change(&store, project, &change)
+        .map_err(|answer| submission_render(&answer))?;
+    let (_, version) = admitted(&store, &checkout)?;
+
+    let command = submit_command(
+        project,
+        version,
+        change.digest(),
+        new_request_id(),
+        &SystemClock::now(),
+    )
+    .map_err(|e| Render::refusal(e.to_string()))?;
+    let recorded = submit::record_change(&store, &command, &change, Some(&read));
+    Ok(submission_render(&submit::answer(recorded, &store)))
+}
+
+/// Checkout admission and then the policy step, in the order every owner
+/// command that records scope runs them, so approvals and submissions cannot
+/// drift apart. It gives the policy built with no host, which names the
+/// owner, and the version the step returned.
+fn admitted(store: &SqliteStore, checkout: &Checkout) -> Result<(EffectivePolicy, u64), Render> {
+    let project = &checkout.project;
+    let reads = policy_step::gather(
+        &checkout.folders.config,
+        &checkout.root,
+        checkout.working.as_ref(),
+        &mut crate::process::System,
+    );
+    let policy = policy_step::build(&reads, None).map_err(|e| Render::refusal(e.to_string()))?;
+    let recorded =
+        recorded_policy(&checkout.root, &policy).map_err(|e| Render::refusal(e.to_string()))?;
+    let site = Site {
+        root: &checkout.root,
+        policy: &policy,
+        path: &recorded.checkout,
+    };
+    gather_and_admit(
+        store,
+        project,
+        &site,
+        &mut crate::process::System,
+        new_request_id(),
+        &SystemClock::now(),
+        None,
+    )
+    .map_err(|e| display::entry_error(&e, &project.0))?;
+    let version = policy_step::step(
+        store,
+        project,
+        &recorded,
+        new_request_id(),
+        &SystemClock::now(),
+        None,
+    )
+    .map_err(|e| display::store_error(&e, Some(&project.0)))?;
+    Ok((policy, version))
+}
+
 /// The digest argument: exactly 64 lowercase hexadecimal characters, as
-/// the scope-submit receipt writes it. Anything else is refused before the
+/// a submission's receipt writes it. Anything else is refused before the
 /// ledger is read, and the refusal echoes none of it.
 pub(crate) fn judge_digest(text: &str) -> Result<Hash, Render> {
     let lowercase_hex =
         text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     lowercase_hex.then(|| Hash::from_hex(text)).flatten().ok_or_else(|| {
         Render::refusal(
-            "a draft digest is 64 lowercase hexadecimal characters, as the scope-submit receipt gives it",
+            "a draft digest is 64 lowercase hexadecimal characters, as a submission's receipt gives it",
         )
     })
 }
@@ -316,8 +418,48 @@ pub(crate) fn approve_command(
     request_id: RequestId,
     at: &str,
 ) -> Result<Command, CanonicalError> {
+    owner_command(
+        APPROVE_COMMAND,
+        project,
+        policy_version,
+        digest,
+        request_id,
+        at,
+    )
+}
+
+/// The command a command-line submission is recorded under, built as an
+/// approval's is: the owner as actor, no caller, Baley's clock and
+/// `policy_version` in both its digest and itself. The version is safe in the
+/// digest because a command-line request id is always fresh.
+pub(crate) fn submit_command(
+    project: &ProjectId,
+    policy_version: u64,
+    digest: Hash,
+    request_id: RequestId,
+    at: &str,
+) -> Result<Command, CanonicalError> {
+    owner_command(
+        SUBMIT_COMMAND,
+        project,
+        policy_version,
+        digest,
+        request_id,
+        at,
+    )
+}
+
+/// The owner's command of `kind` over the draft `digest`.
+fn owner_command(
+    kind: &str,
+    project: &ProjectId,
+    policy_version: u64,
+    digest: Hash,
+    request_id: RequestId,
+    at: &str,
+) -> Result<Command, CanonicalError> {
     let request = request_digest(&json!({
-        "kind": APPROVE_COMMAND,
+        "kind": kind,
         "project": project.0,
         "actor": "owner",
         "policy_version": policy_version,
@@ -326,7 +468,7 @@ pub(crate) fn approve_command(
     }))?;
     Ok(Command {
         project: project.clone(),
-        kind: CommandKind(APPROVE_COMMAND.into()),
+        kind: CommandKind(kind.into()),
         request_id,
         digest: request,
         scope: Vec::new(),
@@ -337,9 +479,11 @@ pub(crate) fn approve_command(
     })
 }
 
-/// What the approval's answer prints: the receipt's three lines, exit 0; a
-/// refusal as `<code>: <reason>`, exit 2, a stale draft's naming the first
-/// part that differs; a failure the same way, exit 1.
+/// What the approval's answer prints, a start's or a change's: the receipt's
+/// three lines, an empty list as `none`, exit 0; a refusal as `<code>:
+/// <reason>`, exit 2, a stale draft's naming the first part that differs, a
+/// malformed submission's naming its section and field; a failure the same
+/// way, exit 1.
 pub(crate) fn answer_render(answer: &Value) -> Render {
     let text = |name: &str| escaped(answer[name].as_str().unwrap_or_default());
     let joined = |name: &str| {
@@ -347,11 +491,19 @@ pub(crate) fn answer_render(answer: &Value) -> Render {
             .as_array()
             .map(|items| items.iter().map(Value::to_string).collect())
             .unwrap_or_default();
-        numbers.join(", ")
+        or_none(numbers)
     };
     let mut line = format!("{}: {}", text("code"), text("reason"));
-    if let Some(path) = answer["details"]["path"].as_str() {
+    let details = &answer["details"];
+    if let Some(path) = details["path"].as_str() {
         line = format!("{line}: {}", escaped(path));
+    }
+    if let (Some(section), Some(field)) = (details["section"].as_str(), details["field"].as_str()) {
+        line = format!(
+            "{line}: section {}, field {}",
+            escaped(section),
+            escaped(field)
+        );
     }
     match answer["status"].as_str() {
         Some("ok") => Render {
@@ -378,6 +530,26 @@ pub(crate) fn answer_render(answer: &Value) -> Render {
     }
 }
 
+/// What a command-line submission's answer prints: the receipt as two lines,
+/// the draft and the command that approves it, exit 0, since the owner
+/// approves at the terminal what they just submitted; a refusal or a failure
+/// as `answer_render` prints them.
+pub(crate) fn submission_render(answer: &Value) -> Render {
+    if answer["status"] != "ok" {
+        return answer_render(answer);
+    }
+    let text = |name: &str| escaped(answer[name].as_str().unwrap_or_default());
+    printed(vec![
+        format!(
+            "submitted the {} draft {} at {}",
+            text("kind"),
+            text("digest"),
+            text("recorded_at")
+        ),
+        format!("approve it with: baley scope approve {}", text("digest")),
+    ])
+}
+
 /// Text from the ledger as `escape_debug` writes it, so a recorded line
 /// break or terminal escape cannot forge or rewrite a line of output.
 fn escaped(text: &str) -> String {
@@ -392,6 +564,112 @@ pub(crate) fn judge_number(text: &str) -> Result<u32, Render> {
         .ok()
         .filter(|number| *number > 0)
         .ok_or_else(|| Render::refusal("phase numbers and story ids are whole numbers from 1"))
+}
+
+/// The words of one of the owner's change commands, as clap gives them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChangeWords {
+    /// `phase reorder <NUMBER>...`.
+    PhaseReorder(Vec<String>),
+    /// `phase withdraw <NUMBER> [<STORY>=<PHASE>|<STORY>=drop]...`.
+    PhaseWithdraw {
+        phase: String,
+        decisions: Vec<String>,
+    },
+    /// `story reassign <ID> <PHASE>|backlog`.
+    StoryReassign { story: String, to: String },
+    /// `story drop <ID>`.
+    StoryDrop(String),
+    /// `backlog reorder <ID>...`.
+    BacklogReorder(Vec<String>),
+}
+
+/// What a withdrawal decision's target is written as for a story to drop,
+/// and a reassignment's for the backlog.
+const DROP_WORD: &str = "drop";
+const BACKLOG_WORD: &str = "backlog";
+
+/// The kind a command's words name and the members a session sends for the
+/// same change, decisions in the order given. Every number is judged by
+/// `judge_number`, and a word in another form is refused before the ledger
+/// is read, echoing none of it.
+pub(crate) fn change_members(words: &ChangeWords) -> Result<(ChangeKind, Value), Render> {
+    let numbers = |items: &[String]| {
+        items
+            .iter()
+            .map(|item| judge_number(item))
+            .collect::<Result<Vec<u32>, Render>>()
+    };
+    Ok(match words {
+        ChangeWords::PhaseReorder(order) => {
+            (ChangeKind::PhaseReorder, json!({"order": numbers(order)?}))
+        }
+        ChangeWords::BacklogReorder(order) => (
+            ChangeKind::BacklogReorder,
+            json!({"order": numbers(order)?}),
+        ),
+        ChangeWords::PhaseWithdraw { phase, decisions } => {
+            let decisions = decisions
+                .iter()
+                .map(|decision| decision_members(decision))
+                .collect::<Result<Vec<Value>, Render>>()?;
+            (
+                ChangeKind::PhaseWithdraw,
+                json!({"phase": judge_number(phase)?, "decisions": decisions}),
+            )
+        }
+        ChangeWords::StoryReassign { story, to } => {
+            let story = judge_number(story)?;
+            let phase = if to == BACKLOG_WORD {
+                Value::Null
+            } else {
+                to.parse::<u32>()
+                    .ok()
+                    .filter(|number| *number > 0)
+                    .map(Value::from)
+                    .ok_or_else(|| {
+                        Render::refusal(
+                            "a story is reassigned to a phase number from 1 or to backlog",
+                        )
+                    })?
+            };
+            (
+                ChangeKind::StoryReassign,
+                json!({"story": story, "phase": phase}),
+            )
+        }
+        ChangeWords::StoryDrop(story) => (
+            ChangeKind::StoryDrop,
+            json!({"story": judge_number(story)?}),
+        ),
+    })
+}
+
+/// One withdrawal decision, `<STORY>=<PHASE>` or `<STORY>=drop`, as the
+/// member a session sends.
+fn decision_members(decision: &str) -> Result<Value, Render> {
+    let form = || {
+        Render::refusal(
+            "a withdrawal decision is a story id, =, and the phase number that serves it instead or drop",
+        )
+    };
+    let (story, to) = decision.split_once('=').ok_or_else(form)?;
+    let story = judge_number(story)?;
+    let to = if to == DROP_WORD {
+        Value::from(DROP_WORD)
+    } else {
+        Value::from(judge_number(to).map_err(|_| form())?)
+    };
+    Ok(json!({"story": story, "to": to}))
+}
+
+/// The change a command's words make, judged as a session's members are, so
+/// the same change has the same draft digest from either surface. A judgement
+/// refusal prints as the session would get it.
+pub(crate) fn command_change(words: &ChangeWords) -> Result<ChangeSubmission, Render> {
+    let (kind, members) = change_members(words)?;
+    judge_change(kind, &members)
+        .map_err(|refusal| answer_render(&submit::submission_refused(&refusal)))
 }
 
 /// What `scope preview` prints for a draft read: the header, the
@@ -420,15 +698,24 @@ pub(crate) fn preview_render(read: Result<Draft, PreviewError>) -> Render {
         Err(PreviewError::Unreadable(reason)) => return unavailable(&reason),
         Err(PreviewError::Store(error)) => return display::store_error(&error, None),
     };
-    let Ok(submission) = judge_submission(&preview.submission) else {
-        return unavailable("the draft is recorded, but its body no longer judges as a submission");
-    };
     let mut lines = vec![format!(
         "draft {} ({}), submitted {}",
         preview.digest.to_hex(),
         escaped(&preview.kind),
         escaped(&preview.recorded_at)
     )];
+    if preview.kind != START_KIND {
+        return match change_lines(&preview.kind, &preview.submission) {
+            Some(members) => {
+                lines.extend(members);
+                printed(lines)
+            }
+            None => unavailable("the draft is recorded, but its body no longer judges as a change"),
+        };
+    }
+    let Ok(submission) = judge_submission(&preview.submission) else {
+        return unavailable("the draft is recorded, but its body no longer judges as a submission");
+    };
     let description = &submission.description;
     describe(
         &mut lines,
@@ -460,6 +747,102 @@ pub(crate) fn preview_render(read: Result<Draft, PreviewError>) -> Render {
         ]);
     }
     printed(lines)
+}
+
+/// A change draft's members as its preview prints them, in its shape's
+/// member order: the change as submitted, which is what the owner approves.
+/// The body's `kind` must be the draft's and the rest must judge under it;
+/// otherwise there is nothing to print.
+fn change_lines(kind: &str, body: &Value) -> Option<Vec<String>> {
+    let kind = change_kind(kind)?;
+    let mut members = body.as_object()?.clone();
+    if members.remove("kind")? != kind.as_str() {
+        return None;
+    }
+    let change = judge_change(kind, &Value::Object(members)).ok()?.change;
+    let mut lines = Vec::new();
+    match change {
+        ScopeChange::ProjectDescribe(description) => describe(
+            &mut lines,
+            &description.what,
+            &description.core_value,
+            &description.constraints,
+        ),
+        ScopeChange::PhaseDeclare(phase) => lines.extend([
+            format!("name: {}", escaped(&phase.name)),
+            format!("goal: {}", escaped(&phase.goal)),
+            format!("detail: {}", escaped(&phase.detail)),
+            format!("depends on: {}", list(&phase.depends_on)),
+            format!("stories: {}", list(&phase.stories)),
+            format!(
+                "position: {}",
+                phase
+                    .position
+                    .map_or_else(|| "last".to_owned(), |at| at.to_string())
+            ),
+        ]),
+        ScopeChange::PhaseEdit { phase, fields } => {
+            lines.push(format!("phase: {phase}"));
+            let texts = [
+                ("name", &fields.name),
+                ("goal", &fields.goal),
+                ("detail", &fields.detail),
+            ];
+            for (name, text) in texts {
+                if let Some(text) = text {
+                    lines.push(format!("{name}: {}", escaped(text)));
+                }
+            }
+            let numbers = [
+                ("depends on", &fields.depends_on),
+                ("stories", &fields.stories),
+            ];
+            for (name, numbers) in numbers {
+                if let Some(numbers) = numbers {
+                    lines.push(format!("{name}: {}", list(numbers)));
+                }
+            }
+        }
+        ScopeChange::PhaseReorder { order } | ScopeChange::BacklogReorder { order } => {
+            lines.push(format!("order: {}", list(&order)));
+        }
+        ScopeChange::PhaseWithdraw { phase, decisions } => {
+            lines.push(format!("phase: {phase}"));
+            if decisions.is_empty() {
+                lines.push("decisions: none".into());
+            }
+            for decision in decisions {
+                lines.push(match decision.to {
+                    Destination::Phase(to) => format!("story {}: to phase {to}", decision.story),
+                    Destination::Drop => format!("story {}: dropped", decision.story),
+                });
+            }
+        }
+        ScopeChange::StoryDeclare {
+            sentence,
+            status,
+            phase,
+        } => lines.extend([
+            format!("sentence: {}", escaped(&sentence)),
+            format!("status: {}", status.as_str()),
+            format!("phase: {}", served_by(phase)),
+        ]),
+        ScopeChange::StoryEdit { story, sentence } => lines.extend([
+            format!("story: {story}"),
+            format!("sentence: {}", escaped(&sentence)),
+        ]),
+        ScopeChange::StoryReassign { story, phase } => lines.extend([
+            format!("story: {story}"),
+            format!("phase: {}", served_by(phase)),
+        ]),
+        ScopeChange::StoryDrop { story } => lines.push(format!("story: {story}")),
+    }
+    Some(lines)
+}
+
+/// The phase a change serves a story by, or `backlog`.
+fn served_by(phase: Option<u32>) -> String {
+    phase.map_or_else(|| "backlog".to_owned(), |phase| phase.to_string())
 }
 
 /// What `scope show` prints for a roadmap read: the description, the phases
@@ -681,6 +1064,145 @@ mod tests {
         assert_eq!(build(4).digest, command.digest);
     }
 
+    fn words(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_command_line_change_drafted_under_another_digest_than_the_sessions_is_caught() {
+        use crate::mcp::operations::{Lookup, Tool, lookup};
+        use crate::mcp::scope::judge_change_arguments;
+
+        let pairs = [
+            (
+                "phase-reorder",
+                json!({"order": [2, 1]}),
+                ChangeWords::PhaseReorder(words(&["2", "1"])),
+                "5c4b7650561455ec8d35bfe5be8bdca5b426260fb4ada5934e9a2b0ea0de6619",
+            ),
+            (
+                "phase-withdraw",
+                json!({"phase": 2, "decisions": [{"story": 2, "to": 1}]}),
+                ChangeWords::PhaseWithdraw {
+                    phase: "2".into(),
+                    decisions: words(&["2=1"]),
+                },
+                "830b6dfddb927b4f83c616d5fc67832b672c1af4c686d8ea578f17e01fcdf0b6",
+            ),
+            (
+                "story-reassign",
+                json!({"story": 3, "phase": 2}),
+                ChangeWords::StoryReassign {
+                    story: "3".into(),
+                    to: "2".into(),
+                },
+                "2bcc41abfda87adb37ecabf2bc999506930b94ae01523a53aeeba53fd4f39937",
+            ),
+            (
+                "story-drop",
+                json!({"story": 3}),
+                ChangeWords::StoryDrop("3".into()),
+                "9094033334d2919f56c4bee9f9245d34a8901f297e882a519a7ce167e82b1099",
+            ),
+            (
+                "backlog-reorder",
+                json!({"order": [2, 1, 3]}),
+                ChangeWords::BacklogReorder(words(&["2", "1", "3"])),
+                "078d2bae8750974615966455e5cad318e124b4496836c02f7cec12b2a65f8e0b",
+            ),
+        ];
+        for (operation, submission, said, digest) in pairs {
+            let session = judge_change_arguments(&json!({"operation": operation,
+                "request_id": R, "submission": submission}))
+            .unwrap();
+            let typed = command_change(&said).unwrap_or_else(|e| panic!("{operation}: {e:?}"));
+            assert_eq!(session.change.digest().to_hex(), digest, "{operation}");
+            assert_eq!(typed.digest().to_hex(), digest, "{operation}");
+        }
+        assert_eq!(lookup(Tool::Apply, Some("scope-approve")), Lookup::Unknown);
+    }
+
+    #[test]
+    fn a_command_line_change_argument_passed_on_unjudged_is_caught() {
+        let refused = [
+            (ChangeWords::PhaseReorder(words(&["0"])), "0"),
+            (ChangeWords::PhaseReorder(words(&["2", "x"])), "x"),
+            (
+                ChangeWords::PhaseWithdraw {
+                    phase: "2".into(),
+                    decisions: words(&["2-1"]),
+                },
+                "2-1",
+            ),
+            (
+                ChangeWords::PhaseWithdraw {
+                    phase: "2".into(),
+                    decisions: words(&["2=later"]),
+                },
+                "later",
+            ),
+            (
+                ChangeWords::StoryReassign {
+                    story: "3".into(),
+                    to: "later".into(),
+                },
+                "later",
+            ),
+        ];
+        for (said, argument) in refused {
+            let refusal = change_members(&said).expect_err(argument);
+            assert_eq!((refusal.code, refusal.error), (2, true), "{argument}");
+            assert!(
+                refusal.lines.iter().all(|line| !line.contains(argument)),
+                "{argument}: {:?}",
+                refusal.lines
+            );
+        }
+
+        let backlog = ChangeWords::StoryReassign {
+            story: "3".into(),
+            to: "backlog".into(),
+        };
+        assert_eq!(
+            change_members(&backlog).unwrap(),
+            (
+                ChangeKind::StoryReassign,
+                json!({"story": 3, "phase": null})
+            )
+        );
+        let drop = ChangeWords::PhaseWithdraw {
+            phase: "2".into(),
+            decisions: words(&["2=drop"]),
+        };
+        assert_eq!(
+            change_members(&drop).unwrap(),
+            (
+                ChangeKind::PhaseWithdraw,
+                json!({"phase": 2, "decisions": [{"story": 2, "to": "drop"}]})
+            )
+        );
+    }
+
+    #[test]
+    fn a_command_line_submission_built_without_the_owner_or_its_policy_version_is_caught() {
+        let project = ProjectId(PROJECT.into());
+        let digest =
+            Hash::from_hex("5c4b7650561455ec8d35bfe5be8bdca5b426260fb4ada5934e9a2b0ea0de6619")
+                .unwrap();
+        let build =
+            |version| submit_command(&project, version, digest, RequestId(R.into()), T).unwrap();
+        let command = build(4);
+        assert_eq!(command.project, project);
+        assert_eq!(command.kind, CommandKind("scope.submit".into()));
+        assert_eq!(command.actor, Actor::Owner);
+        assert_eq!(command.caller, None);
+        assert_eq!(command.policy_version, 4);
+        assert_eq!(command.recorded_at, T);
+        assert_eq!(command.request_id, RequestId(R.into()));
+        assert_ne!(build(5).digest, command.digest);
+        assert_eq!(build(4).digest, command.digest);
+    }
+
     #[test]
     fn an_approval_receipt_or_refusal_printed_with_other_lines_or_exit_is_caught() {
         let receipt = json!({"status": "ok", "kind": "start", "digest": D, "owner": "Ada Owner",
@@ -722,6 +1244,66 @@ mod tests {
             busy.lines
         );
         assert_eq!((busy.code, busy.error), (1, true));
+    }
+
+    #[test]
+    fn a_malformed_submission_refusal_printed_without_its_section_and_field_is_caught() {
+        let reason = "a field of the submission is missing, blank, of the wrong type, unknown or out of range, so nothing was recorded. The details name it";
+        let malformed = answer_render(&json!({"status": "refused",
+            "code": "malformed-submission", "reason": reason, "slot": "submission",
+            "details": {"section": "decisions", "field": "decisions[1].story"}}));
+        assert_eq!(
+            malformed.lines,
+            [format!(
+                "malformed-submission: {reason}: section decisions, field decisions[1].story"
+            )]
+        );
+        assert_eq!((malformed.code, malformed.error), (2, true));
+    }
+
+    /// W's digest: phase 2 withdrawn with its story moved to phase 1.
+    const W: &str = "830b6dfddb927b4f83c616d5fc67832b672c1af4c686d8ea578f17e01fcdf0b6";
+
+    #[test]
+    fn a_change_approval_receipt_printed_without_its_phases_and_stories_is_caught() {
+        let at = "2026-10-13T09:00:07Z";
+        let withdrawn = answer_render(&json!({"status": "ok", "kind": "phase-withdraw",
+            "digest": W, "owner": "Ada Owner", "at": at, "phases": [2], "stories": [2]}));
+        assert_eq!(
+            withdrawn.lines,
+            [
+                format!("approved the phase-withdraw submission {W} as Ada Owner at {at}"),
+                "phases: 2".into(),
+                "stories: 2".into(),
+            ]
+        );
+        assert_eq!((withdrawn.code, withdrawn.error), (0, false));
+
+        let reordered = answer_render(&json!({"status": "ok", "kind": "phase-reorder",
+            "digest": W, "owner": "Ada Owner", "at": at, "phases": [], "stories": []}));
+        assert_eq!(reordered.lines[1..], ["phases: none", "stories: none"]);
+        assert_eq!((reordered.code, reordered.error), (0, false));
+    }
+
+    #[test]
+    fn a_submission_receipt_printed_without_its_digest_or_the_approve_command_is_caught() {
+        let at = "2026-10-13T09:00:06Z";
+        let submitted = submission_render(&json!({"status": "ok", "digest": W,
+            "kind": "phase-withdraw", "recorded_at": at}));
+        assert_eq!(
+            submitted.lines,
+            [
+                format!("submitted the phase-withdraw draft {W} at {at}"),
+                format!("approve it with: baley scope approve {W}"),
+            ]
+        );
+        assert_eq!((submitted.code, submitted.error), (0, false));
+
+        let reason = "phase 2 serves story 2 and the withdrawal gives it no decision, so nothing was recorded";
+        let refused = submission_render(&json!({"status": "refused", "code": "story-undecided",
+            "reason": reason, "slot": "submission", "details": {"story": 2}}));
+        assert_eq!(refused.lines, [format!("story-undecided: {reason}")]);
+        assert_eq!((refused.code, refused.error), (2, true));
     }
 
     fn text(value: &str) -> String {
@@ -808,6 +1390,74 @@ mod tests {
                 "  stories: approve",
             ]
         );
+    }
+
+    #[test]
+    fn a_change_preview_that_leaves_out_what_the_owner_approves_is_caught() {
+        use crate::scope::fixtures::{change, d1, e_b, p, w};
+
+        let previewed = |kind: ChangeKind, value: &Value| {
+            let held = change(kind, value);
+            let digest = held.digest();
+            let render = preview_render(Ok(Draft::Held(Preview {
+                kind: text(kind.as_str()),
+                digest,
+                seq: 7,
+                recorded_at: text(T),
+                submission: held.value().clone(),
+            })));
+            let header = format!(
+                "draft {} ({}), submitted {T}",
+                digest.to_hex(),
+                kind.as_str()
+            );
+            (render, header)
+        };
+        let cases = [
+            (
+                ChangeKind::PhaseWithdraw,
+                w(),
+                vec!["phase: 2", "story 2: to phase 1"],
+            ),
+            (
+                ChangeKind::PhaseDeclare,
+                p(),
+                vec![
+                    "name: Reports",
+                    "goal: The owner reads progress",
+                    "detail: Progress from the ledger",
+                    "depends on: 1",
+                    "stories: none",
+                    "position: last",
+                ],
+            ),
+            (
+                ChangeKind::PhaseEdit,
+                e_b(),
+                vec!["phase: 2", "goal: The owner approves every change"],
+            ),
+            (
+                ChangeKind::ProjectDescribe,
+                d1(),
+                vec![
+                    "what: A ledger for agent work",
+                    "core value: Nothing moves on an unproven claim",
+                    "constraint: One binary",
+                    "constraint: No server",
+                ],
+            ),
+            (
+                ChangeKind::StoryReassign,
+                json!({"story": 3, "phase": null}),
+                vec!["story: 3", "phase: backlog"],
+            ),
+        ];
+        for (kind, value, members) in cases {
+            let (render, header) = previewed(kind, &value);
+            let mut expected = vec![header.as_str()];
+            expected.extend(members);
+            assert_eq!(shown(&render), expected, "{}", kind.as_str());
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@ use baley_store::{
 };
 use serde_json::{Map, Value, json};
 
-use super::event::PHASE_DECLARED;
+use super::event::{PHASE_DECLARED, PHASE_WITHDRAWN};
 use super::mark_purged;
 
 /// The view's name.
@@ -33,7 +33,7 @@ const SEQ_FIELD: &str = "seq";
 pub fn phase_spec() -> ViewSpec {
     ViewSpec {
         name: PHASE_VIEW.into(),
-        version: 2,
+        version: 3,
         key: vec![FieldSpec {
             name: NUMBER_FIELD.into(),
             kind: FieldKind::Integer,
@@ -62,15 +62,22 @@ pub fn phase_key(number: u32) -> DocKey {
     DocKey(vec![KeyValue::Integer(i64::from(number))])
 }
 
-/// Keeps the `phase` view current from `phase.declared`.
+/// Keeps the `phase` view current from `phase.declared` and
+/// `phase.withdrawn`.
 ///
 /// A document holds the phase's number, name, goal, dependencies, story
 /// ids, status `declared`, the approving digest, the declaration's time
 /// and sequence, and the hex hash of its detail body, never the detail
 /// text. The sequence finds the detail's `phase_detail` document, which
-/// knows whether this project purged it. A later
-/// declaration of the same number replaces the document. Context, plans,
-/// execution and completion are later builds' events.
+/// knows whether this project purged it. A later declaration of the same
+/// number replaces the document. A withdrawal keeps it with every field
+/// and status `withdrawn`, so the phase is still found by its number.
+///
+/// The document's `stories` are those its latest declaration listed.
+/// `story.reassigned` and `story.dropped` name no earlier phase, so the
+/// stories a phase serves after either are the `roadmap` view's, which
+/// keeps every phase and story in one document. Context, plans, execution
+/// and completion are later builds' events.
 pub struct PhaseProjector {
     spec: ViewSpec,
 }
@@ -94,7 +101,7 @@ impl Projector for PhaseProjector {
     }
 
     fn handles(&self) -> &[&str] {
-        &[PHASE_DECLARED]
+        &[PHASE_DECLARED, PHASE_WITHDRAWN]
     }
 
     fn keys(&self, event: &Event) -> Vec<DocKey> {
@@ -104,11 +111,12 @@ impl Projector for PhaseProjector {
             .collect()
     }
 
-    // The document is replaced whole, so the one already there is not read.
+    // A declaration replaces the document whole, so only a withdrawal reads
+    // the one already there.
     fn apply(
         &self,
         event: &Event,
-        _documents: &[(DocKey, Value)],
+        documents: &[(DocKey, Value)],
     ) -> Result<Vec<Change>, ProjectorError> {
         let refuse = |message: &str| {
             ProjectorError(format!(
@@ -121,6 +129,17 @@ impl Projector for PhaseProjector {
         };
         let fault = || refuse("a member is missing or of the wrong type");
         let number = declared_number(&event.payload).ok_or_else(fault)?;
+        if event.type_name == PHASE_WITHDRAWN {
+            let Some((key, Value::Object(document))) = documents.first() else {
+                return Err(refuse("the withdrawn phase has no document"));
+            };
+            let mut document = document.clone();
+            document.insert(STATUS_FIELD.into(), json!("withdrawn"));
+            return Ok(vec![Change::Put {
+                key: key.clone(),
+                body: Value::Object(document),
+            }]);
+        }
         let detail = payload
             .get("detail")
             .and_then(PayloadRef::from_value)
@@ -261,7 +280,8 @@ impl Projector for PhaseDetailProjector {
     }
 }
 
-/// The phase number a `phase.declared` payload names, if it names one.
+/// The phase number a `phase.declared` or `phase.withdrawn` payload names,
+/// if it names one.
 fn declared_number(payload: &Value) -> Option<u32> {
     let number = payload.get(NUMBER_FIELD)?.as_u64()?;
     u32::try_from(number).ok()
@@ -290,7 +310,7 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::super::event::phase_declared_payload;
+    use super::super::event::{phase_declared_payload, phase_withdrawn_payload};
     use super::*;
 
     const AT: &str = "2026-10-13T09:00:09Z";
@@ -424,7 +444,7 @@ mod tests {
     #[test]
     fn a_phase_view_changed_by_a_submission_or_lacking_its_status_index_is_caught() {
         let projector = PhaseProjector::new();
-        assert_eq!(projector.handles(), ["phase.declared"]);
+        assert_eq!(projector.handles(), ["phase.declared", "phase.withdrawn"]);
         let spec = projector.spec();
         assert_eq!(
             spec.key,
@@ -449,5 +469,57 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_withdrawn_phase_document_deleted_or_left_declared_is_caught() {
+        let detail = PayloadRef {
+            hash: Hash([0xab; 32]),
+            bytes: 18,
+            class: RetentionClass::Record,
+        };
+        let declared = event(
+            15,
+            "phase.declared",
+            phase_declared_payload(
+                2,
+                "Approval",
+                "The owner approves",
+                &detail,
+                &[1],
+                &[2],
+                Hash([0x5c; 32]),
+            ),
+        );
+        let withdrawn = event(
+            20,
+            "phase.withdrawn",
+            phase_withdrawn_payload(2, Hash([0x7e; 32])),
+        );
+        let projector = PhaseProjector::new();
+        let key = DocKey(vec![KeyValue::Integer(2)]);
+        let [Change::Put { body: held, .. }] = &projector.apply(&declared, &[]).unwrap()[..] else {
+            panic!("one document for the declaration");
+        };
+        assert_eq!(projector.keys(&withdrawn), std::slice::from_ref(&key));
+        assert_eq!(
+            projector
+                .apply(&withdrawn, &[(key.clone(), held.clone())])
+                .unwrap(),
+            [Change::Put {
+                key,
+                body: json!({"number": 2, "name": "Approval", "goal": "The owner approves",
+                    "detail": "ab".repeat(32), "depends_on": [1], "stories": [2],
+                    "status": "withdrawn", "submission": "5c".repeat(32), "declared_at": AT,
+                    "declared_seq": 15}),
+            }]
+        );
+        assert_eq!(phase_spec().version, 3);
+        let nothing = event(
+            21,
+            "phase.withdrawn",
+            phase_withdrawn_payload(7, Hash([0x7e; 32])),
+        );
+        assert!(projector.apply(&nothing, &[]).is_err());
     }
 }

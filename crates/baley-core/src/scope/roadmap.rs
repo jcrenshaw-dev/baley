@@ -6,7 +6,10 @@ use baley_store::{
 };
 use serde_json::{Map, Value, json};
 
-use super::event::{PHASE_DECLARED, PHASE_REORDERED, PROJECT_DESCRIBED, STORY_DECLARED};
+use super::event::{
+    PHASE_DECLARED, PHASE_REORDERED, PHASE_WITHDRAWN, PROJECT_DESCRIBED, STORY_CORRECTED,
+    STORY_DECLARED, STORY_DROPPED, STORY_REASSIGNED, STORY_REPRIORITIZED,
+};
 
 /// The view's name.
 pub const ROADMAP_VIEW: &str = "roadmap";
@@ -21,7 +24,7 @@ const PROJECT_KEY: &str = "project";
 pub fn roadmap_spec() -> ViewSpec {
     ViewSpec {
         name: ROADMAP_VIEW.into(),
-        version: 1,
+        version: 2,
         key: vec![FieldSpec {
             name: KEY_FIELD.into(),
             kind: FieldKind::Text,
@@ -45,6 +48,14 @@ pub fn roadmap_key() -> DocKey {
 /// included. A later declaration of a number or id already held replaces
 /// that entry in place. Submissions and approvals themselves are not
 /// handled: accepted scope changes only on the events an approval records.
+///
+/// A phase's `stories` are the stories it serves now, and each story's
+/// `phase` the phase serving it, kept in step by every event that moves a
+/// story. A withdrawn phase keeps its entry with status `withdrawn`; it
+/// leaves the order only on the `phase.reordered` its approval records. A
+/// dropped story keeps its entry with status `dropped` and no phase, and a
+/// reprioritization puts the stories it lists first and every other story
+/// after them in its current relative order.
 pub struct RoadmapProjector {
     spec: ViewSpec,
 }
@@ -75,6 +86,11 @@ impl Projector for RoadmapProjector {
             STORY_DECLARED,
             PHASE_DECLARED,
             PHASE_REORDERED,
+            PHASE_WITHDRAWN,
+            STORY_CORRECTED,
+            STORY_REASSIGNED,
+            STORY_DROPPED,
+            STORY_REPRIORITIZED,
         ]
     }
 
@@ -102,6 +118,7 @@ impl Projector for RoadmapProjector {
             None => empty(),
         };
         let fault = || refuse("a member is missing or of the wrong type");
+        let no_story = || refuse("the story is not declared");
         match event.type_name.as_str() {
             PROJECT_DESCRIBED => {
                 let description = json!({
@@ -114,10 +131,7 @@ impl Projector for RoadmapProjector {
             }
             STORY_DECLARED => {
                 let id = whole(payload, "id").ok_or_else(fault)?;
-                let phase = match payload.get("phase") {
-                    Some(Value::Null) => Value::Null,
-                    _ => json!(whole(payload, "phase").ok_or_else(fault)?),
-                };
+                let phase = phase_or_null(payload).ok_or_else(fault)?;
                 let entry = json!({
                     "id": id,
                     "sentence": text(payload, "sentence").ok_or_else(fault)?,
@@ -131,15 +145,24 @@ impl Projector for RoadmapProjector {
                     None => stories.push(entry),
                 }
                 raise(&mut document, "highest_story", id);
+                // At a start the phase is declared after its stories and
+                // lists them itself.
+                if let Some(entry) = phase
+                    .as_u64()
+                    .and_then(|number| phase_mut(&mut document, number))
+                {
+                    serve(entry, id);
+                }
             }
             PHASE_DECLARED => {
                 let number = whole(payload, "number").ok_or_else(fault)?;
+                let listed = wholes(payload, "stories").ok_or_else(fault)?;
                 let entry = json!({
                     "number": number,
                     "name": text(payload, "name").ok_or_else(fault)?,
                     "goal": text(payload, "goal").ok_or_else(fault)?,
                     "depends_on": wholes(payload, "depends_on").ok_or_else(fault)?,
-                    "stories": wholes(payload, "stories").ok_or_else(fault)?,
+                    "stories": listed,
                     "status": "declared",
                 });
                 let phases = entries(&mut document, "phases").ok_or_else(fault)?;
@@ -155,10 +178,60 @@ impl Projector for RoadmapProjector {
                     phases.insert(at, entry);
                 }
                 raise(&mut document, "highest_phase", number);
+                // An edit that leaves a story out returns it to the backlog.
+                for story in entries(&mut document, "stories").ok_or_else(fault)? {
+                    let listed = story["id"].as_u64().is_some_and(|id| listed.contains(&id));
+                    if listed {
+                        story["phase"] = json!(number);
+                    } else if story["phase"] == number {
+                        story["phase"] = Value::Null;
+                    }
+                }
             }
             PHASE_REORDERED => {
                 let order = wholes(payload, "order").ok_or_else(fault)?;
                 document.insert("order".into(), json!(order));
+            }
+            PHASE_WITHDRAWN => {
+                let number = whole(payload, "number").ok_or_else(fault)?;
+                let entry = phase_mut(&mut document, number)
+                    .ok_or_else(|| refuse("the phase is not declared"))?;
+                entry["status"] = json!("withdrawn");
+            }
+            STORY_CORRECTED => {
+                let id = whole(payload, "id").ok_or_else(fault)?;
+                let sentence = text(payload, "sentence").ok_or_else(fault)?;
+                let status = text(payload, "status").ok_or_else(fault)?;
+                let story = story_mut(&mut document, id).ok_or_else(no_story)?;
+                story["sentence"] = json!(sentence);
+                story["status"] = json!(status);
+            }
+            STORY_REASSIGNED => {
+                let id = whole(payload, "id").ok_or_else(fault)?;
+                let status = text(payload, "status").ok_or_else(fault)?;
+                let phase = phase_or_null(payload).ok_or_else(fault)?;
+                unserve(&mut document, id);
+                let story = story_mut(&mut document, id).ok_or_else(no_story)?;
+                story["status"] = json!(status);
+                story["phase"] = phase.clone();
+                if let Some(number) = phase.as_u64() {
+                    let entry = phase_mut(&mut document, number)
+                        .ok_or_else(|| refuse("the story's new phase is not declared"))?;
+                    serve(entry, id);
+                }
+            }
+            STORY_DROPPED => {
+                let id = whole(payload, "id").ok_or_else(fault)?;
+                let status = text(payload, "status").ok_or_else(fault)?;
+                unserve(&mut document, id);
+                let story = story_mut(&mut document, id).ok_or_else(no_story)?;
+                story["status"] = json!(status);
+                story["phase"] = Value::Null;
+            }
+            STORY_REPRIORITIZED => {
+                let order = wholes(payload, "order").ok_or_else(fault)?;
+                let stories = entries(&mut document, "stories").ok_or_else(fault)?;
+                *stories = reprioritized(std::mem::take(stories), &order).ok_or_else(no_story)?;
             }
             _ => return Err(refuse("not a roadmap event")),
         }
@@ -166,6 +239,59 @@ impl Projector for RoadmapProjector {
             key: roadmap_key(),
             body: Value::Object(document),
         }])
+    }
+}
+
+/// The stories `order` lists first, in its order, then every other story
+/// in its current relative order. None when the order names a story not
+/// held.
+pub(super) fn reprioritized(mut stories: Vec<Value>, order: &[u64]) -> Option<Vec<Value>> {
+    let mut ordered = Vec::with_capacity(stories.len());
+    for id in order {
+        let at = stories.iter().position(|story| story["id"] == *id)?;
+        ordered.push(stories.remove(at));
+    }
+    ordered.extend(stories);
+    Some(ordered)
+}
+
+/// The payload's `phase`: a number, or null for the backlog.
+fn phase_or_null(payload: &Map<String, Value>) -> Option<Value> {
+    match payload.get("phase") {
+        Some(Value::Null) => Some(Value::Null),
+        _ => whole(payload, "phase").map(|phase| json!(phase)),
+    }
+}
+
+/// The entry of phase `number`.
+fn phase_mut(document: &mut Map<String, Value>, number: u64) -> Option<&mut Value> {
+    entries(document, "phases")?
+        .iter_mut()
+        .find(|phase| phase["number"] == number)
+}
+
+/// The entry of story `id`.
+fn story_mut(document: &mut Map<String, Value>, id: u64) -> Option<&mut Value> {
+    entries(document, "stories")?
+        .iter_mut()
+        .find(|story| story["id"] == id)
+}
+
+/// Lists story `id` last among the phase entry's stories, unless listed.
+fn serve(phase: &mut Value, id: u64) {
+    if let Some(stories) = phase.get_mut("stories").and_then(Value::as_array_mut)
+        && !stories.iter().any(|story| *story == id)
+    {
+        stories.push(json!(id));
+    }
+}
+
+/// Takes story `id` off every phase entry that lists it.
+fn unserve(document: &mut Map<String, Value>, id: u64) {
+    for phase in entries(document, "phases").into_iter().flatten() {
+        if let Some(stories) = phase.get_mut("stories").and_then(Value::as_array_mut) {
+            stories.retain(|story| *story != id);
+        }
     }
 }
 
@@ -233,7 +359,9 @@ mod tests {
     use serde_json::json;
 
     use super::super::event::{
-        described_payload, phase_declared_payload, phase_reordered_payload, story_declared_payload,
+        described_payload, phase_declared_payload, phase_reordered_payload,
+        phase_withdrawn_payload, story_corrected_payload, story_declared_payload,
+        story_dropped_payload, story_reassigned_payload, story_reprioritized_payload,
     };
     use super::super::submission::{Description, StoryStatus};
     use super::*;
@@ -410,7 +538,12 @@ mod tests {
                 "project.described",
                 "story.declared",
                 "phase.declared",
-                "phase.reordered"
+                "phase.reordered",
+                "phase.withdrawn",
+                "story.corrected",
+                "story.reassigned",
+                "story.dropped",
+                "story.reprioritized"
             ]
         );
     }
@@ -460,5 +593,194 @@ mod tests {
             [(3, "Teammates see the backlog"), (1, "New sentence")]
         );
         assert_eq!(document["highest_story"], 3);
+    }
+
+    /// The approved S1's events: stories 1 and 2 active in phases 1 and 2,
+    /// story 3 deferred in the backlog, phase 2 depending on phase 1, and
+    /// the order `[1, 2]`.
+    fn approved_s1() -> Vec<Event> {
+        let description = Description {
+            what: "A ledger for agent work".into(),
+            core_value: "Nothing moves on an unproven claim".into(),
+            constraints: vec!["One binary".into()],
+        };
+        vec![
+            event(
+                "project.described",
+                10,
+                described_payload(&description, digest()),
+            ),
+            story(
+                11,
+                1,
+                "Every step is recorded",
+                StoryStatus::Active,
+                Some(1),
+            ),
+            story(
+                12,
+                2,
+                "The owner approves scope",
+                StoryStatus::Active,
+                Some(2),
+            ),
+            story(
+                13,
+                3,
+                "Teammates see the backlog",
+                StoryStatus::Deferred,
+                None,
+            ),
+            phase(14, 1, "Records", "Steps are recorded", &[], &[1]),
+            phase(15, 2, "Approval", "The owner approves", &[1], &[2]),
+            event(
+                "phase.reordered",
+                16,
+                phase_reordered_payload(&[1, 2], digest()),
+            ),
+        ]
+    }
+
+    /// The document after the approved S1, then `events`.
+    fn after_s1(events: Vec<Event>) -> Value {
+        let mut all = approved_s1();
+        all.extend(events);
+        fold(&all)
+    }
+
+    fn reassigned(seq: u64, id: u32, phase: Option<u32>) -> Event {
+        event(
+            "story.reassigned",
+            seq,
+            story_reassigned_payload(id, StoryStatus::Active, phase, digest()),
+        )
+    }
+
+    fn dropped(seq: u64, id: u32) -> Event {
+        event("story.dropped", seq, story_dropped_payload(id, digest()))
+    }
+
+    /// The entry of phase `number`.
+    fn phase_entry(document: &Value, number: u64) -> Value {
+        document["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|phase| phase["number"] == number)
+            .cloned()
+            .unwrap_or_else(|| panic!("phase {number} in {document}"))
+    }
+
+    /// The entry of story `id`.
+    fn story_entry(document: &Value, id: u64) -> Value {
+        document["stories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|story| story["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("story {id} in {document}"))
+    }
+
+    fn story_ids(document: &Value) -> Vec<u64> {
+        document["stories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|story| story["id"].as_u64().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_withdrawn_phase_dropped_from_the_roadmap_or_left_declared_is_caught() {
+        let document = after_s1(vec![
+            event("phase.withdrawn", 17, phase_withdrawn_payload(2, digest())),
+            reassigned(18, 2, Some(1)),
+            event(
+                "phase.reordered",
+                19,
+                phase_reordered_payload(&[1], digest()),
+            ),
+        ]);
+        let withdrawn = phase_entry(&document, 2);
+        assert_eq!(withdrawn["status"], "withdrawn");
+        assert_eq!(withdrawn["stories"], json!([]));
+        assert_eq!(phase_entry(&document, 1)["stories"], json!([1, 2]));
+        assert_eq!(story_entry(&document, 2)["phase"], 1);
+        assert_eq!(document["order"], json!([1]));
+        assert_eq!(document["highest_phase"], 2);
+    }
+
+    #[test]
+    fn a_reassigned_or_dropped_story_left_on_its_old_phase_is_caught() {
+        let mut events = vec![reassigned(17, 3, Some(2))];
+        let first = after_s1(events.clone());
+        assert_eq!(story_entry(&first, 3)["status"], "active");
+        assert_eq!(story_entry(&first, 3)["phase"], 2);
+        assert_eq!(phase_entry(&first, 2)["stories"], json!([2, 3]));
+
+        events.push(dropped(18, 2));
+        let second = after_s1(events.clone());
+        assert_eq!(story_entry(&second, 2)["status"], "dropped");
+        assert_eq!(story_entry(&second, 2)["phase"], Value::Null);
+        assert_eq!(phase_entry(&second, 2)["stories"], json!([3]));
+
+        events.push(reassigned(19, 1, None));
+        let third = after_s1(events);
+        assert_eq!(story_entry(&third, 1)["phase"], Value::Null);
+        assert_eq!(phase_entry(&third, 1)["stories"], json!([]));
+    }
+
+    #[test]
+    fn a_corrected_story_moved_or_given_another_status_is_caught() {
+        let document = after_s1(vec![event(
+            "story.corrected",
+            17,
+            story_corrected_payload(
+                3,
+                "Teammates read the backlog",
+                StoryStatus::Deferred,
+                digest(),
+            ),
+        )]);
+        assert_eq!(story_ids(&document), [1, 2, 3]);
+        let story = story_entry(&document, 3);
+        assert_eq!(story["sentence"], "Teammates read the backlog");
+        assert_eq!(story["status"], "deferred");
+        assert_eq!(story["phase"], Value::Null);
+    }
+
+    #[test]
+    fn a_reprioritized_roadmap_misordered_or_losing_a_dropped_story_is_caught() {
+        let document = after_s1(vec![
+            dropped(17, 3),
+            event(
+                "story.reprioritized",
+                18,
+                story_reprioritized_payload(&[2, 1], digest()),
+            ),
+        ]);
+        assert_eq!(story_ids(&document), [2, 1, 3]);
+        assert_eq!(story_entry(&document, 3)["status"], "dropped");
+    }
+
+    #[test]
+    fn a_declaration_leaving_a_released_story_committed_or_a_declared_story_unserved_is_caught() {
+        let mut events = vec![phase(17, 2, "Approval", "The owner approves", &[1], &[])];
+        let released = after_s1(events.clone());
+        assert_eq!(story_entry(&released, 2)["phase"], Value::Null);
+        assert_eq!(phase_entry(&released, 2)["stories"], json!([]));
+
+        events.push(story(
+            18,
+            4,
+            "Reports show progress",
+            StoryStatus::Active,
+            Some(2),
+        ));
+        let declared = after_s1(events);
+        assert_eq!(story_ids(&declared), [1, 2, 3, 4]);
+        assert_eq!(story_entry(&declared, 4)["phase"], 2);
+        assert_eq!(phase_entry(&declared, 2)["stories"], json!([4]));
     }
 }

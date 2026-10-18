@@ -30,13 +30,13 @@ enum Command {
     Init(baley::init::InitArgs),
     /// List, add, remove and import the model names Baley accepts per host and provider, and print a provider's fetch command.
     Models(baley::models::ModelsArgs),
-    /// Approve a start submission by its digest as the owner, preview a draft, or show the accepted roadmap.
+    /// Approve a scope submission by its digest as the owner, preview a draft, or show the accepted roadmap.
     Scope(baley::scope::command::ScopeArgs),
-    /// Show one accepted phase with its detail text.
+    /// Show one accepted phase with its detail text, or submit a phase reorder or withdrawal for approval.
     Phase(baley::scope::command::PhaseArgs),
-    /// Show the backlog's stories in priority order.
+    /// Show the backlog's stories in priority order, or submit a backlog reorder for approval.
     Backlog(baley::scope::command::BacklogArgs),
-    /// Show one accepted story.
+    /// Show one accepted story, or submit a story reassignment or drop for approval.
     Story(baley::scope::command::StoryArgs),
     /// Check the update source and stage a newer version behind the stable path.
     Update(baley::update::command::UpdateArgs),

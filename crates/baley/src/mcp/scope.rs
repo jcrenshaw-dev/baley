@@ -1,12 +1,16 @@
-//! `scope-submit` on `baley_apply`: a start submission judged whole and
-//! recorded as a draft the owner can approve by its digest (design 0004
-//! section 5). A submission refused on its content, or after the project's
-//! start was approved, records nothing.
+//! `scope-submit` and the ten change operations on `baley_apply`: a start or
+//! a change judged whole and recorded as a draft the owner approves by its
+//! digest at the terminal (design 0004 section 5, ADR 0044). A start refused
+//! on its content or after the project's start was approved, and a change
+//! refused on its content or by accepted scope, record nothing. No operation
+//! here approves anything.
 
+use std::cell::RefCell;
 use std::path::Path;
 
-use baley_core::scope::{Submission, SubmissionRefusal, judge_submission};
-use baley_store::{CommandKind, ProjectId, RequestId, request_digest};
+use baley_core::scope::{ChangeKind, ChangeSubmission, Submission, judge_change, judge_submission};
+use baley_store::{Command, CommandKind, Hash, ProjectId, RequestId, request_digest};
+use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -33,6 +37,8 @@ pub struct SubmitShape {
     /// phases in order, each with a `name`, a `goal`, a `detail`,
     /// `depends_on` as positions in `roadmap` counted from 1, and the
     /// `stories` it delivers by label.
+    // Typed as an object in the schema, or a client may send it as a string.
+    #[schemars(with = "serde_json::Map<String, Value>")]
     pub submission: Value,
 }
 
@@ -43,6 +49,101 @@ pub struct SubmitShape {
 enum SubmitCall {
     #[serde(rename = "scope-submit")]
     Submit(SubmitShape),
+}
+
+/// One request shape per change operation, each taking a `request_id` and a
+/// `submission`, and the tagged form their calls arrive in. A spelling is
+/// written once here, beside the kind it names.
+macro_rules! change_shapes {
+    ($($shape:ident, $spelling:literal, $kind:ident, $doc:literal, $submission:literal;)*) => {
+        $(
+            #[doc = $doc]
+            #[derive(Debug, Deserialize, JsonSchema)]
+            #[serde(deny_unknown_fields)]
+            pub struct $shape {
+                /// A fresh UUID for this change in lowercase hyphenated form.
+                /// A retry of the same change sends the same id.
+                pub request_id: String,
+                #[doc = $submission]
+                #[schemars(with = "serde_json::Map<String, Value>")]
+                pub submission: Value,
+            }
+        )*
+
+        /// The kinds a change operation names, in the order `baley_apply`
+        /// lists them. Each operation is spelled as its kind.
+        pub const CHANGE_KINDS: &[ChangeKind] = &[$(ChangeKind::$kind),*];
+
+        #[derive(Deserialize)]
+        #[serde(tag = "operation")]
+        enum ChangeCall {
+            $(
+                #[serde(rename = $spelling)]
+                $kind($shape),
+            )*
+        }
+
+        impl ChangeCall {
+            /// The kind the spelling names, the request id and the submission.
+            fn parts(self) -> (ChangeKind, String, Value) {
+                match self {
+                    $(Self::$kind(shape) => (ChangeKind::$kind, shape.request_id, shape.submission),)*
+                }
+            }
+        }
+    };
+}
+
+change_shapes! {
+    ProjectDescribeShape, "project-describe", ProjectDescribe,
+    "The arguments `project-describe` takes beside its `operation`. Unknown fields are refused.",
+    "The revised project description, as a start's `description` holds it: `what` and `core_value`, each text, and `constraints`, a list of text. Baley adds the change's kind.";
+    PhaseDeclareShape, "phase-declare", PhaseDeclare,
+    "The arguments `phase-declare` takes beside its `operation`. Unknown fields are refused.",
+    "The new phase: `name`, `goal` and `detail`, each text; `depends_on`, the numbers of the phases it depends on; `stories`, the ids of the stories it serves; and `position`, its place in the phase order counted from 1, last when left out. Phases are named by number and stories by id. Baley adds the change's kind.";
+    PhaseEditShape, "phase-edit", PhaseEdit,
+    "The arguments `phase-edit` takes beside its `operation`. Unknown fields are refused.",
+    "The phase to change by its number in `phase`, and only the fields that change, at least one: `name`, `goal` or `detail` as text, `depends_on` as phase numbers and `stories` as story ids. Phases are named by number and stories by id. Baley adds the change's kind.";
+    PhaseReorderShape, "phase-reorder", PhaseReorder,
+    "The arguments `phase-reorder` takes beside its `operation`. Unknown fields are refused.",
+    "`order`, the number of every phase in the roadmap's order, each once, in the new order. Phases are named by number. Baley adds the change's kind.";
+    PhaseWithdrawShape, "phase-withdraw", PhaseWithdraw,
+    "The arguments `phase-withdraw` takes beside its `operation`. Unknown fields are refused.",
+    "`phase`, the number of the phase to withdraw, and `decisions`, one for each story it serves, each with the story's id in `story` and, in `to`, the number of the phase that serves it instead or `drop`. Phases are named by number and stories by id. Baley adds the change's kind.";
+    StoryDeclareShape, "story-declare", StoryDeclare,
+    "The arguments `story-declare` takes beside its `operation`. Unknown fields are refused.",
+    "The new story: `sentence`, its text; `status`, `active`, `deferred` or `excluded`; and `phase`, the number of the phase that serves it, or null for the backlog. Only an active story is served by a phase. Phases are named by number. Baley adds the change's kind.";
+    StoryEditShape, "story-edit", StoryEdit,
+    "The arguments `story-edit` takes beside its `operation`. Unknown fields are refused.",
+    "`story`, the id of the story to correct, and `sentence`, its corrected text. Stories are named by id. Baley adds the change's kind.";
+    StoryReassignShape, "story-reassign", StoryReassign,
+    "The arguments `story-reassign` takes beside its `operation`. Unknown fields are refused.",
+    "`story`, the id of the story to move, and `phase`, the number of the phase that serves it now, or null for the backlog. Phases are named by number and stories by id. Baley adds the change's kind.";
+    StoryDropShape, "story-drop", StoryDrop,
+    "The arguments `story-drop` takes beside its `operation`. Unknown fields are refused.",
+    "`story`, the id of the story to drop. Stories are named by id. Baley adds the change's kind.";
+    BacklogReorderShape, "backlog-reorder", BacklogReorder,
+    "The arguments `backlog-reorder` takes beside its `operation`. Unknown fields are refused.",
+    "`order`, the id of every active and deferred story, each once, in the new priority order. Stories are named by id. Baley adds the change's kind.";
+}
+
+/// The change kind a `baley_apply` spelling names, if it is a change
+/// operation.
+pub fn change_kind(spelling: &str) -> Option<ChangeKind> {
+    CHANGE_KINDS
+        .iter()
+        .copied()
+        .find(|kind| kind.as_str() == spelling)
+}
+
+/// A change call whose arguments passed every check made before
+/// preparation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JudgedChange {
+    /// The write preparation carries into the domain command.
+    pub request: WriteRequest,
+    /// The accepted change.
+    pub change: ChangeSubmission,
 }
 
 /// A submission whose arguments passed every check made before preparation.
@@ -61,20 +162,52 @@ pub struct JudgedSubmission {
 pub fn judge_arguments(arguments: &Value) -> Result<JudgedSubmission, Value> {
     let shape = match serde_json::from_value::<SubmitCall>(arguments.clone()) {
         Ok(SubmitCall::Submit(shape)) => shape,
-        Err(error) => {
-            return Err(
-                Refusal::new("invalid-arguments", bounded(error.to_string()))
-                    .slot("arguments")
-                    .value(),
-            );
-        }
+        Err(error) => return Err(shape_refused(&error)),
     };
-    // One spelling per id, so a retry cannot miss its replay by changing
-    // case or wrapping.
-    let canonical = uuid::Uuid::parse_str(&shape.request_id)
+    let request_id = judge_request_id(shape.request_id)?;
+    let submission = judge_submission(&shape.submission)
+        .map_err(|refusal| submit::submission_refused(&refusal))?;
+    Ok(JudgedSubmission {
+        request: write_request(request_id, submission.digest()),
+        submission,
+    })
+}
+
+/// Judges a change operation's arguments before anything is prepared or
+/// recorded, in `judge_arguments`' order: the shape, then the request id,
+/// then the submission whole under the kind the spelling names. A fault is
+/// the `refused` answer, which records nothing. A fault in the submission is
+/// `malformed-submission`, never `invalid-arguments` (D-08), and a `kind`
+/// the caller sent is one, since the spelling names the kind.
+pub fn judge_change_arguments(arguments: &Value) -> Result<JudgedChange, Value> {
+    let (kind, request_id, submission) =
+        match serde_json::from_value::<ChangeCall>(arguments.clone()) {
+            Ok(call) => call.parts(),
+            Err(error) => return Err(shape_refused(&error)),
+        };
+    let request_id = judge_request_id(request_id)?;
+    let change =
+        judge_change(kind, &submission).map_err(|refusal| submit::submission_refused(&refusal))?;
+    Ok(JudgedChange {
+        request: write_request(request_id, change.digest()),
+        change,
+    })
+}
+
+/// The `invalid-arguments` answer for arguments that do not fit the shape.
+fn shape_refused(error: &serde_json::Error) -> Value {
+    Refusal::new("invalid-arguments", bounded(error.to_string()))
+        .slot("arguments")
+        .value()
+}
+
+/// The request id when it is written in the one spelling a retry repeats,
+/// so a retry cannot miss its replay by changing case or wrapping.
+fn judge_request_id(request_id: String) -> Result<RequestId, Value> {
+    let canonical = uuid::Uuid::parse_str(&request_id)
         .map(|parsed| parsed.hyphenated().to_string())
         .ok();
-    if canonical.as_deref() != Some(shape.request_id.as_str()) {
+    if canonical.as_deref() != Some(request_id.as_str()) {
         return Err(Refusal::new(
             "invalid-arguments",
             "request_id must be a UUID in lowercase hyphenated form, such as 9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f. A retry of the same submission sends the same id",
@@ -82,22 +215,23 @@ pub fn judge_arguments(arguments: &Value) -> Result<JudgedSubmission, Value> {
         .slot("request_id")
         .value());
     }
-    let submission = judge_submission(&shape.submission).map_err(|refusal| refused(&refusal))?;
-    // The content digest stands for the submission, so the same content
-    // under the same id replays and changed content is a reused id.
+    Ok(RequestId(request_id))
+}
+
+/// The write a scope submission prepares. The draft digest stands for the
+/// content, and for a change its kind too, so the same content under the same
+/// id replays and other content, or another kind, is a reused id.
+fn write_request(request_id: RequestId, draft: Hash) -> WriteRequest {
     let digest = request_digest(&json!({
         "command": SUBMIT_COMMAND,
-        "submission": submission.digest().to_hex(),
+        "submission": draft.to_hex(),
     }))
     .expect("text is canonical");
-    Ok(JudgedSubmission {
-        request: WriteRequest {
-            kind: CommandKind(SUBMIT_COMMAND.into()),
-            request_id: RequestId(shape.request_id),
-            digest,
-        },
-        submission,
-    })
+    WriteRequest {
+        kind: CommandKind(SUBMIT_COMMAND.into()),
+        request_id,
+        digest,
+    }
 }
 
 /// Serde's text for a shape fault, cut to the echo limit with a closing
@@ -115,29 +249,6 @@ fn bounded(text: String) -> String {
     format!("{}{CUT}", &text[..end])
 }
 
-/// The `refused` answer for a submission judged unacceptable, with the
-/// fault's place in its details. Positions are counted from 1.
-fn refused(refusal: &SubmissionRefusal) -> Value {
-    let (reason, details) = match refusal {
-        SubmissionRefusal::Malformed { section, field } => (
-            "a field of the submission is missing, blank, of the wrong type, unknown or out of range, so nothing was recorded. The details name it",
-            json!({"section": section, "field": field}),
-        ),
-        SubmissionRefusal::StoryDoubleAssigned { story, phases } => (
-            "a story is listed by two phases, and a story belongs to one phase at most, so nothing was recorded",
-            json!({"story": story, "phases": phases}),
-        ),
-        SubmissionRefusal::DependencyCycle { phases } => (
-            "phases depend on each other in a cycle, so no order can deliver them and nothing was recorded",
-            json!({"phases": phases}),
-        ),
-    };
-    Refusal::new(refusal.code(), reason)
-        .slot("submission")
-        .details(details)
-        .value()
-}
-
 /// Serves one `scope-submit` call for the session's `preparation`: the
 /// arguments are judged first, then the write is prepared with the
 /// start-once read as its own check, so a start already approved ends the
@@ -149,42 +260,86 @@ pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
         Ok(judged) => judged,
         Err(refusal) => return refusal,
     };
+    let check = |store: &SqliteStore, project: &ProjectId| submit::start_once(store, project);
+    match prepared(preparation, &judged.request, &check) {
+        Ok((store, command)) => {
+            submit::answer(submit::record(store, &command, &judged.submission), store)
+        }
+        Err(answer) => answer,
+    }
+}
+
+/// Serves one change call for the session's `preparation`: the arguments are
+/// judged first, then the write is prepared with the change checked against
+/// accepted scope as its own check, so a change scope rules out ends the call
+/// before checkout admission and the policy step and records nothing. Then
+/// the change is recorded in its own transaction, which confirms the scope
+/// the check read has not moved. A request the ledger already holds skips the
+/// check and is answered from its record. An answer that ends preparation is
+/// returned as it is.
+pub fn serve_change(arguments: &Value, preparation: &Preparation) -> Value {
+    let judged = match judge_change_arguments(arguments) {
+        Ok(judged) => judged,
+        Err(refusal) => return refusal,
+    };
+    // Kept for the recording to confirm. A replay skips the check and keeps
+    // none, and the store answers it from its record.
+    let read = RefCell::new(None);
+    let check = |store: &SqliteStore, project: &ProjectId| {
+        let checked = submit::check_change(store, project, &judged.change)?;
+        *read.borrow_mut() = Some(checked);
+        Ok(())
+    };
+    match prepared(preparation, &judged.request, &check) {
+        Ok((store, command)) => {
+            let read = read.borrow();
+            submit::answer(
+                submit::record_change(store, &command, &judged.change, read.as_ref()),
+                store,
+            )
+        }
+        Err(answer) => answer,
+    }
+}
+
+/// Prepares a scope write for the session with `check` as its own check,
+/// asked against the session's ledger. It gives the ledger and the command to
+/// record under, or the answer preparation ended with.
+fn prepared<'a>(
+    preparation: &'a Preparation,
+    request: &WriteRequest,
+    check: &dyn Fn(&SqliteStore, &ProjectId) -> Result<(), Value>,
+) -> Result<(&'a SqliteStore, Command), Value> {
     let ledger = preparation.ledger.as_deref();
     // With no ledger, preparation fails at the project check, before any
     // settings are read from the config folder or the check is asked.
     let config = ledger.map_or(Path::new(""), |ledger| ledger.config.as_path());
     let check = |project: &ProjectId| match ledger {
-        Some(ledger) => submit::start_once(&ledger.store, project),
+        Some(ledger) => check(&ledger.store, project),
         None => Err(failed(
             LEDGER_UNAVAILABLE,
             "the write was checked without a ledger",
             PLACE_LEDGER,
         )),
     };
-    let prepared = match prepare_checked(
+    let prepared = prepare_checked(
         ledger.map(|ledger| &ledger.store),
         &preparation.caller,
-        &judged.request,
+        request,
         config,
         preparation.host,
         &preparation.at,
         &mut crate::process::System,
         &check,
-    ) {
-        Ok(prepared) => prepared,
-        Err(answer) => return answer,
-    };
-    let (Some(ledger), Some(command)) = (ledger, prepared.command) else {
-        return failed(
+    )?;
+    match (ledger, prepared.command) {
+        (Some(ledger), Some(command)) => Ok((&ledger.store, command)),
+        _ => Err(failed(
             LEDGER_UNAVAILABLE,
             "the write was prepared without a ledger or a command",
             PLACE_LEDGER,
-        );
-    };
-    submit::answer(
-        submit::record(&ledger.store, &command, &judged.submission),
-        &ledger.store,
-    )
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +407,87 @@ mod tests {
         assert_eq!(judged(reversed).request.digest, minimal.request.digest);
         assert_eq!(minimal.request.kind, CommandKind("scope.submit".into()));
         assert_eq!(minimal.request.request_id, RequestId(R1.into()));
+    }
+
+    fn change_call(operation: &str, request_id: &str, submission: Value) -> Value {
+        json!({"operation": operation, "request_id": request_id, "submission": submission})
+    }
+
+    fn change_refused(arguments: &Value) -> Value {
+        let refusal = judge_change_arguments(arguments).expect_err("refused");
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        refusal
+    }
+
+    #[test]
+    fn a_change_operation_judged_as_another_kind_or_taking_a_sent_kind_is_caught() {
+        let digest = |operation| {
+            judge_change_arguments(&change_call(operation, R1, json!({"order": [2, 1]})))
+                .unwrap()
+                .change
+                .digest()
+                .to_hex()
+        };
+        assert_eq!(
+            digest("phase-reorder"),
+            "5c4b7650561455ec8d35bfe5be8bdca5b426260fb4ada5934e9a2b0ea0de6619"
+        );
+        assert_eq!(
+            digest("backlog-reorder"),
+            "cd1d1badf514e109dbb4cf81d97a87ec909b603aabd5876bba434c560c084159"
+        );
+
+        let sent = json!({"kind": "phase-reorder", "order": [2, 1]});
+        let refusal = change_refused(&change_call("phase-reorder", R1, sent));
+        assert_eq!(refusal["code"], "malformed-submission");
+        assert_eq!(refusal["slot"], "submission");
+        assert_eq!(
+            refusal["details"],
+            json!({"section": "kind", "field": "kind"})
+        );
+    }
+
+    #[test]
+    fn a_change_argument_in_another_form_accepted_is_caught() {
+        let order = || json!({"order": [2, 1]});
+        let mut extra = change_call("phase-reorder", R1, order());
+        extra["extra"] = json!(true);
+        let refusal = change_refused(&extra);
+        assert_eq!(refusal["code"], "invalid-arguments");
+        assert_eq!(refusal["slot"], "arguments");
+
+        let upper = change_call(
+            "phase-reorder",
+            "9D0C1B7E-2F4A-4B6C-8D1E-3A5B7C9D0E2F",
+            order(),
+        );
+        let refusal = change_refused(&upper);
+        assert_eq!(refusal["code"], "invalid-arguments");
+        assert_eq!(refusal["slot"], "request_id");
+
+        let none = json!({"operation": "phase-reorder", "request_id": R1});
+        let refusal = change_refused(&none);
+        assert_eq!(refusal["code"], "invalid-arguments");
+        assert_eq!(refusal["slot"], "arguments");
+    }
+
+    #[test]
+    fn a_change_request_digest_that_ignores_the_change_is_caught() {
+        let judged = |operation, order: Value| {
+            judge_change_arguments(&change_call(operation, R1, json!({"order": order})))
+                .unwrap()
+                .request
+        };
+        let first = judged("phase-reorder", json!([2, 1]));
+        let again = judged("phase-reorder", json!([2, 1]));
+        let changed = judged("phase-reorder", json!([1, 2]));
+        let backlog = judged("backlog-reorder", json!([2, 1]));
+        for request in [&first, &again, &changed, &backlog] {
+            assert_eq!(request.kind, CommandKind("scope.submit".into()));
+            assert_eq!(request.request_id, RequestId(R1.into()));
+        }
+        assert_eq!(first.digest, again.digest);
+        assert_ne!(changed.digest, first.digest);
+        assert_ne!(backlog.digest, first.digest);
     }
 }

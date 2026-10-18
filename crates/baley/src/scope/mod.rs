@@ -1,8 +1,9 @@
-//! The scope records of design 0004 over the storage port: a start
-//! submission recorded as a draft, the start-once read every scope write
-//! is checked against first, the draft preview read by digest, the reads of
-//! accepted scope, and the owner's approval of a draft by digest, which only
-//! the command line gives.
+//! The scope records of design 0004 over the storage port: a start or a
+//! change submission recorded as a draft, the start-once read a start is
+//! checked against first, the accepted scope a change is checked against
+//! first, the draft preview read by digest, the reads of accepted scope, and
+//! the owner's approval of a start or change draft by digest, which only the
+//! command line gives.
 
 /// Records one start submission as a draft in its own domain transaction.
 pub mod submit;
@@ -22,11 +23,19 @@ pub(crate) mod fixtures {
     //! submissions are written out as design 0004's start shape, never
     //! produced by the code under test.
 
-    use baley_core::scope::{PROJECT_STREAM, SCOPE_APPROVED, approved_payload, judge_submission};
+    use baley_core::scope::{ChangeKind, ChangeSubmission, judge_change};
+    use baley_core::scope::{
+        PHASE_DECLARED, PHASE_DECLARED_VERSION, PHASE_REORDERED, PHASE_REORDERED_VERSION,
+        PHASE_WITHDRAWN, PHASE_WITHDRAWN_VERSION, PROJECT_STREAM, ROADMAP_STREAM, SCOPE_APPROVED,
+        SCOPE_APPROVED_VERSION, STORY_DROPPED, STORY_DROPPED_VERSION, STORY_REASSIGNED,
+        STORY_REASSIGNED_VERSION, StoryStatus, approved_payload, judge_submission,
+        phase_declared_payload, phase_reordered_payload, phase_withdrawn_payload,
+        story_dropped_payload, story_reassigned_payload,
+    };
     use baley_store::{
         Actor, Admin, Answer, Command, CommandKind, Decision, Event, Hash, HistoryFilter, Ledger,
-        NewEvent, Observed, OutcomeKind, PageRequest, ProjectId, Recorded, RequestId, ServerCaller,
-        StoreError, StreamName,
+        NewEvent, Observed, OutcomeKind, PageRequest, PayloadRef, ProjectId, Recorded, RequestId,
+        ServerCaller, StoreError, StreamName,
     };
     use baley_store_sqlite::SqliteStore;
     use serde_json::{Value, json};
@@ -38,6 +47,12 @@ pub(crate) mod fixtures {
     pub const T1: &str = "2026-10-13T09:00:01Z";
     pub const T2: &str = "2026-10-13T09:00:02Z";
     pub const T3: &str = "2026-10-13T09:00:03Z";
+    pub const T4: &str = "2026-10-13T09:00:04Z";
+    pub const T5: &str = "2026-10-13T09:00:05Z";
+    pub const T6: &str = "2026-10-13T09:00:06Z";
+    pub const T7: &str = "2026-10-13T09:00:07Z";
+    pub const T8: &str = "2026-10-13T09:00:08Z";
+    pub const T9: &str = "2026-10-13T09:00:09Z";
     pub const ID: &str = "6f1c2a4e-8b1d-4c3a-9e2f-0a5b7c9d1e3f";
     /// A second project, for reads that must not see another project's purge.
     pub const ID_B: &str = "7a2d3b5f-9c0e-4f1a-8b2c-3d4e5f6a7b8c";
@@ -45,7 +60,12 @@ pub(crate) mod fixtures {
     pub const R1: &str = "9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f";
     pub const R2: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
     pub const R3: &str = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
+    pub const R4: &str = "5b6c7d8e-9f0a-4b1c-8d2e-3f4a5b6c7d8e";
     pub const R5: &str = "7a8b9c0d-1e2f-4a3b-9c4d-5e6f7a8b9c0d";
+    pub const R6: &str = "6c7d8e9f-0a1b-4c2d-9e3f-4a5b6c7d8e9f";
+    pub const R7: &str = "8e9f0a1b-2c3d-4e4f-8a5b-6c7d8e9f0a1b";
+    pub const R8: &str = "9f0a1b2c-3d4e-4f5a-9b6c-7d8e9f0a1b2c";
+    pub const R9: &str = "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d";
 
     /// The digest of M's canonical JSON, from `sha256sum` over those bytes.
     pub const M_DIGEST: &str = "1b11196b8f9f4ffd5c08a4d97643f80867194c5e1a6d8cc51d2929f8db38d68e";
@@ -84,6 +104,45 @@ pub(crate) mod fixtures {
         let mut s2 = s1();
         s2["roadmap"][1]["goal"] = json!("The owner approves by digest");
         s2
+    }
+
+    /// E_B's digest, from `sha256sum` over its canonical body.
+    pub const E_B_DIGEST: &str = "c95eaf35543ddb6517a592689362c88bb8d10f6b158924207c90833fb5c4ebd6";
+    /// E_B's canonical body, 72 bytes.
+    pub const E_B_CANONICAL: &str =
+        r#"{"goal":"The owner approves every change","kind":"phase-edit","phase":2}"#;
+
+    /// E_A, an edit of phase 1's goal.
+    pub fn e_a() -> Value {
+        json!({"phase": 1, "goal": "Every step is on record"})
+    }
+
+    /// E_A2, a later edit of phase 1's goal.
+    pub fn e_a2() -> Value {
+        json!({"phase": 1, "goal": "Every step is in the ledger"})
+    }
+
+    /// E_B, an edit of phase 2's goal.
+    pub fn e_b() -> Value {
+        json!({"phase": 2, "goal": "The owner approves every change"})
+    }
+
+    /// W, phase 2 withdrawn with its story moved to phase 1.
+    pub fn w() -> Value {
+        json!({"phase": 2, "decisions": [{"story": 2, "to": 1}]})
+    }
+
+    /// P, a new phase depending on phase 1.
+    pub fn p() -> Value {
+        json!({"name": "Reports", "goal": "The owner reads progress",
+            "detail": "Progress from the ledger", "depends_on": [1], "stories": []})
+    }
+
+    /// D1, a revised description.
+    pub fn d1() -> Value {
+        json!({"what": "A ledger for agent work",
+            "core_value": "Nothing moves on an unproven claim",
+            "constraints": ["One binary", "No server"]})
     }
 
     pub fn project() -> ProjectId {
@@ -170,6 +229,47 @@ pub(crate) mod fixtures {
         )
     }
 
+    /// `value` judged whole as a change of `kind`.
+    pub fn change(kind: ChangeKind, value: &Value) -> ChangeSubmission {
+        judge_change(kind, value).unwrap_or_else(|refusal| panic!("{value}: {refusal:?}"))
+    }
+
+    /// The command preparation makes for submitting `change` in `project`
+    /// under `request_id` at `at`, its digest the change's.
+    pub fn change_command(
+        project: &ProjectId,
+        change: &ChangeSubmission,
+        request_id: &str,
+        at: &str,
+    ) -> Command {
+        let request = WriteRequest {
+            kind: CommandKind(SUBMIT_COMMAND.into()),
+            request_id: RequestId(request_id.into()),
+            digest: change.digest(),
+        };
+        prepared_command(project, &request, 0, at, &caller())
+    }
+
+    /// Records `value` as a change of `kind` through the change check and
+    /// the recording, under `request_id` at `at`.
+    pub fn submit_change(
+        store: &SqliteStore,
+        kind: ChangeKind,
+        value: &Value,
+        request_id: &str,
+        at: &str,
+    ) -> Result<Recorded, StoreError> {
+        let change = change(kind, value);
+        let read = crate::scope::submit::check_change(store, &project(), &change)
+            .unwrap_or_else(|refusal| panic!("{value}: {refusal}"));
+        crate::scope::submit::record_change(
+            store,
+            &change_command(&project(), &change, request_id, at),
+            &change,
+            Some(&read),
+        )
+    }
+
     /// Releases `project`'s references to `hash` with `reason`, under a
     /// purge command of the owner's at T3.
     pub fn purge_in(store: &SqliteStore, project: &ProjectId, hash: Hash, reason: &str) {
@@ -240,13 +340,14 @@ pub(crate) mod fixtures {
         crate::scope::approve::record(store, &command, Some(&judged), "Ada Owner").unwrap();
     }
 
-    /// Appends a `scope.approved` of kind `start` under a test command of
-    /// its own, as an approval would leave it.
-    pub fn approve_a_start(store: &SqliteStore, at: &str) {
+    /// Appends `events` under a test command of the owner's with
+    /// `request_id` at `at`, in its own transaction, as an approval or
+    /// another write would leave them.
+    pub fn append(store: &SqliteStore, request_id: &str, at: &str, events: Vec<NewEvent>) {
         let command = Command {
             project: project(),
-            kind: CommandKind("test.approve".into()),
-            request_id: RequestId("2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e".into()),
+            kind: CommandKind("test.append".into()),
+            request_id: RequestId(request_id.into()),
             digest: Hash([0xee; 32]),
             scope: Vec::new(),
             policy_version: 0,
@@ -256,14 +357,9 @@ pub(crate) mod fixtures {
         };
         store
             .transact(&command, &mut |tx| {
-                tx.append(NewEvent {
-                    stream: StreamName(PROJECT_STREAM.into()),
-                    type_name: SCOPE_APPROVED.into(),
-                    type_version: 1,
-                    git: None,
-                    payload: approved_payload(Hash([0x5c; 32]), "start", "Ada Owner", at),
-                    attachments: Vec::new(),
-                })?;
+                for event in events.clone() {
+                    tx.append(event)?;
+                }
                 Ok(Decision {
                     kind: OutcomeKind::Done,
                     answer: json!({"status": "ok"}),
@@ -273,5 +369,99 @@ pub(crate) mod fixtures {
                 })
             })
             .unwrap();
+    }
+
+    /// Appends a `scope.approved` of kind `start` under a test command of
+    /// its own, as an approval would leave it.
+    pub fn approve_a_start(store: &SqliteStore, at: &str) {
+        append(
+            store,
+            "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
+            at,
+            vec![scope_approved(Hash([0x5c; 32]), "start", at)],
+        );
+    }
+
+    /// The submission an appended roadmap event names.
+    const APPENDED: Hash = Hash([0x5c; 32]);
+
+    fn roadmap_event(type_name: &str, type_version: u32, payload: Value) -> NewEvent {
+        NewEvent {
+            stream: StreamName(ROADMAP_STREAM.into()),
+            type_name: type_name.into(),
+            type_version,
+            git: None,
+            payload,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// A `scope.approved` of `digest` and `kind` by `Ada Owner` at `at`.
+    pub fn scope_approved(digest: Hash, kind: &str, at: &str) -> NewEvent {
+        NewEvent {
+            stream: StreamName(PROJECT_STREAM.into()),
+            type_name: SCOPE_APPROVED.into(),
+            type_version: SCOPE_APPROVED_VERSION,
+            git: None,
+            payload: approved_payload(digest, kind, "Ada Owner", at),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// A `phase.withdrawn` of phase `number`.
+    pub fn phase_withdrawn(number: u32) -> NewEvent {
+        roadmap_event(
+            PHASE_WITHDRAWN,
+            PHASE_WITHDRAWN_VERSION,
+            phase_withdrawn_payload(number, APPENDED),
+        )
+    }
+
+    /// A `phase.declared` numbered `number` with `detail`, a body already
+    /// stored, serving no story.
+    pub fn phase_declared(number: u32, detail: PayloadRef) -> NewEvent {
+        NewEvent {
+            attachments: vec![detail.clone()],
+            ..roadmap_event(
+                PHASE_DECLARED,
+                PHASE_DECLARED_VERSION,
+                phase_declared_payload(
+                    number,
+                    "Late",
+                    "Numbered last",
+                    &detail,
+                    &[],
+                    &[],
+                    APPENDED,
+                ),
+            )
+        }
+    }
+
+    /// A `phase.reordered` giving `order`.
+    pub fn phase_reordered(order: &[u32]) -> NewEvent {
+        roadmap_event(
+            PHASE_REORDERED,
+            PHASE_REORDERED_VERSION,
+            phase_reordered_payload(order, APPENDED),
+        )
+    }
+
+    /// A `story.reassigned` making story `id` active in `phase`.
+    pub fn story_reassigned(id: u32, phase: u32) -> NewEvent {
+        roadmap_event(
+            STORY_REASSIGNED,
+            STORY_REASSIGNED_VERSION,
+            story_reassigned_payload(id, StoryStatus::Active, Some(phase), APPENDED),
+        )
+    }
+
+    /// A `story.dropped` of story `id`.
+    pub fn story_dropped(id: u32) -> NewEvent {
+        roadmap_event(
+            STORY_DROPPED,
+            STORY_DROPPED_VERSION,
+            story_dropped_payload(id, APPENDED),
+        )
     }
 }
