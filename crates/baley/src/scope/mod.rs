@@ -48,6 +48,9 @@ pub(crate) mod fixtures {
     pub const T3: &str = "2026-10-13T09:00:03Z";
     pub const T4: &str = "2026-10-13T09:00:04Z";
     pub const T5: &str = "2026-10-13T09:00:05Z";
+    pub const T6: &str = "2026-10-13T09:00:06Z";
+    pub const T7: &str = "2026-10-13T09:00:07Z";
+    pub const T8: &str = "2026-10-13T09:00:08Z";
     pub const ID: &str = "6f1c2a4e-8b1d-4c3a-9e2f-0a5b7c9d1e3f";
     /// A second project, for reads that must not see another project's purge.
     pub const ID_B: &str = "7a2d3b5f-9c0e-4f1a-8b2c-3d4e5f6a7b8c";
@@ -57,6 +60,10 @@ pub(crate) mod fixtures {
     pub const R3: &str = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
     pub const R4: &str = "5b6c7d8e-9f0a-4b1c-8d2e-3f4a5b6c7d8e";
     pub const R5: &str = "7a8b9c0d-1e2f-4a3b-9c4d-5e6f7a8b9c0d";
+    pub const R6: &str = "6c7d8e9f-0a1b-4c2d-9e3f-4a5b6c7d8e9f";
+    pub const R7: &str = "8e9f0a1b-2c3d-4e4f-8a5b-6c7d8e9f0a1b";
+    pub const R8: &str = "9f0a1b2c-3d4e-4f5a-9b6c-7d8e9f0a1b2c";
+    pub const R9: &str = "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d";
 
     /// The digest of M's canonical JSON, from `sha256sum` over those bytes.
     pub const M_DIGEST: &str = "1b11196b8f9f4ffd5c08a4d97643f80867194c5e1a6d8cc51d2929f8db38d68e";
@@ -102,6 +109,16 @@ pub(crate) mod fixtures {
     /// E_B's canonical body, 72 bytes.
     pub const E_B_CANONICAL: &str =
         r#"{"goal":"The owner approves every change","kind":"phase-edit","phase":2}"#;
+
+    /// E_A, an edit of phase 1's goal.
+    pub fn e_a() -> Value {
+        json!({"phase": 1, "goal": "Every step is on record"})
+    }
+
+    /// E_A2, a later edit of phase 1's goal.
+    pub fn e_a2() -> Value {
+        json!({"phase": 1, "goal": "Every step is in the ledger"})
+    }
 
     /// E_B, an edit of phase 2's goal.
     pub fn e_b() -> Value {
