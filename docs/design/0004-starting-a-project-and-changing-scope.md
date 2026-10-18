@@ -385,14 +385,15 @@ stateDiagram-v2
   Withdrawn --> [*]
 ```
 
-*Figure 1. States of a phase as this area sees them. Execution and completion transitions belong to [0006](0006-execution.md) and [0007](0007-verification.md); a withdraw from Executing is refused until `phase.undone` returns it to Planned; Complete is never withdrawn.*
+*Figure 1. States of a phase as this area sees them. Execution and completion transitions belong to [0006](0006-execution.md) and [0007](0007-verification.md); a withdraw from Executing is refused `execution-present` until `phase.undone` returns it to Planned; Complete is never withdrawn and is refused `phase-complete`. A withdrawn phase keeps every record and its `phase` and `roadmap` entries with status `withdrawn`, outside the order, and no change, capture or dependency can name it again. The `phase` view records only Declared and Withdrawn until the context, plan, execution and completion events are recorded.*
 
 ```mermaid
 stateDiagram-v2
   [*] --> Active: story.declared (active)
   [*] --> Deferred: story.declared (deferred)
   [*] --> Excluded: story.declared (excluded)
-  Active --> Active: story.corrected, story.reassigned, story.reprioritized
+  Active --> Active: story.corrected, story.reassigned, story.reprioritized, phase.declared
+  Deferred --> Deferred: story.corrected, story.reprioritized, story.reassigned (to the backlog)
   Deferred --> Active: story.reassigned (given a phase)
   Active --> Dropped: story.dropped
   Deferred --> Dropped: story.dropped
@@ -400,18 +401,19 @@ stateDiagram-v2
   Met --> Active: completion.invalidated
 ```
 
-*Figure 2. States of a story. Excluded and Dropped are final; Met is derived from its phase's completion ([0007](0007-verification.md)).*
+*Figure 2. States of a story. A correction, a reprioritization and a move to the backlog leave an active story active and a deferred one deferred, and a phase declaration that commits or releases an active story leaves it active; giving a deferred story a phase makes it active. Excluded and Dropped are final: a `story edit`, `story reassign` or `story drop` of either is refused `story-not-served`, and neither is in a backlog order. Met is derived from its phase's completion ([0007](0007-verification.md)).*
 
 ```mermaid
 stateDiagram-v2
   [*] --> Newest: scope.submitted
   Newest --> Stale: a newer submission for the same change
   Stale --> Newest: submitted again
-  Newest --> Approved: scope approve with its digest
-  Approved --> [*]
+  Newest --> Approved: baley scope approve with its digest
+  Approved --> Approved: approved again, refused draft-approved
+  Approved --> Newest: submitted again
 ```
 
-*Figure 3. States of a submission. Every submission is recorded as a draft when it is submitted, and its record stays in every state. Only the newest draft of a change can be approved, and only its approval records scope events. The end of a session changes no state. Once a start is approved, approving any other start draft is refused `project-already-started`, and a draft whose body this project purged is never approved.*
+*Figure 3. States of a submission. Every submission is recorded as a draft when it is submitted, and its record stays in every state. The same change is the same kind and target. Only the newest draft of a change can be approved, and only its approval records scope events. An approved change draft is refused `draft-approved` when approved again; the same content submitted again is a fresh draft, which can be approved. The end of a session changes no state. Once a start is approved, approving any other start draft is refused `project-already-started`, and no start is submitted again, since a start submitted then is refused the same way. A draft whose body this project purged is never approved.*
 
 ## 8. Workflows
 
@@ -470,7 +472,7 @@ sequenceDiagram
   participant B as Baley
   participant D as Hardin
   participant L as Ledger
-  O->>B: phase withdraw N, decisions per story
+  O->>B: baley phase withdraw N, a decision per story
   B->>D: may phase N be withdrawn?
   alt complete
     D-->>B: no
@@ -478,20 +480,27 @@ sequenceDiagram
   else execution present
     D-->>B: no, undo needed
     B-->>O: execution-present, naming the undo
+  else a story moved to a complete phase
+    D-->>B: no
+    B-->>O: phase-complete, naming that phase
   else
-    B->>B: every active story decided?
-    alt one undecided
+    B->>B: does another phase depend on N? is every story decided?
+    alt another phase depends on N
+      B-->>O: phase-has-dependents, naming those phases
+    else one undecided
       B-->>O: story-undecided
     else
-      B-->>O: preview and digest
-      O->>B: approve
+      B->>L: scope.submitted
+      B-->>O: the digest to preview and approve
+      O->>B: baley scope approve (digest)
+      B->>B: judged again against accepted scope as it stands
       B->>L: phase.withdrawn, story.reassigned or story.dropped, phase.reordered, scope.approved
       B-->>O: receipt
     end
   end
 ```
 
-*Figure 5. Withdrawing a phase.*
+*Figure 5. Withdrawing a phase from the terminal. A session's `phase-withdraw` is judged the same way and returns the digest to the session, and the owner approves it with `baley scope approve` at the terminal either way. Hardin's answers come from PRJ-R13's facts for each phase. Not drawn: `no-such-phase` for a phase that is not declared or is withdrawn, and for a decision moving a story to one; `no-such-story` for a decision naming a story the phase does not serve. Section 5's `phase withdraw` table gives every refusal in the order it is judged.*
 
 The revision of a story's truths is [0005](0005-context-plans-and-acceptance.md) Figure 4.
 
@@ -508,25 +517,36 @@ Not applicable. This area reads no setting of its own. The start runs the settin
 
 ## 11. Build status
 
-The binary parks the inherited engine for Build 9 to delete, and nothing in production reaches it (`crates/baley/src/inherited.rs:1-4`). Build 4 T3 built the start's scope records. A session submits a start submission with `scope-submit` on `baley_apply` (`crates/baley/src/mcp/operations.rs:198`, `crates/baley/src/mcp/scope.rs:141-188`), which records it as a draft (`crates/baley/src/scope/submit.rs:93-139`), and reads a draft, the accepted roadmap and an accepted story with `document` (`crates/baley/src/mcp/document.rs:245-259`). The owner has `baley scope approve`, `baley scope preview`, `baley scope show`, `baley phase show`, `baley backlog show` and `baley story show` (`crates/baley/src/main.rs:33-40`, `crates/baley/src/scope/command.rs:116-152`). `baley_apply` has no `scope-approve` spelling, so approval is given only on the command line (`crates/baley/src/scope/command.rs:235-294`). The six scope events and the five scope views are registered in view set 9 (`crates/baley/src/ledger/open.rs:24-68`). The session server answers `plan-read` and `context-intake` (`crates/baley/src/mcp/operations.rs:107-108`) and `plan-submit` and `context-submit` (`crates/baley/src/mcp/operations.rs:156-157`) as `operation-unavailable`, and the operation baseline names Build 4 for them. It answers `verification-complete` (`crates/baley/src/mcp/operations.rs:136`), the roadmap tick, the same way and names Build 5. `project start`, its planner's work order and the binding of a submission to that work order are Build 4 T5, and the phase, story and backlog change commands and the description's revision are Build 4 T4. Production reaches `baley init` in this area (`crates/baley/src/init.rs:556-565`). Parsing and editing `ROADMAP.md` and `REQUIREMENTS.md` under `.planning/` is the parked engine's.
+The binary parks the inherited engine for Build 9 to delete, and nothing in production reaches it (`crates/baley/src/inherited.rs:1-4`). Build 4 T3 built the start's scope records, and Build 4 T4 the scope changes.
+
+A session submits a start with `scope-submit` on `baley_apply`, and each change with its own spelling, `project-describe` to `backlog-reorder`, listed after it (`crates/baley/src/mcp/operations.rs:198-208`, `crates/baley/src/mcp/handler.rs:176-186`). A change's arguments are judged before anything is prepared (`crates/baley/src/mcp/scope.rs:94-125`, `crates/baley/src/mcp/scope.rs:179-192`): each kind's shape, its digest over a body that holds the kind, and its target (`crates/baley-core/src/scope/change.rs:251-360`). The change is then judged against accepted scope as preparation's own check, after the replay lookup and before checkout admission and the policy step (`crates/baley/src/mcp/scope.rs:277-300`, `crates/baley/src/scope/submit.rs:156-168`), by the rules of section 5 (`crates/baley-core/src/scope/rules.rs:311-375`, `crates/baley-core/src/scope/rules.rs:614-673`), over the scope read from the events and the `roadmap` and `phase` views, which the recording's transaction confirms has not moved (`crates/baley/src/scope/read.rs:561-654`, `crates/baley/src/scope/submit.rs:270-307`). The owner's `baley phase reorder`, `baley phase withdraw`, `baley story reassign`, `baley story drop` and `baley backlog reorder` turn their words into the same members and submit through the same functions, as the owner (`crates/baley/src/scope/command.rs:184-219`, `crates/baley/src/scope/command.rs:335-354`, `crates/baley/src/scope/command.rs:596-673`).
+
+`baley scope approve` approves a start or a change draft (`crates/baley/src/scope/command.rs:307-328`). Its first step judges a change draft against the newest draft of the same change and then against accepted scope as it stands, reading the scope before the earlier approvals of the digest (`crates/baley/src/scope/approve.rs:160-220`, `crates/baley-core/src/scope/approval.rs:173-205`). Its second step confirms what the first read, a carried phase detail included, and records the change's events (`crates/baley/src/scope/approve.rs:462-558`, `crates/baley-core/src/scope/change_events.rs:52-236`). `baley_apply` has no `scope-approve` spelling, so approval is given only on the command line. Build 4 T9's `phase plan` gets a `phase edit` it records from plain values, replayed before the scope check and answered with the digest its recorded receipt names, and approves it through the same two steps (`crates/baley/src/scope/submit.rs:323-365`, `crates/baley/src/scope/approve.rs:105-150`, `crates/baley/src/scope/approve.rs:388-458`).
+
+The five change events are registered beside the six the start records (`crates/baley-core/src/scope/event.rs:89-110`), and the `draft`, `roadmap`, `phase` and `backlog` projectors, with their versions raised, are registered in view set 10 (`crates/baley/src/ledger/open.rs:24-71`). A session reads a draft of any kind, the accepted roadmap and an accepted story with `document` (`crates/baley/src/mcp/document.rs:234-261`). The owner has `baley scope preview`, `baley scope show`, `baley phase show`, `baley backlog show` and `baley story show` (`crates/baley/src/main.rs:33-40`, `crates/baley/src/scope/command.rs:171-219`). The description refinement and planning read is the `roadmap` view's latest approved description (`crates/baley/src/scope/read.rs:393-406`); serving it to refinement and planning is Build 4 T7 and T9. The instruction texts and `bal-*` help for the scope operations come with `project start` in Build 4 T5.
+
+PRJ-R13's facts are read from the `phase` view, whose statuses in this build are `declared` and `withdrawn` only, so in production no phase has execution or completion, and `execution-present`, `phase-complete` and `story-shipped` are reached only from supplied facts (`crates/baley/src/scope/read.rs:602-611`) until Builds 5 and 6 record execution and completion. One race is not closed. A transaction cannot ask the store for an approval after a sequence, so when a draft was approved before its latest submission, the second step relies on the `roadmap` document moving to catch a second approval of the same digest landing between the steps. Every change approval Baley records appends an event the `roadmap` view projects, so this holds for every path Baley writes; a `scope.approved` appended with no roadmap event would pass. A store query for events after a sequence would close it (`crates/baley/src/scope/approve.rs:471-481`).
+
+`project start`, its planner's work order and the binding of a submission to that work order are Build 4 T5. The session server answers `plan-read` and `context-intake` (`crates/baley/src/mcp/operations.rs:107-108`) and `plan-submit` and `context-submit` (`crates/baley/src/mcp/operations.rs:156-157`) as `operation-unavailable`, and the operation baseline names Build 4 for them. It answers `verification-complete` (`crates/baley/src/mcp/operations.rs:136`), the roadmap tick, the same way and names Build 5. Production reaches `baley init` in this area (`crates/baley/src/init.rs:556-564`). Parsing and editing `ROADMAP.md` and `REQUIREMENTS.md` under `.planning/` is the parked engine's.
 
 | Requirement | Status | Where |
 |---|---|---|
 | PRJ-R1, PRJ-R5 | Not built | No start operation exists. `project start`, the survey and the brief are Build 4 T5 |
-| PRJ-R2 | Partly built | A start submission is recorded as a draft, the body as a `record` payload and one `scope.submitted` (`crates/baley/src/scope/submit.rs:93-139`), and its approval records the description, the stories and the roadmap in one transaction (`crates/baley/src/scope/approve.rs:100-180`, `crates/baley-core/src/scope/approval.rs:149-250`). The start operation that dispatches the planner is Build 4 T5 |
-| PRJ-R3 | Partly built | A start submission is judged whole, its shape before story assignment and cycles, and a fault is `malformed-submission` naming the section and the field path (`crates/baley-core/src/scope/submission.rs:162-364`), answered before anything is prepared or recorded (`crates/baley/src/mcp/scope.rs:57-101`). The change commands' submissions are Build 4 T4 |
-| PRJ-R4 | Partly built | A start submission listing one story in two phases is refused `story-double-assigned` (`crates/baley-core/src/scope/submission.rs:366-385`), and a phase listing a story that is not `active` is `malformed-submission` (`crates/baley-core/src/scope/submission.rs:338-353`). The stories keep the submission's order as their priority order in the `backlog` view (`crates/baley-core/src/scope/backlog.rs:39-126`). The backlog reorder and the rule against a phase that is complete are Build 4 T4 |
-| PRJ-R6 | Partly built | `project-already-started` is judged from the events at submit (`crates/baley/src/scope/submit.rs:41-91`) and at approval, ahead of staleness (`crates/baley-core/src/scope/approval.rs:58-82`), and confirmed inside each transaction (`crates/baley/src/scope/submit.rs:128-137`, `crates/baley/src/scope/approve.rs:182-205`). `baley init` is built as its own command (`crates/baley/src/init.rs:556-565`); the start operation that runs it is Build 4 T5 |
-| PRJ-R7 | Partly built | The accepted scope views ignore `scope.submitted`, so only an approved submission becomes scope (`crates/baley-core/src/scope/roadmap.rs:39-83`). The planner's work order is Build 4 T5 |
-| PRJ-R8, PRJ-R9 | Not built | |
-| PRJ-R10 | Partly built | An approved start numbers its phases after the highest ever declared and records one `phase.reordered` with the full order (`crates/baley-core/src/scope/approval.rs:149-268`); the `roadmap` view keeps the highest number, never lowering it (`crates/baley-core/src/scope/roadmap.rs:135-162`). `phase reorder` and inserting a phase are Build 4 T4 |
-| PRJ-R11 | Partly built | The start's phases use the declaration shape, name, goal, detail, dependencies and stories (`crates/baley-core/src/scope/submission.rs:28-31, 305-364`), and a dependency cycle is refused `dependency-cycle` (`crates/baley-core/src/scope/submission.rs:387-457`). A later declaration of a number replaces its `phase` document and keeps the earlier event (`crates/baley-core/src/scope/phase.rs:65-144`). `phase declare` and `phase edit` are Build 4 T4 |
-| PRJ-R12, PRJ-R13 | Not built | No phase withdraw exists. The parked engine edits `ROADMAP.md` only to tick a phase (`crates/baley/src/verification/completion.rs:264-303`), and the session server answers `verification-complete` as unavailable (`crates/baley/src/mcp/operations.rs:136`) until Build 5 |
+| PRJ-R2 | Partly built | A start submission is recorded as a draft, the body as a `record` payload and one `scope.submitted` (`crates/baley/src/scope/submit.rs:101-147`), and its approval records the description, the stories and the roadmap in one transaction (`crates/baley/src/scope/approve.rs:388-458`, `crates/baley-core/src/scope/approval.rs:255-356`). The start operation that dispatches the planner is Build 4 T5 |
+| PRJ-R3 | Built | A start submission is judged whole, its shape before story assignment and cycles, and a fault is `malformed-submission` naming the section and the field path (`crates/baley-core/src/scope/submission.rs:165-192`, `crates/baley-core/src/scope/submission.rs:323-382`). A change is judged whole under its kind the same way (`crates/baley-core/src/scope/change.rs:251-447`). Both are answered before anything is prepared or recorded (`crates/baley/src/mcp/scope.rs:155-192`), and the terminal prints the section and the field (`crates/baley/src/scope/command.rs:487-531`) |
+| PRJ-R4 | Partly built | A start submission listing one story in two phases is refused `story-double-assigned` (`crates/baley-core/src/scope/submission.rs:385-403`), and a `phase declare` or `phase edit` listing a story another declared phase serves is too (`crates/baley-core/src/scope/rules.rs:441-484`); a phase listing a story that is not `active` is `malformed-submission`. The stories keep the submission's order as their priority order, a declared story goes last, and `backlog reorder` sets the order (`crates/baley-core/src/scope/rules.rs:392-411`, `crates/baley-core/src/scope/backlog.rs:43-189`). Whether a phase is complete is not recorded until Builds 5 and 6 |
+| PRJ-R6 | Partly built | `project-already-started` is judged from the events at submit (`crates/baley/src/scope/submit.rs:52-99`) and at approval, ahead of staleness (`crates/baley-core/src/scope/approval.rs:65-89`), and confirmed inside each transaction (`crates/baley/src/scope/submit.rs:126-146`, `crates/baley/src/scope/approve.rs:569-580`). `baley init` is built as its own command (`crates/baley/src/init.rs:556-564`); the start operation that runs it is Build 4 T5 |
+| PRJ-R7 | Partly built | The accepted scope views ignore `scope.submitted`, so only an approved submission becomes scope (`crates/baley-core/src/scope/roadmap.rs:83-95`). The planner's work order is Build 4 T5 |
+| PRJ-R8, PRJ-R9 | Not built | `project start` is Build 4 T5 |
+| PRJ-R10 | Built | A start numbers its phases after the highest ever declared and records one `phase.reordered` with the full order (`crates/baley-core/src/scope/approval.rs:255-374`); a `phase declare` takes the next number and records `phase.reordered` with it at its position, and `phase reorder` records the order it is given (`crates/baley-core/src/scope/change_events.rs:52-236`). The `roadmap` view keeps the highest number, never lowering it, withdrawn phases included (`crates/baley-core/src/scope/roadmap.rs:43-243`) |
+| PRJ-R11 | Built | The start's phases, `phase declare` and `phase edit` use the declaration shape, name, goal, detail, dependencies and stories (`crates/baley-core/src/scope/submission.rs:323-382`, `crates/baley-core/src/scope/change.rs:288-360`), and a dependency cycle is refused `dependency-cycle` (`crates/baley-core/src/scope/submission.rs:405-475`, `crates/baley-core/src/scope/rules.rs:569-602`). An edit records a whole new `phase.declared`, its left-out fields taken from accepted scope at approval (`crates/baley-core/src/scope/change_events.rs:96-115`); the later declaration replaces the `phase` document and the earlier event stays (`crates/baley-core/src/scope/phase.rs:65-163`) |
+| PRJ-R12 | Partly built | A declared phase is withdrawn with a decision for each story it serves, refused `story-undecided` without one and `phase-has-dependents` while another phase depends on it (`crates/baley-core/src/scope/rules.rs:486-528`), and its approval records `phase.withdrawn`, each story's move or drop and the order without it (`crates/baley-core/src/scope/change_events.rs:124-166`). The `phase` view records no context or plan approval yet, so a phase in those states is not told apart; they come with Build 4's context and plan approvals ([0005](0005-context-plans-and-acceptance.md)) |
+| PRJ-R13 | Partly built | `execution-present`, `phase-complete` and `story-shipped`, and `phase-complete` for a story given to a complete phase, are judged over supplied facts per phase (`crates/baley-core/src/scope/rules.rs:604-673`). In production the facts come from the `phase` view, whose statuses say neither execution nor completion, so every fact is false (`crates/baley/src/scope/read.rs:602-611`) until Builds 5 and 6 record execution and completion, and `phase.undone` is Build 6 ([0011](0011-milestones-landing-undo-pause.md)) |
 | PRJ-R14, PRJ-R15, PRJ-R16 | Not built | The parked engine refuses a second context approval `native-context-exists` (`crates/baley/src/context_service.rs:184-193`), writes truth version 1 always (`crates/baley/src/context/persistence.rs:33-49`), and its plan check accepts only version 1 (`crates/baley/src/plan/limits.rs:401-408`). The session server answers `context-submit` and `plan-submit` as unavailable (`crates/baley/src/mcp/operations.rs:156-157`) until Build 4 |
-| PRJ-R17 | Not built | |
-| PRJ-R18 | Partly built | A capture naming a phase the `phase` view does not hold is refused `no-such-phase` (`crates/baley/src/mcp/capture.rs:233-250`), and `baley phase show`, `baley story show` and `document` refuse a phase or story the accepted scope lacks with `no-such-phase` or `no-such-story` (`crates/baley/src/scope/read.rs:376-451`, `crates/baley/src/scope/command.rs:625-641`, `crates/baley/src/mcp/document.rs:328-337`). The change commands' refusals are Build 4 T4, and `no-such-plan` is Build 4 |
-| PRJ-R19 | Partly built | The start submission is recorded as a draft with its digest, and approved by that digest at the terminal with `unknown-draft`, `project-already-started` and `stale-draft` (`crates/baley-core/src/scope/approval.rs:58-147`, `crates/baley/src/scope/approve.rs:48-98`). The other scope changes are Build 4 T4, and a revision of a story's truths is Build 4 T7 |
-| PRJ-R20 | Partly built | An approved start records `project.described` on the `project` stream (`crates/baley-core/src/scope/approval.rs:182-188`), the `roadmap` view holds it (`crates/baley-core/src/scope/roadmap.rs:106-114`), and `baley scope show` and `document` print it. Serving it to refinement and planning is Build 4 T7 and T9, and its revision is Build 4 T4 |
+| PRJ-R17 | Built | `story edit` records `story.corrected` and keeps every earlier wording (`crates/baley-core/src/scope/change_events.rs:180-187`), and an edit of a dropped or excluded story is refused `story-not-served` (`crates/baley-core/src/scope/rules.rs:377-390`) |
+| PRJ-R18 | Partly built | A capture naming a phase the `phase` view does not hold, or holds as withdrawn, is refused `no-such-phase` (`crates/baley/src/mcp/capture.rs:224-285`). A change naming a phase that is not declared or is withdrawn, or a story no story has, is refused `no-such-phase` or `no-such-story` (`crates/baley-core/src/scope/rules.rs:311-375`), and `baley phase show`, `baley story show` and `document` refuse a phase or story the accepted scope lacks the same way (`crates/baley/src/scope/read.rs:415-515`, `crates/baley/src/scope/command.rs:1010-1024`). `no-such-plan` is Build 4 |
+| PRJ-R19 | Partly built | The start and every change are recorded as drafts with their digests and approved by digest at the terminal, with `unknown-draft`, `project-already-started`, `draft-approved` and `stale-draft` judged against the newest draft of the same kind and target (`crates/baley-core/src/scope/approval.rs:65-205`, `crates/baley/src/scope/approve.rs:105-220`). `project start` is Build 4 T5, and a revision of a story's truths is Build 4 T7 |
+| PRJ-R20 | Partly built | An approved start or `project describe` records `project.described` on the `project` stream (`crates/baley-core/src/scope/change_events.rs:218-226`), the `roadmap` view holds the latest (`crates/baley-core/src/scope/roadmap.rs:123-131`), and the read refinement and planning take is that approved description alone (`crates/baley/src/scope/read.rs:393-406`). `baley scope show` and `document` print it. Serving it to refinement and planning is Build 4 T7 and T9 |
 
 ## 12. Open questions
 
