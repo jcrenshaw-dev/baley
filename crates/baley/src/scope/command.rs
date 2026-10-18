@@ -17,7 +17,8 @@ use baley_core::capture::NO_SUCH_PHASE;
 use baley_core::policy::recorded::recorded_policy;
 use baley_core::policy::{CONFIG_UNAVAILABLE, SettingsFile};
 use baley_core::scope::{
-    ChangeKind, ChangeSubmission, UNKNOWN_DRAFT, judge_change, judge_submission,
+    ChangeKind, ChangeSubmission, Destination, START_KIND, ScopeChange, UNKNOWN_DRAFT,
+    judge_change, judge_submission,
 };
 use baley_store::{
     Actor, Admin, CanonicalError, Command, CommandKind, Hash, ProjectId, RequestId, request_digest,
@@ -32,6 +33,7 @@ use crate::ledger::clock::SystemClock;
 use crate::ledger::commands::new_request_id;
 use crate::ledger::display::{self, Render};
 use crate::mcp::prepare::{LEDGER_UNAVAILABLE, NOT_A_PROJECT, PROJECT_NOT_IN_LEDGER};
+use crate::mcp::scope::change_kind;
 use crate::providers::identity;
 use crate::scope::approve::{self, APPROVE_COMMAND};
 use crate::scope::read::{
@@ -596,15 +598,24 @@ pub(crate) fn preview_render(read: Result<Draft, PreviewError>) -> Render {
         Err(PreviewError::Unreadable(reason)) => return unavailable(&reason),
         Err(PreviewError::Store(error)) => return display::store_error(&error, None),
     };
-    let Ok(submission) = judge_submission(&preview.submission) else {
-        return unavailable("the draft is recorded, but its body no longer judges as a submission");
-    };
     let mut lines = vec![format!(
         "draft {} ({}), submitted {}",
         preview.digest.to_hex(),
         escaped(&preview.kind),
         escaped(&preview.recorded_at)
     )];
+    if preview.kind != START_KIND {
+        return match change_lines(&preview.kind, &preview.submission) {
+            Some(members) => {
+                lines.extend(members);
+                printed(lines)
+            }
+            None => unavailable("the draft is recorded, but its body no longer judges as a change"),
+        };
+    }
+    let Ok(submission) = judge_submission(&preview.submission) else {
+        return unavailable("the draft is recorded, but its body no longer judges as a submission");
+    };
     let description = &submission.description;
     describe(
         &mut lines,
@@ -636,6 +647,102 @@ pub(crate) fn preview_render(read: Result<Draft, PreviewError>) -> Render {
         ]);
     }
     printed(lines)
+}
+
+/// A change draft's members as its preview prints them, in its shape's
+/// member order: the change as submitted, which is what the owner approves.
+/// The body's `kind` must be the draft's and the rest must judge under it;
+/// otherwise there is nothing to print.
+fn change_lines(kind: &str, body: &Value) -> Option<Vec<String>> {
+    let kind = change_kind(kind)?;
+    let mut members = body.as_object()?.clone();
+    if members.remove("kind")? != kind.as_str() {
+        return None;
+    }
+    let change = judge_change(kind, &Value::Object(members)).ok()?.change;
+    let mut lines = Vec::new();
+    match change {
+        ScopeChange::ProjectDescribe(description) => describe(
+            &mut lines,
+            &description.what,
+            &description.core_value,
+            &description.constraints,
+        ),
+        ScopeChange::PhaseDeclare(phase) => lines.extend([
+            format!("name: {}", escaped(&phase.name)),
+            format!("goal: {}", escaped(&phase.goal)),
+            format!("detail: {}", escaped(&phase.detail)),
+            format!("depends on: {}", list(&phase.depends_on)),
+            format!("stories: {}", list(&phase.stories)),
+            format!(
+                "position: {}",
+                phase
+                    .position
+                    .map_or_else(|| "last".to_owned(), |at| at.to_string())
+            ),
+        ]),
+        ScopeChange::PhaseEdit { phase, fields } => {
+            lines.push(format!("phase: {phase}"));
+            let texts = [
+                ("name", &fields.name),
+                ("goal", &fields.goal),
+                ("detail", &fields.detail),
+            ];
+            for (name, text) in texts {
+                if let Some(text) = text {
+                    lines.push(format!("{name}: {}", escaped(text)));
+                }
+            }
+            let numbers = [
+                ("depends on", &fields.depends_on),
+                ("stories", &fields.stories),
+            ];
+            for (name, numbers) in numbers {
+                if let Some(numbers) = numbers {
+                    lines.push(format!("{name}: {}", list(numbers)));
+                }
+            }
+        }
+        ScopeChange::PhaseReorder { order } | ScopeChange::BacklogReorder { order } => {
+            lines.push(format!("order: {}", list(&order)));
+        }
+        ScopeChange::PhaseWithdraw { phase, decisions } => {
+            lines.push(format!("phase: {phase}"));
+            if decisions.is_empty() {
+                lines.push("decisions: none".into());
+            }
+            for decision in decisions {
+                lines.push(match decision.to {
+                    Destination::Phase(to) => format!("story {}: to phase {to}", decision.story),
+                    Destination::Drop => format!("story {}: dropped", decision.story),
+                });
+            }
+        }
+        ScopeChange::StoryDeclare {
+            sentence,
+            status,
+            phase,
+        } => lines.extend([
+            format!("sentence: {}", escaped(&sentence)),
+            format!("status: {}", status.as_str()),
+            format!("phase: {}", served_by(phase)),
+        ]),
+        ScopeChange::StoryEdit { story, sentence } => lines.extend([
+            format!("story: {story}"),
+            format!("sentence: {}", escaped(&sentence)),
+        ]),
+        ScopeChange::StoryReassign { story, phase } => lines.extend([
+            format!("story: {story}"),
+            format!("phase: {}", served_by(phase)),
+        ]),
+        ScopeChange::StoryDrop { story } => lines.push(format!("story: {story}")),
+    }
+    Some(lines)
+}
+
+/// The phase a change serves a story by, or `backlog`.
+fn served_by(phase: Option<u32>) -> String {
+    phase.map_or_else(|| "backlog".to_owned(), |phase| phase.to_string())
 }
 
 /// What `scope show` prints for a roadmap read: the description, the phases
@@ -1123,6 +1230,74 @@ mod tests {
                 "  stories: approve",
             ]
         );
+    }
+
+    #[test]
+    fn a_change_preview_that_leaves_out_what_the_owner_approves_is_caught() {
+        use crate::scope::fixtures::{change, d1, e_b, p, w};
+
+        let previewed = |kind: ChangeKind, value: &Value| {
+            let held = change(kind, value);
+            let digest = held.digest();
+            let render = preview_render(Ok(Draft::Held(Preview {
+                kind: text(kind.as_str()),
+                digest,
+                seq: 7,
+                recorded_at: text(T),
+                submission: held.value().clone(),
+            })));
+            let header = format!(
+                "draft {} ({}), submitted {T}",
+                digest.to_hex(),
+                kind.as_str()
+            );
+            (render, header)
+        };
+        let cases = [
+            (
+                ChangeKind::PhaseWithdraw,
+                w(),
+                vec!["phase: 2", "story 2: to phase 1"],
+            ),
+            (
+                ChangeKind::PhaseDeclare,
+                p(),
+                vec![
+                    "name: Reports",
+                    "goal: The owner reads progress",
+                    "detail: Progress from the ledger",
+                    "depends on: 1",
+                    "stories: none",
+                    "position: last",
+                ],
+            ),
+            (
+                ChangeKind::PhaseEdit,
+                e_b(),
+                vec!["phase: 2", "goal: The owner approves every change"],
+            ),
+            (
+                ChangeKind::ProjectDescribe,
+                d1(),
+                vec![
+                    "what: A ledger for agent work",
+                    "core value: Nothing moves on an unproven claim",
+                    "constraint: One binary",
+                    "constraint: No server",
+                ],
+            ),
+            (
+                ChangeKind::StoryReassign,
+                json!({"story": 3, "phase": null}),
+                vec!["story: 3", "phase: backlog"],
+            ),
+        ];
+        for (kind, value, members) in cases {
+            let (render, header) = previewed(kind, &value);
+            let mut expected = vec![header.as_str()];
+            expected.extend(members);
+            assert_eq!(shown(&render), expected, "{}", kind.as_str());
+        }
     }
 
     #[test]
