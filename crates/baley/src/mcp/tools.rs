@@ -485,6 +485,16 @@ mod tests {
     }
 
     #[test]
+    fn a_submission_served_without_the_object_type_is_caught() {
+        let apply = input_schema(Tool::Apply);
+        let submissions = alternatives(&apply["properties"]["submission"]);
+        assert_eq!(submissions.len(), 11, "{submissions:?}");
+        for submission in &submissions {
+            assert_eq!(submission["type"], "object", "{submission}");
+        }
+    }
+
+    #[test]
     fn a_tool_property_that_drifts_from_the_served_schema_is_caught() {
         let bare = |schema: &Value| {
             let mut schema = schema.clone();

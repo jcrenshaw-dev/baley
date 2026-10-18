@@ -37,6 +37,8 @@ pub struct SubmitShape {
     /// phases in order, each with a `name`, a `goal`, a `detail`,
     /// `depends_on` as positions in `roadmap` counted from 1, and the
     /// `stories` it delivers by label.
+    // Typed as an object in the schema, or a client may send it as a string.
+    #[schemars(with = "serde_json::Map<String, Value>")]
     pub submission: Value,
 }
 
@@ -63,6 +65,7 @@ macro_rules! change_shapes {
                 /// A retry of the same change sends the same id.
                 pub request_id: String,
                 #[doc = $submission]
+                #[schemars(with = "serde_json::Map<String, Value>")]
                 pub submission: Value,
             }
         )*
