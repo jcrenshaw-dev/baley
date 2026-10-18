@@ -16,7 +16,9 @@ use std::process::ExitCode;
 use baley_core::capture::NO_SUCH_PHASE;
 use baley_core::policy::recorded::recorded_policy;
 use baley_core::policy::{CONFIG_UNAVAILABLE, SettingsFile};
-use baley_core::scope::{UNKNOWN_DRAFT, judge_submission};
+use baley_core::scope::{
+    ChangeKind, ChangeSubmission, UNKNOWN_DRAFT, judge_change, judge_submission,
+};
 use baley_store::{
     Actor, Admin, CanonicalError, Command, CommandKind, Hash, ProjectId, RequestId, request_digest,
 };
@@ -36,7 +38,7 @@ use crate::scope::read::{
     self, BacklogStory, Detail, Draft, NO_SUCH_STORY, Phase, PreviewError, ReadError, Roadmap,
     Story,
 };
-use crate::scope::submit;
+use crate::scope::submit::{self, SUBMIT_COMMAND};
 use crate::{init, policy_step, settings};
 
 /// `baley scope`: the owner's approval of scope, and its reads.
@@ -316,8 +318,52 @@ pub(crate) fn approve_command(
     request_id: RequestId,
     at: &str,
 ) -> Result<Command, CanonicalError> {
+    owner_command(
+        APPROVE_COMMAND,
+        project,
+        policy_version,
+        digest,
+        request_id,
+        at,
+    )
+}
+
+/// The command a command-line submission is recorded under, built as an
+/// approval's is: the owner as actor, no caller, Baley's clock and
+/// `policy_version` in both its digest and itself. The version is safe in the
+/// digest because a command-line request id is always fresh.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the owner's change commands call it")
+)]
+pub(crate) fn submit_command(
+    project: &ProjectId,
+    policy_version: u64,
+    digest: Hash,
+    request_id: RequestId,
+    at: &str,
+) -> Result<Command, CanonicalError> {
+    owner_command(
+        SUBMIT_COMMAND,
+        project,
+        policy_version,
+        digest,
+        request_id,
+        at,
+    )
+}
+
+/// The owner's command of `kind` over the draft `digest`.
+fn owner_command(
+    kind: &str,
+    project: &ProjectId,
+    policy_version: u64,
+    digest: Hash,
+    request_id: RequestId,
+    at: &str,
+) -> Result<Command, CanonicalError> {
     let request = request_digest(&json!({
-        "kind": APPROVE_COMMAND,
+        "kind": kind,
         "project": project.0,
         "actor": "owner",
         "policy_version": policy_version,
@@ -326,7 +372,7 @@ pub(crate) fn approve_command(
     }))?;
     Ok(Command {
         project: project.clone(),
-        kind: CommandKind(APPROVE_COMMAND.into()),
+        kind: CommandKind(kind.into()),
         request_id,
         digest: request,
         scope: Vec::new(),
@@ -392,6 +438,136 @@ pub(crate) fn judge_number(text: &str) -> Result<u32, Render> {
         .ok()
         .filter(|number| *number > 0)
         .ok_or_else(|| Render::refusal("phase numbers and story ids are whole numbers from 1"))
+}
+
+/// The words of one of the owner's change commands, as clap gives them.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the owner's change commands call it")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChangeWords {
+    /// `phase reorder <NUMBER>...`.
+    PhaseReorder(Vec<String>),
+    /// `phase withdraw <NUMBER> [<STORY>=<PHASE>|<STORY>=drop]...`.
+    PhaseWithdraw {
+        phase: String,
+        decisions: Vec<String>,
+    },
+    /// `story reassign <ID> <PHASE>|backlog`.
+    StoryReassign { story: String, to: String },
+    /// `story drop <ID>`.
+    StoryDrop(String),
+    /// `backlog reorder <ID>...`.
+    BacklogReorder(Vec<String>),
+}
+
+/// What a withdrawal decision's target is written as for a story to drop,
+/// and a reassignment's for the backlog.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the owner's change commands call it")
+)]
+const DROP_WORD: &str = "drop";
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the owner's change commands call it")
+)]
+const BACKLOG_WORD: &str = "backlog";
+
+/// The kind a command's words name and the members a session sends for the
+/// same change, decisions in the order given. Every number is judged by
+/// `judge_number`, and a word in another form is refused before the ledger
+/// is read, echoing none of it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the owner's change commands call it")
+)]
+pub(crate) fn change_members(words: &ChangeWords) -> Result<(ChangeKind, Value), Render> {
+    let numbers = |items: &[String]| {
+        items
+            .iter()
+            .map(|item| judge_number(item))
+            .collect::<Result<Vec<u32>, Render>>()
+    };
+    Ok(match words {
+        ChangeWords::PhaseReorder(order) => {
+            (ChangeKind::PhaseReorder, json!({"order": numbers(order)?}))
+        }
+        ChangeWords::BacklogReorder(order) => (
+            ChangeKind::BacklogReorder,
+            json!({"order": numbers(order)?}),
+        ),
+        ChangeWords::PhaseWithdraw { phase, decisions } => {
+            let decisions = decisions
+                .iter()
+                .map(|decision| decision_members(decision))
+                .collect::<Result<Vec<Value>, Render>>()?;
+            (
+                ChangeKind::PhaseWithdraw,
+                json!({"phase": judge_number(phase)?, "decisions": decisions}),
+            )
+        }
+        ChangeWords::StoryReassign { story, to } => {
+            let story = judge_number(story)?;
+            let phase = if to == BACKLOG_WORD {
+                Value::Null
+            } else {
+                to.parse::<u32>()
+                    .ok()
+                    .filter(|number| *number > 0)
+                    .map(Value::from)
+                    .ok_or_else(|| {
+                        Render::refusal(
+                            "a story is reassigned to a phase number from 1 or to backlog",
+                        )
+                    })?
+            };
+            (
+                ChangeKind::StoryReassign,
+                json!({"story": story, "phase": phase}),
+            )
+        }
+        ChangeWords::StoryDrop(story) => (
+            ChangeKind::StoryDrop,
+            json!({"story": judge_number(story)?}),
+        ),
+    })
+}
+
+/// One withdrawal decision, `<STORY>=<PHASE>` or `<STORY>=drop`, as the
+/// member a session sends.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the owner's change commands call it")
+)]
+fn decision_members(decision: &str) -> Result<Value, Render> {
+    let form = || {
+        Render::refusal(
+            "a withdrawal decision is a story id, =, and the phase number that serves it instead or drop",
+        )
+    };
+    let (story, to) = decision.split_once('=').ok_or_else(form)?;
+    let story = judge_number(story)?;
+    let to = if to == DROP_WORD {
+        Value::from(DROP_WORD)
+    } else {
+        Value::from(judge_number(to).map_err(|_| form())?)
+    };
+    Ok(json!({"story": story, "to": to}))
+}
+
+/// The change a command's words make, judged as a session's members are, so
+/// the same change has the same draft digest from either surface. A judgement
+/// refusal prints as the session would get it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the owner's change commands call it")
+)]
+pub(crate) fn command_change(words: &ChangeWords) -> Result<ChangeSubmission, Render> {
+    let (kind, members) = change_members(words)?;
+    judge_change(kind, &members)
+        .map_err(|refusal| answer_render(&submit::submission_refused(&refusal)))
 }
 
 /// What `scope preview` prints for a draft read: the header, the
@@ -672,6 +848,145 @@ mod tests {
         let command = build(4);
         assert_eq!(command.project, project);
         assert_eq!(command.kind, CommandKind("scope.approve".into()));
+        assert_eq!(command.actor, Actor::Owner);
+        assert_eq!(command.caller, None);
+        assert_eq!(command.policy_version, 4);
+        assert_eq!(command.recorded_at, T);
+        assert_eq!(command.request_id, RequestId(R.into()));
+        assert_ne!(build(5).digest, command.digest);
+        assert_eq!(build(4).digest, command.digest);
+    }
+
+    fn words(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_command_line_change_drafted_under_another_digest_than_the_sessions_is_caught() {
+        use crate::mcp::operations::{Lookup, Tool, lookup};
+        use crate::mcp::scope::judge_change_arguments;
+
+        let pairs = [
+            (
+                "phase-reorder",
+                json!({"order": [2, 1]}),
+                ChangeWords::PhaseReorder(words(&["2", "1"])),
+                "5c4b7650561455ec8d35bfe5be8bdca5b426260fb4ada5934e9a2b0ea0de6619",
+            ),
+            (
+                "phase-withdraw",
+                json!({"phase": 2, "decisions": [{"story": 2, "to": 1}]}),
+                ChangeWords::PhaseWithdraw {
+                    phase: "2".into(),
+                    decisions: words(&["2=1"]),
+                },
+                "830b6dfddb927b4f83c616d5fc67832b672c1af4c686d8ea578f17e01fcdf0b6",
+            ),
+            (
+                "story-reassign",
+                json!({"story": 3, "phase": 2}),
+                ChangeWords::StoryReassign {
+                    story: "3".into(),
+                    to: "2".into(),
+                },
+                "2bcc41abfda87adb37ecabf2bc999506930b94ae01523a53aeeba53fd4f39937",
+            ),
+            (
+                "story-drop",
+                json!({"story": 3}),
+                ChangeWords::StoryDrop("3".into()),
+                "9094033334d2919f56c4bee9f9245d34a8901f297e882a519a7ce167e82b1099",
+            ),
+            (
+                "backlog-reorder",
+                json!({"order": [2, 1, 3]}),
+                ChangeWords::BacklogReorder(words(&["2", "1", "3"])),
+                "078d2bae8750974615966455e5cad318e124b4496836c02f7cec12b2a65f8e0b",
+            ),
+        ];
+        for (operation, submission, said, digest) in pairs {
+            let session = judge_change_arguments(&json!({"operation": operation,
+                "request_id": R, "submission": submission}))
+            .unwrap();
+            let typed = command_change(&said).unwrap_or_else(|e| panic!("{operation}: {e:?}"));
+            assert_eq!(session.change.digest().to_hex(), digest, "{operation}");
+            assert_eq!(typed.digest().to_hex(), digest, "{operation}");
+        }
+        assert_eq!(lookup(Tool::Apply, Some("scope-approve")), Lookup::Unknown);
+    }
+
+    #[test]
+    fn a_command_line_change_argument_passed_on_unjudged_is_caught() {
+        let refused = [
+            (ChangeWords::PhaseReorder(words(&["0"])), "0"),
+            (ChangeWords::PhaseReorder(words(&["2", "x"])), "x"),
+            (
+                ChangeWords::PhaseWithdraw {
+                    phase: "2".into(),
+                    decisions: words(&["2-1"]),
+                },
+                "2-1",
+            ),
+            (
+                ChangeWords::PhaseWithdraw {
+                    phase: "2".into(),
+                    decisions: words(&["2=later"]),
+                },
+                "later",
+            ),
+            (
+                ChangeWords::StoryReassign {
+                    story: "3".into(),
+                    to: "later".into(),
+                },
+                "later",
+            ),
+        ];
+        for (said, argument) in refused {
+            let refusal = change_members(&said).expect_err(argument);
+            assert_eq!((refusal.code, refusal.error), (2, true), "{argument}");
+            assert!(
+                refusal.lines.iter().all(|line| !line.contains(argument)),
+                "{argument}: {:?}",
+                refusal.lines
+            );
+        }
+
+        let backlog = ChangeWords::StoryReassign {
+            story: "3".into(),
+            to: "backlog".into(),
+        };
+        assert_eq!(
+            change_members(&backlog).unwrap(),
+            (
+                ChangeKind::StoryReassign,
+                json!({"story": 3, "phase": null})
+            )
+        );
+        let drop = ChangeWords::PhaseWithdraw {
+            phase: "2".into(),
+            decisions: words(&["2=drop"]),
+        };
+        assert_eq!(
+            change_members(&drop).unwrap(),
+            (
+                ChangeKind::PhaseWithdraw,
+                json!({"phase": 2, "decisions": [{"story": 2, "to": "drop"}]})
+            )
+        );
+    }
+
+    #[test]
+    fn a_command_line_submission_built_without_the_owner_or_its_policy_version_is_caught() {
+        let project = ProjectId(PROJECT.into());
+        let digest =
+            Hash::from_hex("5c4b7650561455ec8d35bfe5be8bdca5b426260fb4ada5934e9a2b0ea0de6619")
+                .unwrap();
+        let build =
+            |version| submit_command(&project, version, digest, RequestId(R.into()), T).unwrap();
+        let command = build(4);
+        assert_eq!(command.project, project);
+        assert_eq!(command.kind, CommandKind("scope.submit".into()));
         assert_eq!(command.actor, Actor::Owner);
         assert_eq!(command.caller, None);
         assert_eq!(command.policy_version, 4);
