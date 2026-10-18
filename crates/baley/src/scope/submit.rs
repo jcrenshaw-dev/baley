@@ -17,8 +17,9 @@ use baley_core::scope::{
 };
 use baley_store::{
     Absence, Command, Decision, EVENT_PAGE_BOUND, EventMatch, Hash, HistoryFilter, Ledger,
-    NewEvent, Observed, OutcomeKind, PageRequest, Payloads, ProjectId, Recorded,
-    Refusal as StoreRefusal, RetentionClass, StoreError, StreamName, Views,
+    NewEvent, Observed, OutcomeKind, PageRequest, Payloads, ProjectId, REQUEST_VIEW, Recorded,
+    Refusal as StoreRefusal, RetentionClass, StoreError, StreamName, Views, request_key,
+    request_state,
 };
 use serde_json::{Map, Value, json};
 
@@ -310,9 +311,12 @@ pub fn record_change<L: Ledger + ?Sized>(
 /// plan` can record an edit without MCP or the command line (D-18). The
 /// members are built as a session sends them, so the same edit has the same
 /// body and digest; then they are judged, checked against accepted scope and
-/// recorded as `check_change` and `record_change` do. The answer is the
-/// draft's digest, or the answer that refused or failed it. The draft is
-/// approved through `approve::judge` and `approve::record`.
+/// recorded as `check_change` and `record_change` do. A request the ledger
+/// already holds is replayed before the check, as preparation does over MCP,
+/// so a retry of a completed edit gets its recorded answer however scope has
+/// moved since. The answer is the draft's digest, or the answer that refused
+/// or failed it. The draft is approved through `approve::judge` and
+/// `approve::record`.
 pub fn submit_phase_edit<S: Ledger + Views + Payloads>(
     store: &S,
     command: &Command,
@@ -342,10 +346,31 @@ pub fn submit_phase_edit<S: Ledger + Views + Payloads>(
     }
     let change = judge_change(ChangeKind::PhaseEdit, &Value::Object(members))
         .map_err(|refusal| submission_refused(&refusal))?;
-    let read = check_change(store, &command.project, &change)?;
-    match record_change(store, command, &change, Some(&read)) {
+    let result = if held(store, command)? {
+        record_change(store, command, &change, None)
+    } else {
+        let read = check_change(store, &command.project, &change)?;
+        record_change(store, command, &change, Some(&read))
+    };
+    match result {
         Ok(_) => Ok(change.digest()),
         Err(error) => Err(answer(Err(error), store)),
+    }
+}
+
+/// Whether the ledger holds a record of `command`'s request, looked up as
+/// preparation looks up a write over MCP. A record that cannot be read is a
+/// ledger fault.
+fn held<S: Views + ?Sized>(store: &S, command: &Command) -> Result<bool, Value> {
+    match store.get(&command.project, REQUEST_VIEW, &request_key(command)) {
+        Ok(None) => Ok(false),
+        Ok(Some(document)) if request_state(&document.body).is_some() => Ok(true),
+        Ok(Some(_)) => Err(failed(
+            LEDGER_UNAVAILABLE,
+            "the ledger holds a record of this request that cannot be read",
+            PLACE_LEDGER,
+        )),
+        Err(error) => Err(store_failed(&error, NOT_RECORDED_BUSY)),
     }
 }
 
@@ -724,6 +749,39 @@ mod tests {
             json!({"section": "submission", "field": "submission"})
         );
         assert_eq!(head(&store), before);
+    }
+
+    #[test]
+    fn a_retried_phase_edit_refused_after_its_phase_was_withdrawn_is_caught() {
+        use baley_core::scope::PhaseFields;
+
+        let (_dir, store) = approved();
+        let goal = PhaseFields {
+            goal: Some("The owner approves every change".into()),
+            ..PhaseFields::default()
+        };
+        let edit = command(SUBMIT_COMMAND, R4, 4, T4);
+        submit_phase_edit(&store, &edit, 2, &goal).unwrap();
+        append(
+            &store,
+            R6,
+            T5,
+            vec![
+                phase_withdrawn(2),
+                story_reassigned(2, 1),
+                phase_reordered(&[1]),
+            ],
+        );
+        let before = head(&store);
+
+        let again = submit_phase_edit(&store, &edit, 2, &goal);
+        assert_eq!(again, Ok(Hash::from_hex(E_B_DIGEST).unwrap()));
+        assert_eq!(head(&store), before);
+        let drafts = of_type(&history(&store), "scope.submitted")
+            .into_iter()
+            .filter(|event| event.payload["digest"] == E_B_DIGEST)
+            .count();
+        assert_eq!(drafts, 1);
     }
 
     #[test]
