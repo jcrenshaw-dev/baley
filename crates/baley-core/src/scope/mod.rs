@@ -17,6 +17,7 @@ mod draft;
 mod event;
 mod phase;
 mod roadmap;
+mod rules;
 mod submission;
 
 pub use approval::{
@@ -44,6 +45,10 @@ pub use phase::{
     phase_detail_key, phase_detail_spec, phase_key, phase_spec,
 };
 pub use roadmap::{ROADMAP_VIEW, RoadmapProjector, roadmap_key, roadmap_spec};
+pub use rules::{
+    AcceptedScope, EXECUTION_PRESENT, PHASE_COMPLETE, PhaseProgress, STORY_SHIPPED, ScopeRefusal,
+    judge_progress,
+};
 pub use submission::{
     DEPENDENCY_CYCLE, Description, MALFORMED_SUBMISSION, PROJECT_ALREADY_STARTED, Phase,
     STALE_DRAFT, STORY_DOUBLE_ASSIGNED, Story, StoryStatus, Submission, SubmissionRefusal,
