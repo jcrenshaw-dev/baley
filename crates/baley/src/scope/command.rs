@@ -385,9 +385,10 @@ fn owner_command(
     })
 }
 
-/// What the approval's answer prints: the receipt's three lines, exit 0; a
-/// refusal as `<code>: <reason>`, exit 2, a stale draft's naming the first
-/// part that differs; a failure the same way, exit 1.
+/// What the approval's answer prints, a start's or a change's: the receipt's
+/// three lines, an empty list as `none`, exit 0; a refusal as `<code>:
+/// <reason>`, exit 2, a stale draft's naming the first part that differs; a
+/// failure the same way, exit 1.
 pub(crate) fn answer_render(answer: &Value) -> Render {
     let text = |name: &str| escaped(answer[name].as_str().unwrap_or_default());
     let joined = |name: &str| {
@@ -395,7 +396,7 @@ pub(crate) fn answer_render(answer: &Value) -> Render {
             .as_array()
             .map(|items| items.iter().map(Value::to_string).collect())
             .unwrap_or_default();
-        numbers.join(", ")
+        or_none(numbers)
     };
     let mut line = format!("{}: {}", text("code"), text("reason"));
     if let Some(path) = answer["details"]["path"].as_str() {
@@ -424,6 +425,30 @@ pub(crate) fn answer_render(answer: &Value) -> Render {
             error: true,
         },
     }
+}
+
+/// What a command-line submission's answer prints: the receipt as two lines,
+/// the draft and the command that approves it, exit 0, since the owner
+/// approves at the terminal what they just submitted; a refusal or a failure
+/// as `answer_render` prints them.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the owner's change commands call it")
+)]
+pub(crate) fn submission_render(answer: &Value) -> Render {
+    if answer["status"] != "ok" {
+        return answer_render(answer);
+    }
+    let text = |name: &str| escaped(answer[name].as_str().unwrap_or_default());
+    printed(vec![
+        format!(
+            "submitted the {} draft {} at {}",
+            text("kind"),
+            text("digest"),
+            text("recorded_at")
+        ),
+        format!("approve it with: baley scope approve {}", text("digest")),
+    ])
 }
 
 /// Text from the ledger as `escape_debug` writes it, so a recorded line
@@ -1144,6 +1169,51 @@ mod tests {
             busy.lines
         );
         assert_eq!((busy.code, busy.error), (1, true));
+    }
+
+    /// W's digest: phase 2 withdrawn with its story moved to phase 1.
+    const W: &str = "830b6dfddb927b4f83c616d5fc67832b672c1af4c686d8ea578f17e01fcdf0b6";
+
+    #[test]
+    fn a_change_approval_receipt_printed_without_its_phases_and_stories_is_caught() {
+        let at = "2026-10-13T09:00:07Z";
+        let withdrawn = answer_render(&json!({"status": "ok", "kind": "phase-withdraw",
+            "digest": W, "owner": "Ada Owner", "at": at, "phases": [2], "stories": [2]}));
+        assert_eq!(
+            withdrawn.lines,
+            [
+                format!("approved the phase-withdraw submission {W} as Ada Owner at {at}"),
+                "phases: 2".into(),
+                "stories: 2".into(),
+            ]
+        );
+        assert_eq!((withdrawn.code, withdrawn.error), (0, false));
+
+        let reordered = answer_render(&json!({"status": "ok", "kind": "phase-reorder",
+            "digest": W, "owner": "Ada Owner", "at": at, "phases": [], "stories": []}));
+        assert_eq!(reordered.lines[1..], ["phases: none", "stories: none"]);
+        assert_eq!((reordered.code, reordered.error), (0, false));
+    }
+
+    #[test]
+    fn a_submission_receipt_printed_without_its_digest_or_the_approve_command_is_caught() {
+        let at = "2026-10-13T09:00:06Z";
+        let submitted = submission_render(&json!({"status": "ok", "digest": W,
+            "kind": "phase-withdraw", "recorded_at": at}));
+        assert_eq!(
+            submitted.lines,
+            [
+                format!("submitted the phase-withdraw draft {W} at {at}"),
+                format!("approve it with: baley scope approve {W}"),
+            ]
+        );
+        assert_eq!((submitted.code, submitted.error), (0, false));
+
+        let reason = "phase 2 serves story 2 and the withdrawal gives it no decision, so nothing was recorded";
+        let refused = submission_render(&json!({"status": "refused", "code": "story-undecided",
+            "reason": reason, "slot": "submission", "details": {"story": 2}}));
+        assert_eq!(refused.lines, [format!("story-undecided: {reason}")]);
+        assert_eq!((refused.code, refused.error), (2, true));
     }
 
     fn text(value: &str) -> String {
