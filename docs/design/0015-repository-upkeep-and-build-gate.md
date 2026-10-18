@@ -43,8 +43,8 @@ This area uses the existing [glossary](../../CONTEXT.md) terms without changing 
 | UPK-R5 | `main` requires `cargo-test`, `clippy`, `cargo-deny` and `fmt`, with strict up-to-date checks and the expected check producer preserved; `fmt` becomes required only after its job exists and passes. | The gate includes formatting without requiring a result no workflow can produce. | | Active |
 | UPK-R6 | Formatting uses the exact toolchain in `rust-toolchain.toml`, explicitly installs that toolchain's `rustfmt`, and runs `cargo fmt --all --check`. | A minimal toolchain installation does not supply every optional component. | UPK-R5 | Active |
 | UPK-R7 | Repository metadata and README status describe the built product and supported host, using section 9's values. | Public entry points must describe the same project. | ADR 0033 | Active |
-| UPK-R8 | New work uses `design`, `bug`, `question`, `dependencies` and `rust` as applicable; `enhancement` keeps its assignments on 53 closed issues and is not used for new work; only the seven unused labels in section 9 are removed. | Removing a used label erases classification. | | Active |
-| UPK-R9 | The bug form requires one of section 9's three impact choices, independently of project priority. | Only the reporter knows what the problem costs them. | | Active |
+| UPK-R8 | Issues use the jcrenshaw-dev issue types and labels in the [org label standard](https://github.com/jcrenshaw-dev/.github/blob/main/LABELS.md). Dependabot's `dependencies` and `rust` labels stay as Dependabot applies them. A label is deleted only after every issue carrying it has the type that replaces it. | Removing a used label erases classification. | | Active |
+| UPK-R9 | The bug form sets the Bug type and `needs-triage`, and requires one of section 9's three impact choices. The question form sets `needs-triage`. Impact is the reporter's, and severity is set at triage. | Only the reporter knows what the problem costs them. | | Active |
 | UPK-R10 | Suite cost is measured at the implementation commit without a competing build, with six build jobs and six test threads, full per-file executed counts, the twenty slowest cases plus ties, and an assessment of every represented file. | Elapsed time and source counts do not establish test value. | UPK-R11 | Active |
 | UPK-R11 | The repository build default is six jobs, nextest commands explicitly set six build jobs and six test threads, and clippy explicitly uses `-j 6`. | Compilation and test execution have separate concurrency limits. | | Active |
 | UPK-Q1 | Every old-name match is classified, and no active Baley interface uses an old name. | A zero-match rule would erase intentional history. | UPK-R1, UPK-R4 | Active |
@@ -202,19 +202,9 @@ UPK-R10 and UPK-Q3 require the measurement specified in section 5, full per-file
 
 ### Labels
 
-The all-state GitHub issue collection, including pull requests, gives these assignments on 2026-10-06. Open and closed counts below exclude pull requests, which have their own column. Six labels remain.
+Baley uses the organization's issue types and labels, defined in the [org label standard](https://github.com/jcrenshaw-dev/.github/blob/main/LABELS.md). The issue types are Bug, Enhancement, Docs and Task. The labels are the four severity labels, the four resolution labels, `needs-triage`, `needs-info`, `good first issue`, `help wanted`, `security` and `design`. Dependabot adds `dependencies` and `rust` to its own pull requests and creates them when they are missing.
 
-| Label | Open issues | Closed issues | Pull requests | Use |
-|---|---:|---:|---:|---|
-| `design` | 1 | 12 | 10 | Active |
-| `bug` | 7 | 2 | 0 | Active |
-| `question` | 0 | 0 | 0 | Active; the [question form:3](../../.github/ISSUE_TEMPLATE/question.yml#L3) applies it |
-| `dependencies` | 0 | 0 | 6 | Active |
-| `rust` | 1 | 0 | 6 | Active |
-| `enhancement` | 0 | 53 | 0 | Keep these assignments; not used for new work |
-| `accessibility`, `documentation`, `duplicate`, `good first issue`, `help wanted`, `invalid`, `wontfix` | 0 each | 0 each | 0 each | Removed; none was assigned |
-
-The 53 `enhancement` assignments are closed issues 73 through 126, excluding 93. Removal covers seven labels and relabels no issue. UPK-R8 requires a fresh inventory of assignments before deletion, including closed issues and pull requests.
+Issue types replace the former `bug` and `enhancement` labels. The 18 issues that carried `bug` are type Bug, and the 54 that carried `enhancement` are type Enhancement. The 15 issues labeled `design` are type Task and keep the label. No issue carried `question`. Open issues that carried no label have `needs-triage`, as read on 2026-10-18.
 
 ### Bug impact
 
@@ -226,7 +216,7 @@ The bug form has a required dropdown with id `impact`, label `Impact`, no presel
 | Wrong result, I can work around it | The reporter can continue with a workaround |
 | Minor or cosmetic | The reporter identifies a smaller impact |
 
-The existing required `what`, `repro` and `version` fields remain. Impact does not assign project priority. The form is verified by a valid GitHub preview in which omission prevents submission and each choice is carried into the report.
+The existing required `what`, `repro` and `version` fields remain. The form also sets the Bug type and the `needs-triage` label. Impact does not set the severity, which is set at triage. The form is verified by a valid GitHub preview in which omission prevents submission and each choice is carried into the report.
 
 ## 10. Instructions served
 
@@ -245,8 +235,8 @@ Not applicable as a new instruction surface: repository upkeep serves no model i
 | UPK-R5 | Built | [test.yml:121-140](../../.github/workflows/test.yml#L121) runs `fmt` beside the three other jobs, and the applied rules require all four from one producer with strict checks, as the note below records |
 | UPK-R6 | Built | [test.yml:127-140](../../.github/workflows/test.yml#L127) reads the exact channel from [rust-toolchain.toml:11](../../rust-toolchain.toml#L11), installs and selects it, explicitly adds its `rustfmt` component and runs `cargo fmt --all --check` |
 | UPK-R7 | Built | README describes the [status](../../README.md), [host](../../README.md#hosts-and-platforms), [four required checks](../../README.md#how-it-is-designed-and-built), [contribution policy](../../README.md#issues-and-contributions) and [designed credential boundary](../../README.md#outside-reviews-and-your-api-keys) and [what is still unbuilt](../../README.md#current-state). GitHub's description, six topics and disabled wiki match section 9, as read on 2026-10-06 |
-| UPK-R8 | Built | Section 9's six labels remain; the seven no issue or pull request used are removed, and `enhancement` keeps its 53 closed issues without being used for new work |
-| UPK-R9 | Built | [bug.yml:12-21](../../.github/ISSUE_TEMPLATE/bug.yml#L12) requires one of section 9's three impact choices with no preselected answer; the required `what`, `repro` and `version` fields remain at [5-11](../../.github/ISSUE_TEMPLATE/bug.yml#L5) and [22-35](../../.github/ISSUE_TEMPLATE/bug.yml#L22) |
+| UPK-R8 | Built | The repository has the org standard's 14 labels plus `dependencies` and `rust`, and its issues carry 18 Bug, 54 Enhancement and 15 Task types, with `needs-triage` on the 39 open issues that have no type, as read on 2026-10-18 |
+| UPK-R9 | Built | [bug.yml:3-4](../../.github/ISSUE_TEMPLATE/bug.yml#L3) sets the Bug type and `needs-triage`; [bug.yml:13-22](../../.github/ISSUE_TEMPLATE/bug.yml#L13) requires one of section 9's three impact choices with no preselected answer; the required `what`, `repro` and `version` fields remain at [6-12](../../.github/ISSUE_TEMPLATE/bug.yml#L6) and [23-36](../../.github/ISSUE_TEMPLATE/bug.yml#L23); [question.yml:3](../../.github/ISSUE_TEMPLATE/question.yml#L3) sets `needs-triage` |
 | UPK-R10, UPK-Q3 | Not built | Static counts below supply no executed counts or durations; [#54](https://github.com/jcrenshaw-dev/baley/issues/54) owns the measurement and assessment |
 | UPK-R11 | Built | [.cargo/config.toml:3](../../.cargo/config.toml#L3) sets six build jobs; [.config/nextest.toml:3](../../.config/nextest.toml#L3) keeps six test threads; nextest at [test.yml:60](../../.github/workflows/test.yml#L60) explicitly sets `--build-jobs 6 --test-threads 6`, and clippy at [test.yml:89](../../.github/workflows/test.yml#L89) sets `-j 6` |
 | UPK-Q1 | Built | Section 6 classifies every retained match; no active source uses an old name |
