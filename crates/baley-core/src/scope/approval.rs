@@ -355,14 +355,14 @@ pub fn start_events(
     Ok(events)
 }
 
-/// Numbering an approved start would pass `u32::MAX`, so a phase number or
-/// story id would wrap onto one already used.
+/// Numbering an approved start or declaration would pass `u32::MAX`, so a
+/// phase number or story id would wrap onto one already used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumbersExhausted;
 
 /// The `count` whole numbers after `highest`, or [`NumbersExhausted`] when the
 /// last would pass `u32::MAX`.
-fn next_numbers(highest: u32, count: usize) -> Result<Vec<u32>, NumbersExhausted> {
+pub(super) fn next_numbers(highest: u32, count: usize) -> Result<Vec<u32>, NumbersExhausted> {
     (1..=count)
         .map(|step| {
             u32::try_from(step)
@@ -373,7 +373,7 @@ fn next_numbers(highest: u32, count: usize) -> Result<Vec<u32>, NumbersExhausted
         .collect()
 }
 
-fn event(
+pub(super) fn event(
     stream: &str,
     type_name: &str,
     type_version: u32,

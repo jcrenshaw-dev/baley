@@ -89,6 +89,8 @@ impl HeldStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HeldPhase {
     pub(super) number: u32,
+    pub(super) name: String,
+    pub(super) goal: String,
     pub(super) depends_on: Vec<u32>,
     pub(super) stories: Vec<u32>,
     pub(super) withdrawn: bool,
@@ -128,6 +130,8 @@ impl AcceptedScope {
                 let phase = phase.as_object()?;
                 Some(HeldPhase {
                     number: whole(phase.get("number"))?,
+                    name: phase.get("name")?.as_str()?.to_owned(),
+                    goal: phase.get("goal")?.as_str()?.to_owned(),
                     depends_on: wholes(phase.get("depends_on"))?,
                     stories: wholes(phase.get("stories"))?,
                     withdrawn: match phase.get("status")?.as_str()? {
@@ -634,7 +638,7 @@ pub fn judge_progress(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     //! Scopes are written out as the `roadmap` projector writes its
     //! document, and every expected code and detail is read off design 0004
     //! by hand.
@@ -647,7 +651,7 @@ mod tests {
     use crate::scope::{ChangeKind, ChangeSubmission, judge_change};
 
     /// A0, the roadmap after the approved S1.
-    fn a0() -> Value {
+    pub(in crate::scope) fn a0() -> Value {
         json!({"roadmap": "project",
             "description": {"what": "A ledger for agent work",
                 "core_value": "Nothing moves on an unproven claim",
@@ -668,11 +672,11 @@ mod tests {
             "highest_phase": 2, "highest_story": 3})
     }
 
-    fn scope(document: &Value) -> AcceptedScope {
+    pub(in crate::scope) fn scope(document: &Value) -> AcceptedScope {
         AcceptedScope::read(Some(document)).expect("a readable roadmap")
     }
 
-    fn change(kind: ChangeKind, value: Value) -> ChangeSubmission {
+    pub(in crate::scope) fn change(kind: ChangeKind, value: Value) -> ChangeSubmission {
         judge_change(kind, &value).unwrap_or_else(|refusal| panic!("{value}: {refusal:?}"))
     }
 
@@ -791,7 +795,7 @@ mod tests {
     }
 
     /// `document` with each JSON pointer set to its value.
-    fn with(document: Value, changes: &[(&str, Value)]) -> Value {
+    pub(in crate::scope) fn with(document: Value, changes: &[(&str, Value)]) -> Value {
         let mut document = document;
         for (pointer, to) in changes {
             *document
@@ -802,7 +806,7 @@ mod tests {
     }
 
     /// A1, A0 after phase 2 is withdrawn with story 2 moved to phase 1.
-    fn a1() -> Value {
+    pub(in crate::scope) fn a1() -> Value {
         with(
             a0(),
             &[
@@ -831,7 +835,7 @@ mod tests {
     }
 
     /// P, a new phase depending on phase 1, with each member set.
-    fn p(changes: &[(&str, Value)]) -> ChangeSubmission {
+    pub(in crate::scope) fn p(changes: &[(&str, Value)]) -> ChangeSubmission {
         let mut value = json!({"name": "Reports", "goal": "The owner reads progress",
             "detail": "Progress from the ledger", "depends_on": [1], "stories": []});
         for (member, to) in changes {
@@ -841,7 +845,7 @@ mod tests {
     }
 
     /// D1, a revised description.
-    fn d1() -> ChangeSubmission {
+    pub(in crate::scope) fn d1() -> ChangeSubmission {
         change(
             ChangeKind::ProjectDescribe,
             json!({"what": "A ledger for agent work",

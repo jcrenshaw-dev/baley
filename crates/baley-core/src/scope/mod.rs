@@ -1,8 +1,9 @@
 //! Scope records' pure half (design 0004 sections 5 and 6): the judgement
 //! of a start submission and its digest, the judgement of a change
-//! submission with its digest and target, the judgement of an approval, the
-//! eleven scope events, and the `draft`, `roadmap`, `phase`,
-//! `phase_detail` and `backlog` views.
+//! submission with its digest and target, the judgement of a change against
+//! accepted scope, the judgement of an approval of either, the events an
+//! approved start or change appends, the eleven scope events, and the
+//! `draft`, `roadmap`, `phase`, `phase_detail` and `backlog` views.
 //!
 //! Nothing here reads a store, a file or a clock: the binary supplies every
 //! value it judges, and stores any body before an event names it.
@@ -13,6 +14,7 @@ use serde_json::{Value, json};
 mod approval;
 mod backlog;
 mod change;
+mod change_events;
 mod draft;
 mod event;
 mod phase;
@@ -29,6 +31,7 @@ pub use change::{
     ChangeKind, ChangeSubmission, Decision, Destination, PhaseDeclaration, PhaseFields,
     ScopeChange, judge_change,
 };
+pub use change_events::change_events;
 pub use draft::{DRAFT_NEWEST_INDEX, DRAFT_VIEW, DraftProjector, draft_key, draft_spec};
 pub use event::{
     PHASE_DECLARED, PHASE_DECLARED_VERSION, PHASE_REORDERED, PHASE_REORDERED_VERSION,
