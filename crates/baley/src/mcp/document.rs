@@ -56,7 +56,7 @@ pub enum Identity {
     /// A scope draft as its latest submission recorded it.
     #[serde(rename = "draft")]
     Draft {
-        /// The draft's digest from the scope-submit receipt.
+        /// The draft's digest from its submission's receipt.
         digest: String,
     },
     /// The project's accepted roadmap: its description, phases and stories.

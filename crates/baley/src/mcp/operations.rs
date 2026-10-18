@@ -196,6 +196,16 @@ pub const APPLY_OPERATIONS: &[Operation] = &[
     retired("task-open", 8),
     retired("task-close", 8),
     with_project("scope-submit"),
+    with_project("project-describe"),
+    with_project("phase-declare"),
+    with_project("phase-edit"),
+    with_project("phase-reorder"),
+    with_project("phase-withdraw"),
+    with_project("story-declare"),
+    with_project("story-edit"),
+    with_project("story-reassign"),
+    with_project("story-drop"),
+    with_project("backlog-reorder"),
 ];
 
 /// A spelling served only from a project, which its call prepares.
@@ -328,6 +338,28 @@ enum RequestShape {
     // `scope-submit` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "scope-submit")]
     ScopeSubmit(#[allow(dead_code)] crate::mcp::scope::SubmitShape),
+    // Each change parses its own arguments, so these variants are here for
+    // their schemas.
+    #[serde(rename = "project-describe")]
+    ProjectDescribe(#[allow(dead_code)] crate::mcp::scope::ProjectDescribeShape),
+    #[serde(rename = "phase-declare")]
+    PhaseDeclare(#[allow(dead_code)] crate::mcp::scope::PhaseDeclareShape),
+    #[serde(rename = "phase-edit")]
+    PhaseEdit(#[allow(dead_code)] crate::mcp::scope::PhaseEditShape),
+    #[serde(rename = "phase-reorder")]
+    PhaseReorder(#[allow(dead_code)] crate::mcp::scope::PhaseReorderShape),
+    #[serde(rename = "phase-withdraw")]
+    PhaseWithdraw(#[allow(dead_code)] crate::mcp::scope::PhaseWithdrawShape),
+    #[serde(rename = "story-declare")]
+    StoryDeclare(#[allow(dead_code)] crate::mcp::scope::StoryDeclareShape),
+    #[serde(rename = "story-edit")]
+    StoryEdit(#[allow(dead_code)] crate::mcp::scope::StoryEditShape),
+    #[serde(rename = "story-reassign")]
+    StoryReassign(#[allow(dead_code)] crate::mcp::scope::StoryReassignShape),
+    #[serde(rename = "story-drop")]
+    StoryDrop(#[allow(dead_code)] crate::mcp::scope::StoryDropShape),
+    #[serde(rename = "backlog-reorder")]
+    BacklogReorder(#[allow(dead_code)] crate::mcp::scope::BacklogReorderShape),
 }
 
 fn invalid_arguments(reason: impl Into<String>) -> Value {
@@ -593,6 +625,16 @@ pub(crate) mod expected {
         "task-open",
         "task-close",
         "scope-submit",
+        "project-describe",
+        "phase-declare",
+        "phase-edit",
+        "phase-reorder",
+        "phase-withdraw",
+        "story-declare",
+        "story-edit",
+        "story-reassign",
+        "story-drop",
+        "backlog-reorder",
     ];
 }
 
@@ -646,6 +688,16 @@ mod tests {
                     "capture",
                     "document",
                     "scope-submit",
+                    "project-describe",
+                    "phase-declare",
+                    "phase-edit",
+                    "phase-reorder",
+                    "phase-withdraw",
+                    "story-declare",
+                    "story-edit",
+                    "story-reassign",
+                    "story-drop",
+                    "backlog-reorder",
                 ]
                 .contains(n)
             }) {
@@ -667,12 +719,27 @@ mod tests {
                 needs_project: true
             }
         );
-        assert_eq!(
-            lookup(Tool::Apply, Some("scope-submit")),
-            Lookup::Available {
-                needs_project: true
-            }
-        );
+        for name in [
+            "scope-submit",
+            "project-describe",
+            "phase-declare",
+            "phase-edit",
+            "phase-reorder",
+            "phase-withdraw",
+            "story-declare",
+            "story-edit",
+            "story-reassign",
+            "story-drop",
+            "backlog-reorder",
+        ] {
+            assert_eq!(
+                lookup(Tool::Apply, Some(name)),
+                Lookup::Available {
+                    needs_project: true
+                },
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -844,6 +911,36 @@ mod tests {
             .collect();
         properties.sort_unstable();
         assert_eq!(properties, ["request_id", "submission"]);
+    }
+
+    #[test]
+    fn a_change_operation_left_out_of_the_request_shapes_is_caught() {
+        // Design 0012: each change takes a request_id and a submission.
+        for operation in [
+            "project-describe",
+            "phase-declare",
+            "phase-edit",
+            "phase-reorder",
+            "phase-withdraw",
+            "story-declare",
+            "story-edit",
+            "story-reassign",
+            "story-drop",
+            "backlog-reorder",
+        ] {
+            let answer =
+                schema_answer(&json!({"operation": "schema", "tool": "apply", "for": operation}));
+            assert_eq!(answer["status"], "ok", "{operation}: {answer}");
+            let mut properties: Vec<&str> = answer["schema"]["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .filter(|name| *name != "operation")
+                .collect();
+            properties.sort_unstable();
+            assert_eq!(properties, ["request_id", "submission"], "{operation}");
+        }
     }
 
     #[test]

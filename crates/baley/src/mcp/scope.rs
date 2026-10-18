@@ -1,12 +1,16 @@
-//! `scope-submit` on `baley_apply`: a start submission judged whole and
-//! recorded as a draft the owner can approve by its digest (design 0004
-//! section 5). A submission refused on its content, or after the project's
-//! start was approved, records nothing.
+//! `scope-submit` and the ten change operations on `baley_apply`: a start or
+//! a change judged whole and recorded as a draft the owner approves by its
+//! digest at the terminal (design 0004 section 5, ADR 0044). A start refused
+//! on its content or after the project's start was approved, and a change
+//! refused on its content or by accepted scope, record nothing. No operation
+//! here approves anything.
 
+use std::cell::RefCell;
 use std::path::Path;
 
 use baley_core::scope::{ChangeKind, ChangeSubmission, Submission, judge_change, judge_submission};
-use baley_store::{CommandKind, Hash, ProjectId, RequestId, request_digest};
+use baley_store::{Command, CommandKind, Hash, ProjectId, RequestId, request_digest};
+use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -253,42 +257,86 @@ pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
         Ok(judged) => judged,
         Err(refusal) => return refusal,
     };
+    let check = |store: &SqliteStore, project: &ProjectId| submit::start_once(store, project);
+    match prepared(preparation, &judged.request, &check) {
+        Ok((store, command)) => {
+            submit::answer(submit::record(store, &command, &judged.submission), store)
+        }
+        Err(answer) => answer,
+    }
+}
+
+/// Serves one change call for the session's `preparation`: the arguments are
+/// judged first, then the write is prepared with the change checked against
+/// accepted scope as its own check, so a change scope rules out ends the call
+/// before checkout admission and the policy step and records nothing. Then
+/// the change is recorded in its own transaction, which confirms the scope
+/// the check read has not moved. A request the ledger already holds skips the
+/// check and is answered from its record. An answer that ends preparation is
+/// returned as it is.
+pub fn serve_change(arguments: &Value, preparation: &Preparation) -> Value {
+    let judged = match judge_change_arguments(arguments) {
+        Ok(judged) => judged,
+        Err(refusal) => return refusal,
+    };
+    // Kept for the recording to confirm. A replay skips the check and keeps
+    // none, and the store answers it from its record.
+    let read = RefCell::new(None);
+    let check = |store: &SqliteStore, project: &ProjectId| {
+        let checked = submit::check_change(store, project, &judged.change)?;
+        *read.borrow_mut() = Some(checked);
+        Ok(())
+    };
+    match prepared(preparation, &judged.request, &check) {
+        Ok((store, command)) => {
+            let read = read.borrow();
+            submit::answer(
+                submit::record_change(store, &command, &judged.change, read.as_ref()),
+                store,
+            )
+        }
+        Err(answer) => answer,
+    }
+}
+
+/// Prepares a scope write for the session with `check` as its own check,
+/// asked against the session's ledger. It gives the ledger and the command to
+/// record under, or the answer preparation ended with.
+fn prepared<'a>(
+    preparation: &'a Preparation,
+    request: &WriteRequest,
+    check: &dyn Fn(&SqliteStore, &ProjectId) -> Result<(), Value>,
+) -> Result<(&'a SqliteStore, Command), Value> {
     let ledger = preparation.ledger.as_deref();
     // With no ledger, preparation fails at the project check, before any
     // settings are read from the config folder or the check is asked.
     let config = ledger.map_or(Path::new(""), |ledger| ledger.config.as_path());
     let check = |project: &ProjectId| match ledger {
-        Some(ledger) => submit::start_once(&ledger.store, project),
+        Some(ledger) => check(&ledger.store, project),
         None => Err(failed(
             LEDGER_UNAVAILABLE,
             "the write was checked without a ledger",
             PLACE_LEDGER,
         )),
     };
-    let prepared = match prepare_checked(
+    let prepared = prepare_checked(
         ledger.map(|ledger| &ledger.store),
         &preparation.caller,
-        &judged.request,
+        request,
         config,
         preparation.host,
         &preparation.at,
         &mut crate::process::System,
         &check,
-    ) {
-        Ok(prepared) => prepared,
-        Err(answer) => return answer,
-    };
-    let (Some(ledger), Some(command)) = (ledger, prepared.command) else {
-        return failed(
+    )?;
+    match (ledger, prepared.command) {
+        (Some(ledger), Some(command)) => Ok((&ledger.store, command)),
+        _ => Err(failed(
             LEDGER_UNAVAILABLE,
             "the write was prepared without a ledger or a command",
             PLACE_LEDGER,
-        );
-    };
-    submit::answer(
-        submit::record(&ledger.store, &command, &judged.submission),
-        &ledger.store,
-    )
+        )),
+    }
 }
 
 #[cfg(test)]

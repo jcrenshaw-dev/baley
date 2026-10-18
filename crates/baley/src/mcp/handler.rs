@@ -7,9 +7,10 @@
 //! after the queue and then the operation. A call that needs a project reaches
 //! the operation with a [`Preparation`]: the caller the gate formed, the
 //! call's host, the session's ledger and the server's time. `capture`,
-//! `scope-submit` and `document` set `needs_project`, and in their
-//! [`operate`] arms `capture` and `scope-submit` prepare a write from it and
-//! `document` a read.
+//! `scope-submit`, the ten change operations from `project-describe` to
+//! `backlog-reorder`, and `document` set `needs_project`, and in their
+//! [`operate`] arms the writes prepare a write from it and `document` a
+//! read.
 //! rmcp has already validated the request's metadata by the time any
 //! of this runs, so a protocol-required metadata error stays a protocol error
 //! and runs nothing.
@@ -156,8 +157,8 @@ fn run_decision(
 /// The answer of an admitted operation. It matches the called operation and the
 /// project call's [`Preparation`] together, so an arm that needs a project
 /// names the input in its pattern and the arms that need none ignore it.
-/// `capture` and `scope-submit` prepare a write from the [`Preparation`], and
-/// `document` a read.
+/// `capture`, `scope-submit` and the ten change operations prepare a write
+/// from the [`Preparation`], and `document` a read.
 fn operate(called: &Called, arguments: Option<&Value>, project: Option<&Preparation>) -> Value {
     let arguments_or_null = arguments.unwrap_or(&Value::Null);
     match (called, project) {
@@ -177,6 +178,11 @@ fn operate(called: &Called, arguments: Option<&Value>, project: Option<&Preparat
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "document" => {
             document::serve(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation))
+            if scope::change_kind(spelling).is_some() =>
+        {
+            scope::serve_change(arguments_or_null, preparation)
         }
         // The gate admits only the spellings above, so a baseline entry marked
         // served with nothing behind it answers as an unknown operation.
@@ -637,6 +643,145 @@ mod tests {
                 .contains(&answer["code"].as_str().unwrap()),
             "{answer}"
         );
+    }
+
+    #[test]
+    fn a_valid_change_answered_as_an_unknown_operation_is_caught() {
+        let caller = ServerCaller::new(
+            "/real/r",
+            "/real/r",
+            "claude-code",
+            "0b7e4a52-3c1d-4f6a-8e9b-1a2b3c4d5e6f",
+            &json!(7),
+        )
+        .unwrap();
+        // No ledger and no project at the caller's directory, so a change
+        // that reaches preparation is answered `failed` there.
+        let preparation = Preparation {
+            ledger: None,
+            host: Host::ClaudeCode,
+            caller,
+            at: "2026-10-13T09:00:00Z".into(),
+        };
+        let changes = [
+            (
+                "project-describe",
+                json!({"what": "A ledger for agent work",
+                    "core_value": "Nothing moves on an unproven claim",
+                    "constraints": ["One binary", "No server"]}),
+            ),
+            (
+                "phase-declare",
+                json!({"name": "Reports", "goal": "The owner reads progress",
+                    "detail": "Progress from the ledger", "depends_on": [1], "stories": []}),
+            ),
+            (
+                "phase-edit",
+                json!({"phase": 2, "goal": "The owner approves every change"}),
+            ),
+            ("phase-reorder", json!({"order": [2, 1]})),
+            (
+                "phase-withdraw",
+                json!({"phase": 2, "decisions": [{"story": 2, "to": 1}]}),
+            ),
+            (
+                "story-declare",
+                json!({"sentence": "s", "status": "active", "phase": null}),
+            ),
+            (
+                "story-edit",
+                json!({"story": 3, "sentence": "Teammates read the backlog"}),
+            ),
+            ("story-reassign", json!({"story": 3, "phase": 2})),
+            ("story-drop", json!({"story": 3})),
+            ("backlog-reorder", json!({"order": [2, 1, 3]})),
+        ];
+        for (operation, submission) in changes {
+            let answer = operate(
+                &Called::Operation(Tool::Apply, operation.into()),
+                Some(&json!({"operation": operation,
+                    "request_id": "9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f",
+                    "submission": submission})),
+                Some(&preparation),
+            );
+            assert_eq!(answer["status"], "failed", "{operation}: {answer}");
+            assert_eq!(answer["recorded"], false, "{operation}: {answer}");
+            assert!(
+                ["project-context-invalid", "not-a-project"]
+                    .contains(&answer["code"].as_str().unwrap()),
+                "{operation}: {answer}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_change_answered_after_preparation_or_recorded_is_caught() {
+        let caller = ServerCaller::new(
+            "/real/r",
+            "/real/r",
+            "claude-code",
+            "0b7e4a52-3c1d-4f6a-8e9b-1a2b3c4d5e6f",
+            &json!(7),
+        )
+        .unwrap();
+        // A real store holding one project, so anything recorded shows in its
+        // head. A preparation that ran first would answer `failed`, since the
+        // caller's directory holds no project.
+        let at = "2026-10-13T09:00:00Z";
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::ledger::open::store(
+            &dir.path().join("home"),
+            at,
+            crate::ledger::open::options(),
+        )
+        .unwrap();
+        let project = baley_store::ProjectId("6f1c2a4e-8b1d-4c3a-9e2f-0a5b7c9d1e3f".into());
+        baley_store::Admin::create_project(&store, &project, "a", at).unwrap();
+        let head = |store: &SqliteStore| {
+            baley_store::Ledger::head(store, &project)
+                .unwrap()
+                .map(|head| head.seq)
+        };
+        let before = head(&store);
+        let preparation = Preparation {
+            ledger: Some(Arc::new(SessionLedger {
+                store,
+                config: dir.path().join("config"),
+            })),
+            host: Host::ClaudeCode,
+            caller,
+            at: at.into(),
+        };
+        for (operation, request_id, submission, details) in [
+            (
+                "phase-reorder",
+                "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+                json!({"order": []}),
+                json!({"section": "order", "field": "order"}),
+            ),
+            (
+                "story-declare",
+                "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f",
+                json!({"sentence": "s", "status": "active", "phase": null, "capture": "c-1"}),
+                json!({"section": "capture", "field": "capture"}),
+            ),
+        ] {
+            let answer = operate(
+                &Called::Operation(Tool::Apply, operation.into()),
+                Some(&json!({"operation": operation, "request_id": request_id,
+                    "submission": submission})),
+                Some(&preparation),
+            );
+            assert_eq!(answer["status"], "refused", "{operation}: {answer}");
+            assert_eq!(
+                answer["code"], "malformed-submission",
+                "{operation}: {answer}"
+            );
+            assert_eq!(answer["slot"], "submission", "{operation}: {answer}");
+            assert_eq!(answer["details"], details, "{operation}: {answer}");
+        }
+        let ledger = preparation.ledger.as_deref().expect("a ledger");
+        assert_eq!(head(&ledger.store), before);
     }
 
     #[test]
