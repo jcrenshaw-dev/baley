@@ -23,6 +23,7 @@ pub(crate) mod fixtures {
     //! submissions are written out as design 0004's start shape, never
     //! produced by the code under test.
 
+    use baley_core::scope::{ChangeKind, ChangeSubmission, judge_change};
     use baley_core::scope::{
         PROJECT_STREAM, ROADMAP_STREAM, SCOPE_APPROVED, SCOPE_APPROVED_VERSION, STORY_DROPPED,
         STORY_DROPPED_VERSION, approved_payload, judge_submission, story_dropped_payload,
@@ -42,6 +43,8 @@ pub(crate) mod fixtures {
     pub const T1: &str = "2026-10-13T09:00:01Z";
     pub const T2: &str = "2026-10-13T09:00:02Z";
     pub const T3: &str = "2026-10-13T09:00:03Z";
+    pub const T4: &str = "2026-10-13T09:00:04Z";
+    pub const T5: &str = "2026-10-13T09:00:05Z";
     pub const ID: &str = "6f1c2a4e-8b1d-4c3a-9e2f-0a5b7c9d1e3f";
     /// A second project, for reads that must not see another project's purge.
     pub const ID_B: &str = "7a2d3b5f-9c0e-4f1a-8b2c-3d4e5f6a7b8c";
@@ -49,6 +52,7 @@ pub(crate) mod fixtures {
     pub const R1: &str = "9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f";
     pub const R2: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
     pub const R3: &str = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
+    pub const R4: &str = "5b6c7d8e-9f0a-4b1c-8d2e-3f4a5b6c7d8e";
     pub const R5: &str = "7a8b9c0d-1e2f-4a3b-9c4d-5e6f7a8b9c0d";
 
     /// The digest of M's canonical JSON, from `sha256sum` over those bytes.
@@ -88,6 +92,24 @@ pub(crate) mod fixtures {
         let mut s2 = s1();
         s2["roadmap"][1]["goal"] = json!("The owner approves by digest");
         s2
+    }
+
+    /// E_B's digest, from `sha256sum` over its canonical body.
+    pub const E_B_DIGEST: &str = "c95eaf35543ddb6517a592689362c88bb8d10f6b158924207c90833fb5c4ebd6";
+    /// E_B's canonical body, 72 bytes.
+    pub const E_B_CANONICAL: &str =
+        r#"{"goal":"The owner approves every change","kind":"phase-edit","phase":2}"#;
+
+    /// E_B, an edit of phase 2's goal.
+    pub fn e_b() -> Value {
+        json!({"phase": 2, "goal": "The owner approves every change"})
+    }
+
+    /// D1, a revised description.
+    pub fn d1() -> Value {
+        json!({"what": "A ledger for agent work",
+            "core_value": "Nothing moves on an unproven claim",
+            "constraints": ["One binary", "No server"]})
     }
 
     pub fn project() -> ProjectId {
@@ -171,6 +193,47 @@ pub(crate) mod fixtures {
             store,
             &command_in(project, SUBMIT_COMMAND, request_id, digest, at),
             &submission,
+        )
+    }
+
+    /// `value` judged whole as a change of `kind`.
+    pub fn change(kind: ChangeKind, value: &Value) -> ChangeSubmission {
+        judge_change(kind, value).unwrap_or_else(|refusal| panic!("{value}: {refusal:?}"))
+    }
+
+    /// The command preparation makes for submitting `change` in `project`
+    /// under `request_id` at `at`, its digest the change's.
+    pub fn change_command(
+        project: &ProjectId,
+        change: &ChangeSubmission,
+        request_id: &str,
+        at: &str,
+    ) -> Command {
+        let request = WriteRequest {
+            kind: CommandKind(SUBMIT_COMMAND.into()),
+            request_id: RequestId(request_id.into()),
+            digest: change.digest(),
+        };
+        prepared_command(project, &request, 0, at, &caller())
+    }
+
+    /// Records `value` as a change of `kind` through the change check and
+    /// the recording, under `request_id` at `at`.
+    pub fn submit_change(
+        store: &SqliteStore,
+        kind: ChangeKind,
+        value: &Value,
+        request_id: &str,
+        at: &str,
+    ) -> Result<Recorded, StoreError> {
+        let change = change(kind, value);
+        let read = crate::scope::submit::check_change(store, &project(), &change)
+            .unwrap_or_else(|refusal| panic!("{value}: {refusal}"));
+        crate::scope::submit::record_change(
+            store,
+            &change_command(&project(), &change, request_id, at),
+            &change,
+            Some(&read),
         )
     }
 

@@ -1,18 +1,23 @@
-//! A start submission recorded as a draft (design 0004 section 5): its body
-//! stored as a `record` payload and one `scope.submitted` on the `project`
-//! stream, in the submission's own domain transaction. Accepted scope does
-//! not change until the owner approves the draft by its digest.
+//! A start or change submission recorded as a draft (design 0004 section
+//! 5): its body stored as a `record` payload and one `scope.submitted` on the
+//! `project` stream, in the submission's own domain transaction. Accepted
+//! scope does not change until the owner approves the draft by its digest.
+//!
+//! A change is checked against accepted scope before its write is prepared,
+//! so a change scope rules out records nothing at all (D-08), and its
+//! transaction confirms the scope it was checked against has not moved.
 
 use std::collections::BTreeMap;
 
 use baley_core::scope::{
-    PROJECT_ALREADY_STARTED, PROJECT_STREAM, SCOPE_APPROVED, SCOPE_SUBMITTED,
-    SCOPE_SUBMITTED_VERSION, START_KIND, START_TARGET, Submission, submitted_payload,
+    ChangeSubmission, PROJECT_ALREADY_STARTED, PROJECT_STREAM, SCOPE_APPROVED, SCOPE_SUBMITTED,
+    SCOPE_SUBMITTED_VERSION, START_KIND, START_TARGET, ScopeRefusal, Submission,
+    judge_scope_change, submitted_payload,
 };
 use baley_store::{
     Absence, Command, Decision, EVENT_PAGE_BOUND, EventMatch, HistoryFilter, Ledger, NewEvent,
     Observed, OutcomeKind, PageRequest, Payloads, ProjectId, Recorded, Refusal as StoreRefusal,
-    RetentionClass, StoreError, StreamName,
+    RetentionClass, StoreError, StreamName, Views,
 };
 use serde_json::{Value, json};
 
@@ -20,6 +25,7 @@ use crate::envelope::{LEDGER_BUSY, Refusal};
 use crate::ledger::answer::{AnswerUnread, answer_value};
 use crate::mcp::capture::{PLACE_LEDGER, REQUEST_ID_REUSE, TEXT_PURGED, failed, store_failed};
 use crate::mcp::prepare::LEDGER_UNAVAILABLE;
+use crate::scope::read::{self, ReadError, ScopeRead};
 
 /// The command kind every scope submission is recorded under.
 pub const SUBMIT_COMMAND: &str = "scope.submit";
@@ -133,6 +139,166 @@ pub fn record<L: Ledger + ?Sized>(
                 absences: vec![Absence::Event(start_approval())],
                 ..Observed::default()
             },
+            git: None,
+        })
+    })
+}
+
+/// Checks `change` against accepted scope as `project`'s ledger holds it
+/// now: the scope read, then the scope judgement, recording nothing. A
+/// change scope rules out is the `refused` answer, slot `submission`; a
+/// read fault is a store error's `failed` answer. A pass gives back the
+/// read, which the recording confirms. It runs before the write is
+/// prepared, so a refusal records no checkout admission, policy step or
+/// `command.completed` either (D-08).
+pub fn check_change<S: Ledger + Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    change: &ChangeSubmission,
+) -> Result<ScopeRead, Value> {
+    let read = read::scope(store, project).map_err(|error| scope_unread(&error))?;
+    let accepted = read
+        .accepted()
+        .ok_or_else(|| scope_unread(&ReadError::Unreadable(String::new())))?;
+    judge_scope_change(change, &accepted, read.started, &read.progress())
+        .map_err(|refusal| scope_refused(&refusal, "submission"))?;
+    Ok(read)
+}
+
+/// A scope read fault's answer: a busy ledger may be retried.
+pub(crate) fn scope_unread(error: &ReadError) -> Value {
+    match error {
+        ReadError::Store(error) => store_failed(error, NOT_RECORDED_BUSY),
+        _ => failed(
+            LEDGER_UNAVAILABLE,
+            "the project's accepted scope cannot be read, so nothing was recorded",
+            PLACE_LEDGER,
+        ),
+    }
+}
+
+/// The `refused` answer for a change accepted scope rules out, at `slot`:
+/// `submission` when it is submitted, `digest` when it is approved (D-12).
+/// The reason names the phases and stories the details hold, since the
+/// command line prints only the code and the reason.
+pub fn scope_refused(refusal: &ScopeRefusal, slot: &str) -> Value {
+    let reason = match refusal {
+        ScopeRefusal::ProjectNotStarted => {
+            "this project's first scope is not approved yet, so there is no accepted scope to change and nothing was recorded".to_string()
+        }
+        ScopeRefusal::NoSuchPhase { phase } => {
+            format!("this project has no declared phase {phase}, so nothing was recorded")
+        }
+        ScopeRefusal::NoSuchStory { story } => {
+            format!("this project has no story {story}, so nothing was recorded")
+        }
+        ScopeRefusal::Malformed { section, field } => format!(
+            "the change's {field} in {section} does not fit accepted scope, so nothing was recorded"
+        ),
+        ScopeRefusal::StoryDoubleAssigned { story, phase } => format!(
+            "story {story} is already served by phase {phase}, and a story belongs to one phase at most, so nothing was recorded"
+        ),
+        ScopeRefusal::DependencyCycle { phases } => format!(
+            "{} would depend on each other in a cycle, so no order can deliver them and nothing was recorded",
+            listed("phase", phases)
+        ),
+        ScopeRefusal::DependencyOrder { phase, depends_on } => format!(
+            "phase {phase} would come before phase {depends_on}, which it depends on, so nothing was recorded"
+        ),
+        ScopeRefusal::OrderIncomplete { order } => format!(
+            "the order must hold each of {} exactly once, so nothing was recorded",
+            listed("entry", order)
+        ),
+        ScopeRefusal::StoryUndecided { story } => format!(
+            "the withdrawal gives story {story} of the phase no decision, so nothing was recorded. Each of its stories needs a phase to move to or a drop"
+        ),
+        ScopeRefusal::PhaseHasDependents { phases } => format!(
+            "{} depend on this phase, so it cannot be withdrawn and nothing was recorded. Change their dependencies first",
+            listed("phase", phases)
+        ),
+        ScopeRefusal::StoryNotServed { story, status } => format!(
+            "story {story} is {status}, which is final, so it cannot change and nothing was recorded"
+        ),
+        ScopeRefusal::ExecutionPresent { phase, undo } => format!(
+            "phase {phase} has execution present, so it cannot be withdrawn until {undo} undoes it, and nothing was recorded"
+        ),
+        ScopeRefusal::PhaseComplete { phase } => format!(
+            "phase {phase} is complete, so it cannot be withdrawn or given other stories, and nothing was recorded"
+        ),
+        ScopeRefusal::StoryShipped { story, phase } => format!(
+            "story {story} was served by phase {phase}, which is complete, so it cannot be moved or dropped and nothing was recorded"
+        ),
+    };
+    let answer = Refusal::new(refusal.code(), reason).slot(slot);
+    match refusal.details() {
+        Some(details) => answer.details(details),
+        None => answer,
+    }
+    .value()
+}
+
+/// `numbers` in words: `phase 2`, `phases 2 and 3`, `phases 1, 2 and 3`.
+/// An order's entries are ids or numbers, so they are named bare.
+fn listed(noun: &str, numbers: &[u32]) -> String {
+    let words: Vec<String> = numbers.iter().map(u32::to_string).collect();
+    let joined = match words.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    };
+    match (noun, numbers.len()) {
+        ("entry", _) => joined,
+        (_, 1) => format!("{noun} {joined}"),
+        _ => format!("{noun}s {joined}"),
+    }
+}
+
+/// Records one checked `change` under `command`, the command preparation
+/// returned, in one domain transaction: the body as a `record` payload and
+/// one `scope.submitted` attaching it, with the change's kind and target.
+/// Every call records, so the same content submitted again is the newest
+/// draft again; only a retry of the same request replays, from the store
+/// before any decision runs.
+///
+/// Before it appends anything the decision confirms every scope document
+/// `read`, the check's, named is unchanged, so a change whose scope moved
+/// since its check records nothing and `answer` gives `failed`
+/// `ledger-busy`. A decision asked to run without the check's read records
+/// nothing. The answer is the receipt, which never holds the change.
+pub fn record_change<L: Ledger + ?Sized>(
+    store: &L,
+    command: &Command,
+    change: &ChangeSubmission,
+    read: Option<&ScopeRead>,
+) -> Result<Recorded, StoreError> {
+    let kind = change.kind().as_str();
+    let receipt = json!({
+        "status": "ok",
+        "digest": change.digest().to_hex(),
+        "kind": kind,
+        "recorded_at": command.recorded_at,
+    });
+    store.transact(command, &mut |tx| {
+        let Some(read) = read else {
+            return Err(StoreError::Unavailable(
+                "a change submission reached its transaction without its check's read".into(),
+            ));
+        };
+        read::confirm(tx, read)?;
+        let body = tx.put_payload(change.body(), RetentionClass::Record)?;
+        tx.append(NewEvent {
+            stream: StreamName(PROJECT_STREAM.into()),
+            type_name: SCOPE_SUBMITTED.into(),
+            type_version: SCOPE_SUBMITTED_VERSION,
+            git: None,
+            payload: submitted_payload(change.digest(), kind, change.target(), &body),
+            attachments: vec![body],
+        })?;
+        Ok(Decision {
+            kind: OutcomeKind::Done,
+            answer: receipt.clone(),
+            sensitive: false,
+            observed: Observed::default(),
             git: None,
         })
     })
@@ -299,6 +465,163 @@ mod tests {
         assert!(of_type(&events, "scope.submitted").is_empty());
         assert_eq!(of_type(&events, "command.completed").len(), 1);
         assert_failed(&answer(result, &store), "ledger-busy", "ledger", true);
+    }
+
+    fn digest_of(recorded: &Recorded) -> Hash {
+        Hash::from_hex(receipt(recorded)["digest"].as_str().unwrap()).unwrap()
+    }
+
+    /// The fixtures' store with S1 approved at T3.
+    fn approved() -> (tempfile::TempDir, baley_store_sqlite::SqliteStore) {
+        let (dir, store) = two_projects();
+        approve_draft(
+            &store,
+            digest_of(&submit(&store, &s1(), R1, 1, T1).unwrap()),
+        );
+        (dir, store)
+    }
+
+    #[test]
+    fn a_change_submission_breaking_a_scope_rule_recorded_or_answered_otherwise_is_caught() {
+        use baley_core::scope::{ChangeKind as K, SubmissionRefusal, judge_change};
+
+        let (_dir, store) = approved();
+        append(&store, R2, T3, vec![story_dropped(3)]);
+        let before = head(&store);
+        let cases = [
+            (
+                K::PhaseReorder,
+                json!({"order": [1]}),
+                "order-incomplete",
+                json!({"order": [1, 2]}),
+            ),
+            (
+                K::BacklogReorder,
+                json!({"order": [1, 2, 2]}),
+                "order-incomplete",
+                json!({"order": [1, 2]}),
+            ),
+            (
+                K::PhaseReorder,
+                json!({"order": [2, 1]}),
+                "dependency-order",
+                json!({"phase": 2, "depends_on": 1}),
+            ),
+            (
+                K::PhaseWithdraw,
+                json!({"phase": 2, "decisions": []}),
+                "story-undecided",
+                json!({"story": 2}),
+            ),
+            (
+                K::PhaseWithdraw,
+                json!({"phase": 1, "decisions": [{"story": 1, "to": "drop"}]}),
+                "phase-has-dependents",
+                json!({"phases": [2]}),
+            ),
+            (
+                K::StoryEdit,
+                json!({"story": 3, "sentence": "Teammates read the backlog"}),
+                "story-not-served",
+                json!({"story": 3, "status": "dropped"}),
+            ),
+        ];
+        for (kind, value, code, details) in cases {
+            let refusal = check_change(&store, &project(), &change(kind, &value)).unwrap_err();
+            assert_eq!(refusal["status"], "refused", "{value}: {refusal}");
+            assert_eq!(refusal["code"], code, "{value}: {refusal}");
+            assert_eq!(refusal["slot"], "submission", "{value}: {refusal}");
+            assert_eq!(refusal["details"], details, "{value}: {refusal}");
+        }
+        assert_eq!(head(&store), before);
+
+        let capture = json!({"sentence": "s", "status": "active", "phase": null, "capture": "c-1"});
+        assert_eq!(
+            judge_change(K::StoryDeclare, &capture),
+            Err(SubmissionRefusal::Malformed {
+                section: "capture".into(),
+                field: "capture".into()
+            })
+        );
+
+        let other = || store.head(&project_b()).unwrap().map_or(0, |head| head.seq);
+        let before = other();
+        let refusal =
+            check_change(&store, &project_b(), &change(K::ProjectDescribe, &d1())).unwrap_err();
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], "project-not-started", "{refusal}");
+        assert_eq!(refusal["slot"], "submission", "{refusal}");
+        assert_eq!(other(), before);
+    }
+
+    #[test]
+    fn a_change_draft_recorded_without_its_kind_target_or_body_is_caught() {
+        use baley_core::scope::{ChangeKind, ROADMAP_VIEW, roadmap_key};
+
+        let (_dir, store) = approved();
+        let roadmap = || store.get(&project(), ROADMAP_VIEW, &roadmap_key()).unwrap();
+        let before = roadmap();
+        let submitted_before = of_type(&history(&store), "scope.submitted").len();
+        let recorded = submit_change(&store, ChangeKind::PhaseEdit, &e_b(), R4, T4).unwrap();
+
+        let events = history(&store);
+        let submitted = of_type(&events, "scope.submitted");
+        assert_eq!(submitted.len(), submitted_before + 1);
+        let new = submitted.last().unwrap();
+        assert_eq!(new.stream, "project");
+        assert_eq!(new.type_version, 2);
+        assert_eq!(
+            new.payload,
+            json!({"digest": E_B_DIGEST, "kind": "phase-edit", "target": "2",
+                "body": {"payload": E_B_DIGEST, "bytes": 72, "class": "record"}})
+        );
+        let body = PayloadRef::from_value(&new.payload["body"]).unwrap();
+        let PayloadBody::Present(mut reader) = store.open(&body.hash).unwrap() else {
+            panic!("the body is present");
+        };
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), E_B_CANONICAL);
+        assert_eq!(
+            receipt(&recorded),
+            json!({"status": "ok", "digest": E_B_DIGEST, "kind": "phase-edit",
+                "recorded_at": T4})
+        );
+        assert_eq!(roadmap(), before);
+    }
+
+    #[test]
+    fn a_change_draft_recorded_after_its_scope_moved_is_caught() {
+        use baley_core::scope::ChangeKind;
+
+        let (_dir, store) = approved();
+        let edit = change(ChangeKind::PhaseEdit, &e_b());
+        let read = check_change(&store, &project(), &edit).unwrap();
+        append(&store, R3, T4, vec![story_dropped(3)]);
+        let after = head(&store);
+
+        let command = change_command(&project(), &edit, R2, T5);
+        let result = record_change(&store, &command, &edit, Some(&read));
+        assert!(matches!(result, Err(StoreError::Stale(_))), "{result:?}");
+        assert_eq!(head(&store), after);
+        assert_failed(&answer(result, &store), "ledger-busy", "ledger", true);
+    }
+
+    #[test]
+    fn a_retried_change_submission_recorded_twice_is_caught() {
+        use baley_core::scope::ChangeKind;
+
+        let (_dir, store) = approved();
+        let first = submit_change(&store, ChangeKind::PhaseEdit, &e_b(), R4, T4).unwrap();
+        let again = submit_change(&store, ChangeKind::PhaseEdit, &e_b(), R4, T5).unwrap();
+        assert!(matches!(again, Recorded::Replayed { .. }), "{again:?}");
+        assert_eq!(receipt(&again), receipt(&first));
+        let events = history(&store);
+        let drafts = of_type(&events, "scope.submitted")
+            .into_iter()
+            .filter(|event| event.payload["digest"] == E_B_DIGEST)
+            .count();
+        assert_eq!(drafts, 1);
     }
 
     #[test]
