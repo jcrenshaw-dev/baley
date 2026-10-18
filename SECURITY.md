@@ -25,11 +25,13 @@ Two workflows run on every pull request.
 
 ## The full audit
 
-The full audit runs on the maintainer's machine through sentinel's `/snt:audit`, never in CI, so findings stay private until they are fixed. It runs in three steps and stops after each one until the maintainer says to go on.
+The full audit runs on the maintainer's machine through sentinel's `/snt:audit`, never in CI, so findings stay private until they are fixed. It runs in five steps and stops after each one until the maintainer says to go on.
 
 1. **Mechanical checks:** the same `check.sh`, with its output saved to `audit/check.txt`.
-2. **Claude Security scan:** one codebase scan of the whole repository.
-3. **Findings log:** one row per step: which mechanical checks failed, and how many findings the scan reported at each severity.
+2. **Claude Security scan:** the maintainer picks a release scan of the whole repository at medium effort, a branch scan of the branch's committed changes at high, or a quick scan of the whole repository at low. After a whole-repository scan, any production file the scan did not cover is named, and a scoped scan of exactly those files is offered.
+3. **Lens pass:** eight review prompts, one concern each, read the whole repository against [THREAT-MODEL.md](THREAT-MODEL.md) on Claude, Codex or both, or not at all. Nothing runs until the maintainer picks.
+4. **Check:** lens findings the scan already reported, that THREAT-MODEL.md documents, or that need a same-user process the threat model does not count as an escalation are set aside with a reason. Read-only subagents trace the rest in the code, and the confirmed ones are kept in `audit/lenses.md`.
+5. **Findings log:** one row per step: which mechanical checks failed, and how many findings the scan, and the lenses after the check, reported at each severity.
 
 The audit finds and records. It fixes no code, writes no tests and commits nothing. What happens to each finding is the maintainer's decision.
 
