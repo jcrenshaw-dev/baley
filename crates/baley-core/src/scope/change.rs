@@ -37,7 +37,7 @@ const PHASE_DECLARE_MEMBERS: &[&str] = &[
 const PHASE_EDIT_MEMBERS: &[&str] = &["phase", "name", "goal", "detail", "depends_on", "stories"];
 const ORDER_MEMBERS: &[&str] = &["order"];
 const PHASE_WITHDRAW_MEMBERS: &[&str] = &["phase", "decisions"];
-const DECISION_MEMBERS: &[&str] = &["story", "to"];
+pub(super) const DECISION_MEMBERS: &[&str] = &["story", "to"];
 const STORY_DECLARE_MEMBERS: &[&str] = &["sentence", "status", "phase"];
 const STORY_EDIT_MEMBERS: &[&str] = &["story", "sentence"];
 const STORY_REASSIGN_MEMBERS: &[&str] = &["story", "phase"];
@@ -85,7 +85,8 @@ impl ChangeKind {
         }
     }
 
-    fn members(self) -> &'static [&'static str] {
+    /// The members a change of this kind may hold, in the shape's order.
+    pub(super) fn members(self) -> &'static [&'static str] {
         match self {
             Self::ProjectDescribe => DESCRIPTION_MEMBERS,
             Self::PhaseDeclare => PHASE_DECLARE_MEMBERS,

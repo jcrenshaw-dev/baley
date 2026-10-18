@@ -1,12 +1,15 @@
-//! The judgement of an approval by digest, and the records an approved
-//! start becomes (design 0004 sections 5 and 6).
+//! The judgement of an approval by digest, of a start or of a change, and
+//! the records an approved start becomes (design 0004 sections 5 and 6).
 //!
 //! An approval is judged on facts the binary read: whether the target draft
-//! is recorded, whether a start is already approved, and which draft is the
-//! newest. The order is fixed, so one approval always gets one answer.
+//! is recorded, whether a start is already approved or the change draft
+//! already approved, and which draft is the newest. The order is fixed, so
+//! one approval always gets one answer.
 
 use baley_store::{NewEvent, PayloadRef, StreamName};
-use serde_json::Value;
+use serde_json::{Value, json};
+
+use super::change::{ChangeSubmission, DECISION_MEMBERS};
 
 use super::event::{
     PHASE_DECLARED, PHASE_DECLARED_VERSION, PHASE_REORDERED, PHASE_REORDERED_VERSION,
@@ -15,6 +18,10 @@ use super::event::{
     described_payload, phase_declared_payload, phase_reordered_payload, story_declared_payload,
 };
 use super::submission::{PROJECT_ALREADY_STARTED, STALE_DRAFT, Submission, UNKNOWN_DRAFT};
+
+/// The refusal code for approving a change draft already approved after its
+/// latest submission.
+pub const DRAFT_APPROVED: &str = "draft-approved";
 
 /// Why an approval is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +103,105 @@ fn first_difference(a: &Submission, b: &Submission) -> Option<String> {
     )
     .or_else(|| entries("stories", &a["stories"], &b["stories"], &STORY))
     .or_else(|| entries("roadmap", &a["roadmap"], &b["roadmap"], &PHASE))
+}
+
+/// Why an approval of a change draft is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeApprovalRefusal {
+    /// No recorded change submission has the digest.
+    UnknownDraft,
+    /// The draft was approved by `owner` at `at` after its latest
+    /// submission, so it was already acted on.
+    DraftApproved { owner: String, at: String },
+    /// A newer draft of the same change was submitted. `path` names the
+    /// first member that differs from the newest, such as `decisions[0].to`.
+    StaleDraft { path: String },
+}
+
+impl ChangeApprovalRefusal {
+    /// The refusal's public code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::UnknownDraft => UNKNOWN_DRAFT,
+            Self::DraftApproved { .. } => DRAFT_APPROVED,
+            Self::StaleDraft { .. } => STALE_DRAFT,
+        }
+    }
+
+    /// What the refusal names, as its answer's details, or none.
+    pub fn details(&self) -> Option<Value> {
+        match self {
+            Self::UnknownDraft => None,
+            Self::DraftApproved { owner, at } => Some(json!({"owner": owner, "at": at})),
+            Self::StaleDraft { path } => Some(json!({"path": path})),
+        }
+    }
+}
+
+/// An approval recorded for a digest: its owner and Baley's time of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriorApproval<'a> {
+    /// The owner's name.
+    pub owner: &'a str,
+    /// The time of the approval.
+    pub at: &'a str,
+}
+
+/// What an approval of one change draft is judged on.
+#[derive(Debug, Clone, Copy)]
+pub struct ChangeApprovalFacts<'a> {
+    /// The target draft's accepted change, or `None` when no `draft`
+    /// document has its digest.
+    pub target: Option<&'a ChangeSubmission>,
+    /// Whether the target's `scope.submitted` was found among the events.
+    pub recorded: bool,
+    /// An approval of this digest recorded after its latest submission, or
+    /// `None`.
+    pub approved: Option<PriorApproval<'a>>,
+    /// The newest draft of the same kind and target, or `None` when none is
+    /// listed.
+    pub newest: Option<&'a ChangeSubmission>,
+}
+
+/// Judges an approval of a change draft: `unknown-draft` when the draft or
+/// its event is missing, or no newest draft of its change is listed; then
+/// `draft-approved` naming the approval, ahead of staleness because the
+/// draft was already acted on (D-03); then `stale-draft` when the newest
+/// draft of the same kind and target is not this one, with the first
+/// differing path (D-02). Whether the change still fits accepted scope is
+/// judged after this, against scope as it stands at approval (D-12).
+pub fn judge_change_approval(facts: &ChangeApprovalFacts) -> Result<(), ChangeApprovalRefusal> {
+    let Some(target) = facts.target.filter(|_| facts.recorded) else {
+        return Err(ChangeApprovalRefusal::UnknownDraft);
+    };
+    let Some(newest) = facts.newest else {
+        return Err(ChangeApprovalRefusal::UnknownDraft);
+    };
+    if let Some(approved) = facts.approved {
+        return Err(ChangeApprovalRefusal::DraftApproved {
+            owner: approved.owner.into(),
+            at: approved.at.into(),
+        });
+    }
+    if newest.digest() == target.digest() {
+        return Ok(());
+    }
+    // A digest is taken over every member the walk compares, so two
+    // digests differ only when some member does.
+    let path = change_difference(target, newest).expect("differing digests differ in content");
+    Err(ChangeApprovalRefusal::StaleDraft { path })
+}
+
+/// The first member of two changes of one kind that differs, as a path in
+/// the kind's member order, looking inside lists entry by entry and inside
+/// a withdrawal's decisions member by member. A member one change lacks
+/// differs from one the other holds. `None` when they are equal.
+fn change_difference(a: &ChangeSubmission, b: &ChangeSubmission) -> Option<String> {
+    let (members, a, b) = (a.kind().members(), a.value(), b.value());
+    members.iter().find_map(|&name| match name {
+        "decisions" => entries(name, &a[name], &b[name], DECISION_MEMBERS),
+        _ => leaf(name.into(), &a[name], &b[name]),
+    })
 }
 
 // The start shape's member order, which is the order a path is looked for in.
@@ -292,7 +398,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::scope::judge_submission;
+    use crate::scope::{ChangeKind, judge_change, judge_submission};
 
     fn s1() -> Value {
         json!({"description": {"what": "A ledger for agent work",
@@ -579,5 +685,117 @@ mod tests {
             json!({"submission": submission.digest().to_hex(), "kind": "start",
                 "owner": "Ada Owner", "at": T2})
         );
+    }
+
+    fn change(kind: ChangeKind, value: Value) -> ChangeSubmission {
+        judge_change(kind, &value).unwrap_or_else(|refusal| panic!("{value}: {refusal:?}"))
+    }
+
+    /// E_A, an edit of phase 1's goal.
+    fn e_a() -> ChangeSubmission {
+        change(
+            ChangeKind::PhaseEdit,
+            json!({"phase": 1, "goal": "Every step is on record"}),
+        )
+    }
+
+    /// W, phase 2 withdrawn with story 2 moved to phase 1.
+    fn w(to: Value) -> ChangeSubmission {
+        change(
+            ChangeKind::PhaseWithdraw,
+            json!({"phase": 2, "decisions": [{"story": 2, "to": to}]}),
+        )
+    }
+
+    /// D1, a revised description.
+    fn d1() -> Value {
+        json!({"what": "A ledger for agent work",
+            "core_value": "Nothing moves on an unproven claim",
+            "constraints": ["One binary", "No server"]})
+    }
+
+    #[test]
+    fn a_change_approval_judged_in_another_order_is_caught() {
+        let e_a = e_a();
+        assert_eq!(
+            e_a.digest().to_hex(),
+            "e0d4de0b8e4fc182c568ca58a0ef47cdc7d806aa2aa0ef25a89a70902429759b"
+        );
+        let e_a2 = change(
+            ChangeKind::PhaseEdit,
+            json!({"phase": 1, "goal": "Every step is in the ledger"}),
+        );
+        assert_eq!(
+            e_a2.digest().to_hex(),
+            "cfbd43da2001c4a84216768a75720ac69d04b91e445edddc689a0d65b7c036a7"
+        );
+        let approved = PriorApproval {
+            owner: "Ada Owner",
+            at: "2026-10-13T09:00:07Z",
+        };
+        let facts = |target, recorded, approved, newest| ChangeApprovalFacts {
+            target,
+            recorded,
+            approved,
+            newest,
+        };
+        let answer = |facts: ChangeApprovalFacts| {
+            judge_change_approval(&facts).map_err(|refusal| (refusal.code(), refusal.details()))
+        };
+        assert_eq!(
+            answer(facts(None, false, None, Some(&e_a2))),
+            Err(("unknown-draft", None))
+        );
+        assert_eq!(
+            answer(facts(Some(&e_a), false, None, Some(&e_a2))),
+            Err(("unknown-draft", None))
+        );
+        assert_eq!(
+            answer(facts(Some(&e_a), true, Some(approved), Some(&e_a2))),
+            Err((
+                "draft-approved",
+                Some(json!({"owner": "Ada Owner", "at": "2026-10-13T09:00:07Z"}))
+            ))
+        );
+        assert_eq!(
+            answer(facts(Some(&e_a), true, None, Some(&e_a2))),
+            Err(("stale-draft", Some(json!({"path": "goal"}))))
+        );
+        assert_eq!(answer(facts(Some(&e_a), true, None, Some(&e_a))), Ok(()));
+    }
+
+    #[test]
+    fn the_first_difference_of_two_changes_named_by_another_path_is_caught() {
+        let mut d1_v = d1();
+        d1_v["core_value"] = json!("v");
+        for (a, b, path) in [
+            (
+                e_a(),
+                change(
+                    ChangeKind::PhaseEdit,
+                    json!({"phase": 1, "name": "Ledger", "goal": "Every step is on record"}),
+                ),
+                "name",
+            ),
+            (w(json!(1)), w(json!("drop")), "decisions[0].to"),
+            (
+                change(ChangeKind::PhaseReorder, json!({"order": [1, 2]})),
+                change(ChangeKind::PhaseReorder, json!({"order": [2, 1]})),
+                "order[0]",
+            ),
+            (
+                change(ChangeKind::ProjectDescribe, d1()),
+                change(ChangeKind::ProjectDescribe, d1_v),
+                "core_value",
+            ),
+        ] {
+            assert_eq!(
+                change_difference(&a, &b).as_deref(),
+                Some(path),
+                "{} against {}",
+                a.value(),
+                b.value()
+            );
+        }
     }
 }

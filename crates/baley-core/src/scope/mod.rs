@@ -21,7 +21,8 @@ mod rules;
 mod submission;
 
 pub use approval::{
-    ApprovalFacts, ApprovalRefusal, NumbersExhausted, judge_approval, start_events,
+    ApprovalFacts, ApprovalRefusal, ChangeApprovalFacts, ChangeApprovalRefusal, DRAFT_APPROVED,
+    NumbersExhausted, PriorApproval, judge_approval, judge_change_approval, start_events,
 };
 pub use backlog::{BACKLOG_VIEW, BacklogProjector, backlog_key, backlog_spec};
 pub use change::{
