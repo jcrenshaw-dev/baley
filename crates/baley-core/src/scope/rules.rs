@@ -39,6 +39,9 @@ pub const STORY_UNDECIDED: &str = "story-undecided";
 /// The refusal code for withdrawing a phase other declared phases depend
 /// on.
 pub const PHASE_HAS_DEPENDENTS: &str = "phase-has-dependents";
+/// The refusal code for changing a story that is dropped or excluded, both
+/// final.
+pub const STORY_NOT_SERVED: &str = "story-not-served";
 
 /// What has happened in one phase, as PRJ-R13 judges a change to it. A
 /// phase with no entry has neither execution nor completion.
@@ -69,6 +72,15 @@ impl HeldStatus {
             "excluded" => Some(Self::Excluded),
             "dropped" => Some(Self::Dropped),
             _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Deferred => "deferred",
+            Self::Excluded => "excluded",
+            Self::Dropped => "dropped",
         }
     }
 }
@@ -211,6 +223,8 @@ pub enum ScopeRefusal {
     StoryUndecided { story: u32 },
     /// These declared phases, ascending, depend on the withdrawn one.
     PhaseHasDependents { phases: Vec<u32> },
+    /// The story is dropped or excluded, so nothing changes it.
+    StoryNotServed { story: u32, status: &'static str },
     /// The phase has execution present, which `undo` must undo first.
     ExecutionPresent { phase: u32, undo: String },
     /// The phase is complete.
@@ -233,6 +247,7 @@ impl ScopeRefusal {
             Self::OrderIncomplete { .. } => ORDER_INCOMPLETE,
             Self::StoryUndecided { .. } => STORY_UNDECIDED,
             Self::PhaseHasDependents { .. } => PHASE_HAS_DEPENDENTS,
+            Self::StoryNotServed { .. } => STORY_NOT_SERVED,
             Self::ExecutionPresent { .. } => EXECUTION_PRESENT,
             Self::PhaseComplete { .. } => PHASE_COMPLETE,
             Self::StoryShipped { .. } => STORY_SHIPPED,
@@ -260,6 +275,7 @@ impl ScopeRefusal {
                 json!({"phase": phase, "depends_on": depends_on})
             }
             Self::OrderIncomplete { order } => json!({"order": order}),
+            Self::StoryNotServed { story, status } => json!({"story": story, "status": status}),
             Self::ExecutionPresent { phase, undo } => json!({"phase": phase, "undo": undo}),
         })
     }
@@ -270,9 +286,9 @@ impl ScopeRefusal {
 ///
 /// With no start approved every change is `project-not-started`, since a
 /// phase or story declared before the start would be left out of the
-/// start's order (D-05). Then each kind's rules run in their order:
-/// a phase that is not declared first, then PRJ-R13's progress, then the
-/// change's own members.
+/// start's order (D-05). Then each kind's rules run in a fixed order:
+/// the phase or story it names must be one a change may name, then
+/// PRJ-R13's progress, then the change's own members.
 pub fn judge_scope_change(
     change: &ChangeSubmission,
     scope: &AcceptedScope,
@@ -314,8 +330,64 @@ pub fn judge_scope_change(
             judge_progress(change, scope, progress)?;
             judge_withdrawal(held, decisions, scope)
         }
-        _ => Ok(()),
+        ScopeChange::StoryDeclare {
+            phase: Some(phase), ..
+        } if scope.declared(*phase).is_none() => Err(ScopeRefusal::NoSuchPhase { phase: *phase }),
+        ScopeChange::StoryEdit { story, .. } => served(scope, *story),
+        ScopeChange::StoryReassign { story, phase } => {
+            served(scope, *story)?;
+            judge_progress(change, scope, progress)?;
+            match phase {
+                Some(phase) if scope.declared(*phase).is_none() => {
+                    Err(ScopeRefusal::NoSuchPhase { phase: *phase })
+                }
+                _ => Ok(()),
+            }
+        }
+        ScopeChange::StoryDrop { story } => {
+            served(scope, *story)?;
+            judge_progress(change, scope, progress)
+        }
+        ScopeChange::BacklogReorder { order } => judge_backlog_order(order, scope),
+        // A description has no rule of its own past the start's.
+        ScopeChange::ProjectDescribe(_) | ScopeChange::StoryDeclare { .. } => Ok(()),
     }
+}
+
+/// Story `id` exists and is still served: one dropped or excluded is final
+/// (design 0004 Figure 2, PRJ-R17).
+fn served(scope: &AcceptedScope, id: u32) -> Result<(), ScopeRefusal> {
+    let Some(story) = scope.story(id) else {
+        return Err(ScopeRefusal::NoSuchStory { story: id });
+    };
+    match story.status {
+        HeldStatus::Dropped | HeldStatus::Excluded => Err(ScopeRefusal::StoryNotServed {
+            story: id,
+            status: story.status.as_str(),
+        }),
+        HeldStatus::Active | HeldStatus::Deferred => Ok(()),
+    }
+}
+
+/// A full backlog order: every id a story, and every active and deferred
+/// story exactly once with no other (D-17).
+fn judge_backlog_order(order: &[u32], scope: &AcceptedScope) -> Result<(), ScopeRefusal> {
+    if let Some(&story) = order.iter().find(|story| scope.story(**story).is_none()) {
+        return Err(ScopeRefusal::NoSuchStory { story });
+    }
+    let ordered: BTreeSet<u32> = scope
+        .stories
+        .iter()
+        .filter(|story| matches!(story.status, HeldStatus::Active | HeldStatus::Deferred))
+        .map(|story| story.id)
+        .collect();
+    let held: BTreeSet<u32> = order.iter().copied().collect();
+    if held != ordered || order.len() != ordered.len() {
+        return Err(ScopeRefusal::OrderIncomplete {
+            order: ordered.into_iter().collect(),
+        });
+    }
+    Ok(())
 }
 
 /// A new phase's dependencies and stories, then its position, then whether
@@ -994,5 +1066,117 @@ mod tests {
             ),
             Err(("phase-complete", json!({"phase": 2})))
         );
+    }
+
+    /// A2, A0 with story 3 dropped.
+    fn a2() -> Value {
+        with(a0(), &[("/stories/2/status", json!("dropped"))])
+    }
+
+    /// A4, A0 with story 3 excluded.
+    fn a4() -> Value {
+        with(a0(), &[("/stories/2/status", json!("excluded"))])
+    }
+
+    #[test]
+    fn an_edit_reassign_or_drop_of_a_missing_dropped_or_excluded_story_accepted_is_caught() {
+        assert_eq!(
+            judged(
+                &change(ChangeKind::StoryEdit, json!({"story": 9, "sentence": "s"})),
+                &a0()
+            ),
+            Err(("no-such-story", json!({"story": 9})))
+        );
+        let changes = [
+            change(ChangeKind::StoryEdit, json!({"story": 3, "sentence": "s"})),
+            change(ChangeKind::StoryReassign, json!({"story": 3, "phase": 2})),
+            change(ChangeKind::StoryDrop, json!({"story": 3})),
+        ];
+        for (document, status) in [(a2(), "dropped"), (a4(), "excluded")] {
+            for unserved in &changes {
+                assert_eq!(
+                    judged(unserved, &document),
+                    Err(("story-not-served", json!({"story": 3, "status": status}))),
+                    "{} over {status}",
+                    unserved.value()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_story_moved_to_a_missing_or_withdrawn_phase_accepted_is_caught() {
+        let reassign = |phase: Value| {
+            change(
+                ChangeKind::StoryReassign,
+                json!({"story": 3, "phase": phase}),
+            )
+        };
+        assert_eq!(
+            judged(&reassign(json!(9)), &a0()),
+            Err(("no-such-phase", json!({"phase": 9})))
+        );
+        assert_eq!(
+            judged(
+                &change(
+                    ChangeKind::StoryDeclare,
+                    json!({"sentence": "s", "status": "active", "phase": 9})
+                ),
+                &a0()
+            ),
+            Err(("no-such-phase", json!({"phase": 9})))
+        );
+        assert_eq!(
+            judged(&reassign(json!(2)), &a1()),
+            Err(("no-such-phase", json!({"phase": 2})))
+        );
+        assert_eq!(judged(&reassign(Value::Null), &a0()), Ok(()));
+    }
+
+    #[test]
+    fn a_backlog_order_missing_repeating_or_holding_a_dropped_story_accepted_is_caught() {
+        let reorder = |order: Value| change(ChangeKind::BacklogReorder, json!({"order": order}));
+        for (order, document, expected) in [
+            (
+                json!([1, 2]),
+                a0(),
+                Err(("order-incomplete", json!({"order": [1, 2, 3]}))),
+            ),
+            (
+                json!([1, 2, 3, 9]),
+                a0(),
+                Err(("no-such-story", json!({"story": 9}))),
+            ),
+            (
+                json!([1, 2, 3]),
+                a2(),
+                Err(("order-incomplete", json!({"order": [1, 2]}))),
+            ),
+            (json!([2, 1]), a2(), Ok(())),
+        ] {
+            assert_eq!(
+                judged(&reorder(order.clone()), &document),
+                expected,
+                "{order}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shipped_story_moved_after_its_facts_is_caught() {
+        for shipped in [
+            change(
+                ChangeKind::StoryReassign,
+                json!({"story": 1, "phase": null}),
+            ),
+            change(ChangeKind::StoryDrop, json!({"story": 1})),
+        ] {
+            assert_eq!(
+                judged_over(&shipped, &a2(), &f2()),
+                Err(("story-shipped", json!({"story": 1, "phase": 1}))),
+                "{}",
+                shipped.value()
+            );
+        }
     }
 }
