@@ -1,8 +1,9 @@
-//! The scope records of design 0004 over the storage port: a start
-//! submission recorded as a draft, the start-once read every scope write
-//! is checked against first, the draft preview read by digest, the reads of
-//! accepted scope, and the owner's approval of a draft by digest, which only
-//! the command line gives.
+//! The scope records of design 0004 over the storage port: a start or a
+//! change submission recorded as a draft, the start-once read a start is
+//! checked against first, the accepted scope a change is checked against
+//! first, the draft preview read by digest, the reads of accepted scope, and
+//! the owner's approval of a start or change draft by digest, which only the
+//! command line gives.
 
 /// Records one start submission as a draft in its own domain transaction.
 pub mod submit;
@@ -22,7 +23,10 @@ pub(crate) mod fixtures {
     //! submissions are written out as design 0004's start shape, never
     //! produced by the code under test.
 
-    use baley_core::scope::{PROJECT_STREAM, SCOPE_APPROVED, approved_payload, judge_submission};
+    use baley_core::scope::{
+        PROJECT_STREAM, ROADMAP_STREAM, SCOPE_APPROVED, SCOPE_APPROVED_VERSION, STORY_DROPPED,
+        STORY_DROPPED_VERSION, approved_payload, judge_submission, story_dropped_payload,
+    };
     use baley_store::{
         Actor, Admin, Answer, Command, CommandKind, Decision, Event, Hash, HistoryFilter, Ledger,
         NewEvent, Observed, OutcomeKind, PageRequest, ProjectId, Recorded, RequestId, ServerCaller,
@@ -240,13 +244,14 @@ pub(crate) mod fixtures {
         crate::scope::approve::record(store, &command, Some(&judged), "Ada Owner").unwrap();
     }
 
-    /// Appends a `scope.approved` of kind `start` under a test command of
-    /// its own, as an approval would leave it.
-    pub fn approve_a_start(store: &SqliteStore, at: &str) {
+    /// Appends `events` under a test command of the owner's with
+    /// `request_id` at `at`, in its own transaction, as an approval or
+    /// another write would leave them.
+    pub fn append(store: &SqliteStore, request_id: &str, at: &str, events: Vec<NewEvent>) {
         let command = Command {
             project: project(),
-            kind: CommandKind("test.approve".into()),
-            request_id: RequestId("2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e".into()),
+            kind: CommandKind("test.append".into()),
+            request_id: RequestId(request_id.into()),
             digest: Hash([0xee; 32]),
             scope: Vec::new(),
             policy_version: 0,
@@ -256,14 +261,9 @@ pub(crate) mod fixtures {
         };
         store
             .transact(&command, &mut |tx| {
-                tx.append(NewEvent {
-                    stream: StreamName(PROJECT_STREAM.into()),
-                    type_name: SCOPE_APPROVED.into(),
-                    type_version: 1,
-                    git: None,
-                    payload: approved_payload(Hash([0x5c; 32]), "start", "Ada Owner", at),
-                    attachments: Vec::new(),
-                })?;
+                for event in events.clone() {
+                    tx.append(event)?;
+                }
                 Ok(Decision {
                     kind: OutcomeKind::Done,
                     answer: json!({"status": "ok"}),
@@ -273,5 +273,51 @@ pub(crate) mod fixtures {
                 })
             })
             .unwrap();
+    }
+
+    /// Appends a `scope.approved` of kind `start` under a test command of
+    /// its own, as an approval would leave it.
+    pub fn approve_a_start(store: &SqliteStore, at: &str) {
+        append(
+            store,
+            "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
+            at,
+            vec![scope_approved(Hash([0x5c; 32]), "start", at)],
+        );
+    }
+
+    /// The submission an appended roadmap event names.
+    const APPENDED: Hash = Hash([0x5c; 32]);
+
+    fn roadmap_event(type_name: &str, type_version: u32, payload: Value) -> NewEvent {
+        NewEvent {
+            stream: StreamName(ROADMAP_STREAM.into()),
+            type_name: type_name.into(),
+            type_version,
+            git: None,
+            payload,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// A `scope.approved` of `digest` and `kind` by `Ada Owner` at `at`.
+    pub fn scope_approved(digest: Hash, kind: &str, at: &str) -> NewEvent {
+        NewEvent {
+            stream: StreamName(PROJECT_STREAM.into()),
+            type_name: SCOPE_APPROVED.into(),
+            type_version: SCOPE_APPROVED_VERSION,
+            git: None,
+            payload: approved_payload(digest, kind, "Ada Owner", at),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// A `story.dropped` of story `id`.
+    pub fn story_dropped(id: u32) -> NewEvent {
+        roadmap_event(
+            STORY_DROPPED,
+            STORY_DROPPED_VERSION,
+            story_dropped_payload(id, APPENDED),
+        )
     }
 }

@@ -8,20 +8,28 @@
 //! reason and is never opened, even when another project still holds the
 //! same bytes (design 0001 Views). `document` and the owner's `baley
 //! scope`, `phase`, `backlog` and `story` commands read through here.
-//! Nothing is appended.
+//! The accepted scope a change is judged on is read here too, with a
+//! confirmation its transaction runs that none of it moved. Nothing is
+//! appended.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 
 use baley_core::scope::{
-    BACKLOG_VIEW, DRAFT_VIEW, PHASE_DETAIL_VIEW, PHASE_VIEW, ROADMAP_VIEW, backlog_key, draft_key,
-    phase_detail_key, phase_key, roadmap_key,
+    AcceptedScope, BACKLOG_VIEW, DRAFT_VIEW, PHASE_DETAIL_VIEW, PHASE_VIEW, PhaseProgress,
+    ROADMAP_VIEW, backlog_key, draft_key, phase_detail_key, phase_key, roadmap_key,
 };
-use baley_store::{Document, Hash, PayloadBody, Payloads, ProjectId, StoreError, Views};
+use baley_store::{
+    DocKey, Document, Hash, Ledger, PayloadBody, Payloads, ProjectId, StaleInput, StoreError,
+    Transaction, Views,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::scope::submit::start_approved;
+
 /// The code for a story id the accepted roadmap does not hold (PRJ-R18).
-pub const NO_SUCH_STORY: &str = "no-such-story";
+pub use baley_core::scope::NO_SUCH_STORY;
 
 /// A draft as its latest submission recorded it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -450,6 +458,145 @@ pub fn story<S: Views + ?Sized>(
         .ok_or(ReadError::NoSuchStory)
 }
 
+/// What a scope change is judged on, read outside any transaction: whether
+/// the start is approved, the `roadmap` document, and each phase's facts with
+/// the sequence of the `phase` document they came from, so the change's
+/// transaction can confirm none of it moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeRead {
+    /// Whether the project's start is approved, read from the events.
+    pub started: bool,
+    /// The `roadmap` document, or none before any approval.
+    pub roadmap: Option<Document>,
+    /// Each phase the roadmap holds, withdrawn ones included, by number.
+    pub phases: BTreeMap<u32, PhaseFacts>,
+}
+
+/// One phase's facts as PRJ-R13 judges them, and the `produced_seq` of the
+/// `phase` document they came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhaseFacts {
+    /// What has happened in the phase.
+    pub progress: PhaseProgress,
+    /// The `phase` document's `produced_seq`.
+    pub produced_seq: u64,
+}
+
+impl ScopeRead {
+    /// Accepted scope as the `roadmap` document holds it, or none when the
+    /// document cannot be read, which is a ledger fault.
+    pub fn accepted(&self) -> Option<AcceptedScope> {
+        AcceptedScope::read(self.roadmap.as_ref().map(|document| &document.body))
+    }
+
+    /// Each phase's progress by number, as the scope judgement takes it.
+    pub fn progress(&self) -> BTreeMap<u32, PhaseProgress> {
+        self.phases
+            .iter()
+            .map(|(number, facts)| (*number, facts.progress.clone()))
+            .collect()
+    }
+}
+
+/// Reads what a change in `project` is judged on: whether the start is
+/// approved, from the events (D-05 of phase 3), then the `roadmap`
+/// document, then the `phase` document of every phase it holds, in one
+/// snapshot. Nothing is appended.
+pub fn scope<S: Ledger + Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+) -> Result<ScopeRead, ReadError> {
+    let started = start_approved(store, project).map_err(ReadError::Store)?;
+    let roadmap = store
+        .get(project, ROADMAP_VIEW, &roadmap_key())
+        .map_err(ReadError::Store)?;
+    let numbers = match &roadmap {
+        Some(document) => phase_numbers(&document.body).ok_or_else(|| unreadable(ROADMAP_VIEW))?,
+        None => Vec::new(),
+    };
+    let keys: Vec<DocKey> = numbers.iter().map(|number| phase_key(*number)).collect();
+    let documents = store
+        .get_many(project, PHASE_VIEW, &keys)
+        .map_err(ReadError::Store)?;
+    let mut phases = BTreeMap::new();
+    for (number, document) in numbers.into_iter().zip(documents) {
+        // Every phase the roadmap holds was declared, so it has a document.
+        let document = document.ok_or_else(|| unreadable(PHASE_VIEW))?;
+        let progress = document
+            .body
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(progress_of)
+            .ok_or_else(|| unreadable(PHASE_VIEW))?;
+        phases.insert(
+            number,
+            PhaseFacts {
+                progress,
+                produced_seq: document.produced_seq,
+            },
+        );
+    }
+    Ok(ScopeRead {
+        started,
+        roadmap,
+        phases,
+    })
+}
+
+/// The progress a phase's status stands for (D-13). Every status this build
+/// records says neither execution nor completion, so every fact is false.
+/// Builds 5 and 6 record execution and completion and add the statuses that
+/// map to them here; until then an unknown status is a ledger fault.
+fn progress_of(status: &str) -> Option<PhaseProgress> {
+    match status {
+        "declared" | "withdrawn" => Some(PhaseProgress::default()),
+        _ => None,
+    }
+}
+
+/// The numbers of the phases a `roadmap` document holds.
+fn phase_numbers(body: &Value) -> Option<Vec<u32>> {
+    body.get("phases")?
+        .as_array()?
+        .iter()
+        .map(|phase| {
+            phase
+                .get("number")?
+                .as_u64()
+                .and_then(|number| u32::try_from(number).ok())
+        })
+        .collect()
+}
+
+/// Confirms inside `tx` that every document `read` named still has the
+/// `produced_seq` it had, a document absent then and now counting as
+/// unchanged. The first that moved is `StoreError::Stale`, so the change's
+/// transaction records nothing.
+pub fn confirm(tx: &mut dyn Transaction, read: &ScopeRead) -> Result<(), StoreError> {
+    let seen = std::iter::once((
+        ROADMAP_VIEW,
+        roadmap_key(),
+        read.roadmap.as_ref().map(|document| document.produced_seq),
+    ))
+    .chain(
+        read.phases
+            .iter()
+            .map(|(number, facts)| (PHASE_VIEW, phase_key(*number), Some(facts.produced_seq))),
+    );
+    for (view, key, seen) in seen {
+        let now = tx.get(view, &key)?.map(|document| document.produced_seq);
+        if now != seen {
+            return Err(StoreError::Stale(StaleInput::Document {
+                view: view.into(),
+                key,
+                seen,
+                now,
+            }));
+        }
+    }
+    Ok(())
+}
+
 /// One view document read as `T`, or none when the view holds no such key.
 fn read<T: for<'de> Deserialize<'de>, S: Views + ?Sized>(
     store: &S,
@@ -472,7 +619,8 @@ fn unreadable(view: &str) -> ReadError {
 #[cfg(test)]
 mod tests {
     use baley_core::scope::{
-        BACKLOG_VIEW, PHASE_STATUS_INDEX, PHASE_VIEW, ROADMAP_VIEW, backlog_key, roadmap_key,
+        BACKLOG_VIEW, PHASE_STATUS_INDEX, PHASE_VIEW, PhaseProgress, ROADMAP_VIEW, backlog_key,
+        roadmap_key,
     };
     use baley_store::{IndexQuery, KeyValue, PageRequest};
 
@@ -753,6 +901,63 @@ mod tests {
             })
         );
         assert_eq!(backlog(&store, &project()), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_judgement_read_taken_from_a_draft_or_missing_the_sequences_it_relied_on_is_caught() {
+        let (_dir, store) = store();
+        let digest = digest_of(&submit(&store, &s1(), R1, 1, T1).unwrap());
+        let before = scope(&store, &project()).unwrap();
+        assert!(!before.started);
+        assert_eq!(before.roadmap, None);
+        assert!(before.phases.is_empty());
+
+        approve_draft(&store, digest);
+        let after = scope(&store, &project()).unwrap();
+        assert!(after.started);
+        let held = store
+            .get(&project(), ROADMAP_VIEW, &roadmap_key())
+            .unwrap()
+            .unwrap();
+        let roadmap = after.roadmap.unwrap();
+        assert_eq!(roadmap.body["order"], serde_json::json!([1, 2]));
+        assert_eq!(roadmap.produced_seq, held.produced_seq);
+        let numbers: Vec<u32> = after.phases.keys().copied().collect();
+        assert_eq!(numbers, [1, 2]);
+        for (number, facts) in &after.phases {
+            assert_eq!(facts.progress, PhaseProgress::default(), "{number}");
+            let document = store
+                .get(&project(), PHASE_VIEW, &phase_key(*number))
+                .unwrap()
+                .unwrap();
+            assert_eq!(facts.produced_seq, document.produced_seq, "{number}");
+        }
+    }
+
+    #[test]
+    fn a_confirmation_that_misses_a_moved_scope_document_is_caught() {
+        use baley_store::{Decision, Observed, OutcomeKind, StoreError};
+
+        let (_dir, store) = approved();
+        let read = scope(&store, &project()).unwrap();
+        let confirmed = |request_id: &str| {
+            let command = command("test.confirm", request_id, 7, T3);
+            store.transact(&command, &mut |tx| {
+                confirm(tx, &read)?;
+                Ok(Decision {
+                    kind: OutcomeKind::Done,
+                    answer: serde_json::json!({"status": "ok"}),
+                    sensitive: false,
+                    observed: Observed::default(),
+                    git: None,
+                })
+            })
+        };
+        assert!(confirmed(R2).is_ok());
+
+        append(&store, R3, T3, vec![story_dropped(3)]);
+        let moved = confirmed("8c9d0e1f-2a3b-4c4d-9e5f-6a7b8c9d0e1f");
+        assert!(matches!(moved, Err(StoreError::Stale(_))), "{moved:?}");
     }
 
     #[test]
