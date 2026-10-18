@@ -1208,6 +1208,11 @@ pub(super) mod tests {
                 Err(("order-incomplete", json!({"order": [1, 2, 3]}))),
             ),
             (
+                json!([1, 2, 3, 3]),
+                a0(),
+                Err(("order-incomplete", json!({"order": [1, 2, 3]}))),
+            ),
+            (
                 json!([1, 2, 3, 9]),
                 a0(),
                 Err(("no-such-story", json!({"story": 9}))),
