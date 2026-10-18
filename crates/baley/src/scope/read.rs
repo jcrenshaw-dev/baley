@@ -390,6 +390,21 @@ pub fn roadmap<S: Views + ?Sized>(store: &S, project: &ProjectId) -> Result<Road
 /// The status a withdrawn phase holds.
 const WITHDRAWN: &str = "withdrawn";
 
+/// Reads `project`'s accepted description from its `roadmap` document, or
+/// none before the start. Only an approved `project.described` replaces it,
+/// so a pending `project-describe` draft never reaches it (D-16). T7's
+/// refinement and T9's planning read the description through here; earlier
+/// descriptions stay readable as their `project.described` events.
+pub fn description<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+) -> Result<Option<Description>, ReadError> {
+    Ok(
+        read::<RoadmapDocument, _>(store, project, ROADMAP_VIEW, &roadmap_key())?
+            .and_then(|document| document.description),
+    )
+}
+
 /// Reads accepted phase `number` from the `phase` view, with its detail
 /// from its body, or the tombstone its `phase_detail` document holds when
 /// this project purged that body. The purge state is checked before the
@@ -1024,6 +1039,51 @@ mod tests {
         append(&store, R2, T4, vec![story_reassigned(3, 2)]);
         assert_eq!(phase(&store, &project(), 2).unwrap().stories, [2, 3]);
         assert_eq!(phase(&store, &project(), 1).unwrap().stories, [1]);
+    }
+
+    #[test]
+    fn a_pending_description_served_or_the_approved_one_hiding_the_earlier_is_caught() {
+        use baley_core::scope::ChangeKind;
+
+        use crate::scope::approve::{self, APPROVE_COMMAND};
+
+        let (_dir, store) = store();
+        let start = digest_of(&submit(&store, &s1(), R1, 1, T1).unwrap());
+        approve_draft(&store, start);
+        let revised =
+            digest_of(&submit_change(&store, ChangeKind::ProjectDescribe, &d1(), R4, T4).unwrap());
+        let described = |constraints: &[&str]| {
+            Ok(Some(Description {
+                what: text("A ledger for agent work"),
+                core_value: text("Nothing moves on an unproven claim"),
+                constraints: constraints
+                    .iter()
+                    .map(|constraint| text(constraint))
+                    .collect(),
+            }))
+        };
+        assert_eq!(description(&store, &project()), described(&["One binary"]));
+
+        let judged = approve::judge(&store, &project(), revised).unwrap();
+        let command = command(APPROVE_COMMAND, R6, 6, T5);
+        approve::record(&store, &command, Some(&judged), "Ada Owner").unwrap();
+        assert_eq!(
+            description(&store, &project()),
+            described(&["One binary", "No server"])
+        );
+
+        let events = history(&store);
+        let recorded = of_type(&events, "project.described");
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(
+            recorded[0].payload["constraints"],
+            serde_json::json!(["One binary"])
+        );
+        assert_eq!(recorded[0].payload["submission"], start.to_hex());
+        assert_eq!(
+            recorded[1].payload["submission"],
+            "db6830acb9a086805f20c56b6dbec837c2fa59938cfabcec77d3ed5336ec1213"
+        );
     }
 
     #[test]
