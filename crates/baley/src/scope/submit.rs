@@ -10,16 +10,17 @@
 use std::collections::BTreeMap;
 
 use baley_core::scope::{
-    ChangeSubmission, PROJECT_ALREADY_STARTED, PROJECT_STREAM, SCOPE_APPROVED, SCOPE_SUBMITTED,
-    SCOPE_SUBMITTED_VERSION, START_KIND, START_TARGET, ScopeRefusal, Submission,
-    judge_scope_change, submitted_payload,
+    ChangeKind, ChangeSubmission, PROJECT_ALREADY_STARTED, PROJECT_STREAM, PhaseFields,
+    SCOPE_APPROVED, SCOPE_SUBMITTED, SCOPE_SUBMITTED_VERSION, START_KIND, START_TARGET,
+    ScopeRefusal, Submission, SubmissionRefusal, judge_change, judge_scope_change,
+    submitted_payload,
 };
 use baley_store::{
-    Absence, Command, Decision, EVENT_PAGE_BOUND, EventMatch, HistoryFilter, Ledger, NewEvent,
-    Observed, OutcomeKind, PageRequest, Payloads, ProjectId, Recorded, Refusal as StoreRefusal,
-    RetentionClass, StoreError, StreamName, Views,
+    Absence, Command, Decision, EVENT_PAGE_BOUND, EventMatch, Hash, HistoryFilter, Ledger,
+    NewEvent, Observed, OutcomeKind, PageRequest, Payloads, ProjectId, Recorded,
+    Refusal as StoreRefusal, RetentionClass, StoreError, StreamName, Views,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::envelope::{LEDGER_BUSY, Refusal};
 use crate::ledger::answer::{AnswerUnread, answer_value};
@@ -302,6 +303,73 @@ pub fn record_change<L: Ledger + ?Sized>(
             git: None,
         })
     })
+}
+
+/// Records a `phase-edit` of phase `phase` changing `fields` under
+/// `command`, which its caller prepared, from plain values, so T9's `phase
+/// plan` can record an edit without MCP or the command line (D-18). The
+/// members are built as a session sends them, so the same edit has the same
+/// body and digest; then they are judged, checked against accepted scope and
+/// recorded as `check_change` and `record_change` do. The answer is the
+/// draft's digest, or the answer that refused or failed it. The draft is
+/// approved through `approve::judge` and `approve::record`.
+pub fn submit_phase_edit<S: Ledger + Views + Payloads>(
+    store: &S,
+    command: &Command,
+    phase: u32,
+    fields: &PhaseFields,
+) -> Result<Hash, Value> {
+    let mut members = Map::new();
+    members.insert("phase".into(), json!(phase));
+    let texts = [
+        ("name", &fields.name),
+        ("goal", &fields.goal),
+        ("detail", &fields.detail),
+    ];
+    for (name, text) in texts {
+        if let Some(text) = text {
+            members.insert(name.into(), json!(text));
+        }
+    }
+    let lists = [
+        ("depends_on", &fields.depends_on),
+        ("stories", &fields.stories),
+    ];
+    for (name, numbers) in lists {
+        if let Some(numbers) = numbers {
+            members.insert(name.into(), json!(numbers));
+        }
+    }
+    let change = judge_change(ChangeKind::PhaseEdit, &Value::Object(members))
+        .map_err(|refusal| submission_refused(&refusal))?;
+    let read = check_change(store, &command.project, &change)?;
+    match record_change(store, command, &change, Some(&read)) {
+        Ok(_) => Ok(change.digest()),
+        Err(error) => Err(answer(Err(error), store)),
+    }
+}
+
+/// The `refused` answer for a submission judged unacceptable, with the
+/// fault's place in its details.
+pub fn submission_refused(refusal: &SubmissionRefusal) -> Value {
+    let (reason, details) = match refusal {
+        SubmissionRefusal::Malformed { section, field } => (
+            "a field of the submission is missing, blank, of the wrong type, unknown or out of range, so nothing was recorded. The details name it",
+            json!({"section": section, "field": field}),
+        ),
+        SubmissionRefusal::StoryDoubleAssigned { story, phases } => (
+            "a story is listed by two phases, and a story belongs to one phase at most, so nothing was recorded",
+            json!({"story": story, "phases": phases}),
+        ),
+        SubmissionRefusal::DependencyCycle { phases } => (
+            "phases depend on each other in a cycle, so no order can deliver them and nothing was recorded",
+            json!({"phases": phases}),
+        ),
+    };
+    Refusal::new(refusal.code(), reason)
+        .slot("submission")
+        .details(details)
+        .value()
 }
 
 /// A busy ledger's reason when a recorded answer was not read.
@@ -622,6 +690,40 @@ mod tests {
             .filter(|event| event.payload["digest"] == E_B_DIGEST)
             .count();
         assert_eq!(drafts, 1);
+    }
+
+    #[test]
+    fn a_phase_edit_recorded_from_plain_values_under_another_digest_is_caught() {
+        use baley_core::scope::PhaseFields;
+
+        let (_dir, store) = approved();
+        let goal = PhaseFields {
+            goal: Some("The owner approves every change".into()),
+            ..PhaseFields::default()
+        };
+        let digest =
+            submit_phase_edit(&store, &command(SUBMIT_COMMAND, R4, 4, T4), 2, &goal).unwrap();
+        assert_eq!(digest.to_hex(), E_B_DIGEST);
+        let events = history(&store);
+        let drafts: Vec<&Value> = of_type(&events, "scope.submitted")
+            .into_iter()
+            .filter(|event| event.payload["digest"] == E_B_DIGEST)
+            .map(|event| &event.payload["target"])
+            .collect();
+        assert_eq!(drafts, ["2"]);
+
+        let before = head(&store);
+        let empty = PhaseFields::default();
+        let refusal =
+            submit_phase_edit(&store, &command(SUBMIT_COMMAND, R6, 6, T5), 2, &empty).unwrap_err();
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], "malformed-submission", "{refusal}");
+        assert_eq!(refusal["slot"], "submission", "{refusal}");
+        assert_eq!(
+            refusal["details"],
+            json!({"section": "submission", "field": "submission"})
+        );
+        assert_eq!(head(&store), before);
     }
 
     #[test]

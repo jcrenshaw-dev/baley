@@ -92,12 +92,15 @@ const CHANGE_KINDS: [ChangeKind; 10] = [
     ChangeKind::BacklogReorder,
 ];
 
-/// The first step: reads the draft with `digest`, its `scope.submitted`,
-/// whether a start is approved and the newest start draft, then judges the
+/// The first step: reads the draft with `digest` and its `scope.submitted`.
+/// For a start it reads whether a start is approved and the newest start
+/// draft; for a change, what `judge_change_draft` names. Then it judges the
 /// approval. It runs outside any transaction, since a transaction has no
 /// payload read (D-02). A refusal is the `refused` answer, slot `digest`; a
 /// body that is gone or no longer judges clean is a ledger fault, never
-/// approved. Nothing is recorded.
+/// approved. Nothing is recorded. It is also the first step of approving a
+/// `phase-edit` draft T9's `phase plan` records, called with a digest its
+/// caller supplies.
 pub fn judge<S: Ledger + Views + Payloads + ?Sized>(
     store: &S,
     project: &ProjectId,
@@ -371,6 +374,9 @@ fn change_refused(refusal: &ChangeApprovalRefusal) -> Value {
 /// retry of a request the store holds is answered from its record before
 /// any decision runs, so it needs no reads; a decision asked to run without
 /// them records nothing.
+///
+/// It is also the second step of approving a `phase-edit` draft T9's `phase
+/// plan` records, with a command and owner its caller supplies.
 pub fn record<L: Ledger + ?Sized>(
     store: &L,
     command: &Command,
