@@ -409,11 +409,11 @@ stateDiagram-v2
   Newest --> Stale: a newer submission for the same change
   Stale --> Newest: submitted again
   Newest --> Approved: baley scope approve with its digest
-  Approved --> Approved: approved again, refused draft-approved
-  Approved --> Newest: submitted again
+  Approved --> Approved: a change draft approved again, refused draft-approved
+  Approved --> Newest: a change draft submitted again
 ```
 
-*Figure 3. States of a submission. Every submission is recorded as a draft when it is submitted, and its record stays in every state. The same change is the same kind and target. Only the newest draft of a change can be approved, and only its approval records scope events. An approved change draft is refused `draft-approved` when approved again; the same content submitted again is a fresh draft, which can be approved. The end of a session changes no state. Once a start is approved, approving any other start draft is refused `project-already-started`, and no start is submitted again, since a start submitted then is refused the same way. A draft whose body this project purged is never approved.*
+*Figure 3. States of a submission. Every submission is recorded as a draft when it is submitted, and its record stays in every state. The same change is the same kind and target. Only the newest draft of a change can be approved, and only its approval records scope events. An approved change draft is refused `draft-approved` when approved again; the same content submitted again is a fresh draft, which can be approved. The end of a session changes no state. Once a start is approved, approving that start again or any other start draft is refused `project-already-started`, and no start is submitted again, since a start submitted then is refused the same way. A draft whose body this project purged is never approved.*
 
 ## 8. Workflows
 
