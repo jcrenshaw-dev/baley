@@ -314,7 +314,8 @@ pub fn record_change<L: Ledger + ?Sized>(
 /// recorded as `check_change` and `record_change` do. A request the ledger
 /// already holds is replayed before the check, as preparation does over MCP,
 /// so a retry of a completed edit gets its recorded answer however scope has
-/// moved since. The answer is the digest the recorded receipt names, or the
+/// moved since; a check that fails looks the request up again, for an
+/// original that committed after the first lookup. The answer is the digest the recorded receipt names, or the
 /// answer that refused or failed it; a receipt the store replayed for another
 /// change recorded under the same command is a reused request id, since this
 /// edit was never recorded. The draft is approved through `approve::judge`
@@ -351,8 +352,14 @@ pub fn submit_phase_edit<S: Ledger + Views + Payloads>(
     let result = if held(store, command)? {
         record_change(store, command, &change, None)
     } else {
-        let read = check_change(store, &command.project, &change)?;
-        record_change(store, command, &change, Some(&read))
+        match check_change(store, &command.project, &change) {
+            Ok(read) => record_change(store, command, &change, Some(&read)),
+            // The original can commit between the lookup and the check, and
+            // the check may refuse because of it, so the request is looked
+            // up again before a refusal is answered.
+            Err(refusal) if !held(store, command)? => return Err(refusal),
+            Err(_) => record_change(store, command, &change, None),
+        }
     };
     recorded_digest(answer(result, store), &change)
 }
@@ -466,11 +473,15 @@ pub fn answer(result: Result<Recorded, StoreError>, payloads: &dyn Payloads) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::io::Read;
+    use std::ops::RangeInclusive;
 
     use baley_core::scope::{DRAFT_NEWEST_INDEX, DRAFT_VIEW};
     use baley_store::{
-        Hash, IndexQuery, KeyValue, PayloadBody, PayloadRef, RequestId, StaleInput, Views,
+        Anchor, Claim, ClaimId, ClaimOwner, Claimed, Decide, DecideClaim, DecideReconcile, DocKey,
+        Document, Event, Hash, Head, IndexQuery, KeyValue, Page, PayloadBody, PayloadRef,
+        PayloadStatus, ReconcileAuthority, RequestId, StaleInput, VerifyReport, Views,
     };
 
     use super::*;
@@ -799,6 +810,182 @@ mod tests {
         let again = submit_phase_edit(&store, &edit, 2, &goal);
         assert_eq!(again, Ok(Hash::from_hex(E_B_DIGEST).unwrap()));
         assert_eq!(head(&store), before);
+        let drafts = of_type(&history(&store), "scope.submitted")
+            .into_iter()
+            .filter(|event| event.payload["digest"] == E_B_DIGEST)
+            .count();
+        assert_eq!(drafts, 1);
+    }
+
+    /// The real store, with `land` run once just after the first request
+    /// lookup returns: the window in which a retry's original can commit
+    /// between the lookup and the check.
+    struct CommitsAtLookup<'a> {
+        store: &'a baley_store_sqlite::SqliteStore,
+        land: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+    }
+
+    impl Ledger for CommitsAtLookup<'_> {
+        fn transact(
+            &self,
+            command: &Command,
+            decide: &mut Decide<'_>,
+        ) -> Result<Recorded, StoreError> {
+            Ledger::transact(self.store, command, decide)
+        }
+
+        fn claim(
+            &self,
+            command: &Command,
+            decide: &mut DecideClaim<'_>,
+        ) -> Result<Claimed, StoreError> {
+            Ledger::claim(self.store, command, decide)
+        }
+
+        fn renew_lease(
+            &self,
+            project: &ProjectId,
+            claim: &ClaimId,
+            owner: &ClaimOwner,
+            at: &str,
+        ) -> Result<(), StoreError> {
+            Ledger::renew_lease(self.store, project, claim, owner, at)
+        }
+
+        fn complete(
+            &self,
+            command: &Command,
+            owner: &ClaimOwner,
+            decide: &mut Decide<'_>,
+        ) -> Result<Recorded, StoreError> {
+            Ledger::complete(self.store, command, owner, decide)
+        }
+
+        fn reconcile(
+            &self,
+            command: &Command,
+            claim: &ClaimId,
+            authority: ReconcileAuthority,
+            decide: &mut DecideReconcile<'_>,
+        ) -> Result<Recorded, StoreError> {
+            Ledger::reconcile(self.store, command, claim, authority, decide)
+        }
+
+        fn open_claims(&self, project: &ProjectId) -> Result<Vec<Claim>, StoreError> {
+            Ledger::open_claims(self.store, project)
+        }
+
+        fn stream(
+            &self,
+            project: &ProjectId,
+            stream: &StreamName,
+            from_version: u64,
+            page: PageRequest,
+        ) -> Result<Page<Event>, StoreError> {
+            Ledger::stream(self.store, project, stream, from_version, page)
+        }
+
+        fn history(
+            &self,
+            project: &ProjectId,
+            range: RangeInclusive<u64>,
+            filter: &HistoryFilter,
+            page: PageRequest,
+        ) -> Result<Page<Event>, StoreError> {
+            Ledger::history(self.store, project, range, filter, page)
+        }
+
+        fn head(&self, project: &ProjectId) -> Result<Option<Head>, StoreError> {
+            Ledger::head(self.store, project)
+        }
+
+        fn verify(
+            &self,
+            project: &ProjectId,
+            anchor: Option<&Anchor>,
+        ) -> Result<VerifyReport, StoreError> {
+            Ledger::verify(self.store, project, anchor)
+        }
+    }
+
+    impl Views for CommitsAtLookup<'_> {
+        fn get(
+            &self,
+            project: &ProjectId,
+            view: &str,
+            key: &DocKey,
+        ) -> Result<Option<Document>, StoreError> {
+            let read = Views::get(self.store, project, view, key);
+            if view == REQUEST_VIEW {
+                let land = self.land.borrow_mut().take();
+                if let Some(land) = land {
+                    land();
+                }
+            }
+            read
+        }
+
+        fn get_many(
+            &self,
+            project: &ProjectId,
+            view: &str,
+            keys: &[DocKey],
+        ) -> Result<Vec<Option<Document>>, StoreError> {
+            Views::get_many(self.store, project, view, keys)
+        }
+
+        fn find(
+            &self,
+            project: &ProjectId,
+            view: &str,
+            query: &IndexQuery,
+        ) -> Result<Page<Document>, StoreError> {
+            Views::find(self.store, project, view, query)
+        }
+    }
+
+    impl Payloads for CommitsAtLookup<'_> {
+        fn open(&self, hash: &Hash) -> Result<PayloadBody<'_>, StoreError> {
+            Payloads::open(self.store, hash)
+        }
+
+        fn status(&self, hash: &Hash) -> Result<PayloadStatus, StoreError> {
+            Payloads::status(self.store, hash)
+        }
+    }
+
+    #[test]
+    fn a_retried_phase_edit_refused_when_its_original_committed_after_the_lookup_is_caught() {
+        use baley_core::scope::PhaseFields;
+
+        let (_dir, store) = approved();
+        let goal = PhaseFields {
+            goal: Some("The owner approves every change".into()),
+            ..PhaseFields::default()
+        };
+        let edit = command(SUBMIT_COMMAND, R4, 4, T4);
+        // The original records E_B and then phase 2 is withdrawn, so the
+        // retry's check refuses an edit its original already recorded.
+        let racing = CommitsAtLookup {
+            store: &store,
+            land: RefCell::new(Some(Box::new(|| {
+                submit_phase_edit(&store, &edit, 2, &goal).unwrap();
+                append(
+                    &store,
+                    R6,
+                    T5,
+                    vec![
+                        phase_withdrawn(2),
+                        story_reassigned(2, 1),
+                        phase_reordered(&[1]),
+                    ],
+                );
+            }))),
+        };
+
+        let retry = submit_phase_edit(&racing, &edit, 2, &goal);
+        assert!(racing.land.borrow().is_none(), "the lookup was not made");
+        assert_eq!(retry, Ok(Hash::from_hex(E_B_DIGEST).unwrap()));
         let drafts = of_type(&history(&store), "scope.submitted")
             .into_iter()
             .filter(|event| event.payload["digest"] == E_B_DIGEST)
