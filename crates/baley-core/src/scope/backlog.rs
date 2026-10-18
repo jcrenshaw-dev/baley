@@ -430,8 +430,12 @@ mod tests {
 
     #[test]
     fn a_backlog_story_change_lost_or_moving_its_place_is_caught() {
-        // Each change targets a story that is not last, so a handler that
-        // removes its story and appends it again shows in the order.
+        // The correction and story 2's move target stories that are not
+        // last, so a handler that removes its story and appends it again
+        // shows in the order. Story 3 moves first so that nothing after
+        // story 2's move puts the order back. Story 2 stays active, so
+        // story 3 leaving the backlog shows a reassignment that ignores its
+        // status.
         let digest = Hash([0x5c; 32]);
         let stories = after_s1(vec![
             event(
@@ -447,9 +451,14 @@ mod tests {
             event(
                 15,
                 "story.reassigned",
-                story_reassigned_payload(2, StoryStatus::Deferred, None, digest),
+                story_reassigned_payload(3, StoryStatus::Active, Some(1), digest),
             ),
-            event(16, "story.dropped", story_dropped_payload(1, digest)),
+            event(
+                16,
+                "story.reassigned",
+                story_reassigned_payload(2, StoryStatus::Active, Some(1), digest),
+            ),
+            event(17, "story.dropped", story_dropped_payload(1, digest)),
         ]);
         assert_eq!(ids(&stories), [1, 2, 3]);
         let first = entry(&stories, 1);
@@ -457,8 +466,11 @@ mod tests {
         assert_eq!(first["status"], "dropped");
         assert_eq!(first["phase"], Value::Null);
         let second = entry(&stories, 2);
-        assert_eq!(second["status"], "deferred");
-        assert_eq!(second["phase"], Value::Null);
+        assert_eq!(second["status"], "active");
+        assert_eq!(second["phase"], 1);
+        let third = entry(&stories, 3);
+        assert_eq!(third["status"], "active");
+        assert_eq!(third["phase"], 1);
         for story in stories.as_array().unwrap() {
             assert_eq!(story["refinement"], "unrefined", "{story}");
             assert_eq!(story["truths"], 0, "{story}");
