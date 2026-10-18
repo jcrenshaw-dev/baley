@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use baley_core::scope::{
     AcceptedScope, ApprovalFacts, ApprovalRefusal, ChangeApprovalFacts, ChangeApprovalRefusal,
-    ChangeKind, ChangeSubmission, DRAFT_NEWEST_INDEX, DRAFT_VIEW, NumbersExhausted, PHASE_DECLARED,
+    ChangeSubmission, DRAFT_NEWEST_INDEX, DRAFT_VIEW, NumbersExhausted, PHASE_DECLARED,
     PHASE_DETAIL_VIEW, PHASE_WITHDRAWN, PROJECT_STREAM, PriorApproval, ROADMAP_VIEW,
     SCOPE_APPROVED, SCOPE_SUBMITTED, START_KIND, START_TARGET, STORY_CORRECTED, STORY_DECLARED,
     STORY_DROPPED, STORY_REASSIGNED, ScopeChange, Submission, change_events, draft_key,
@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 use crate::envelope::Refusal;
 use crate::mcp::capture::{PLACE_LEDGER, TEXT_PURGED, failed, store_failed};
 use crate::mcp::prepare::LEDGER_UNAVAILABLE;
+use crate::mcp::scope::change_kind;
 use crate::scope::read::{
     self, Detail, Preview, PreviewError, ReadError, ScopeRead, preview, preview_of,
 };
@@ -91,20 +92,6 @@ struct CarriedDetail {
     /// Its `produced_seq` when read.
     seq: u64,
 }
-
-/// Every change kind, so a draft's recorded kind can be named back.
-const CHANGE_KINDS: [ChangeKind; 10] = [
-    ChangeKind::ProjectDescribe,
-    ChangeKind::PhaseDeclare,
-    ChangeKind::PhaseEdit,
-    ChangeKind::PhaseReorder,
-    ChangeKind::PhaseWithdraw,
-    ChangeKind::StoryDeclare,
-    ChangeKind::StoryEdit,
-    ChangeKind::StoryReassign,
-    ChangeKind::StoryDrop,
-    ChangeKind::BacklogReorder,
-];
 
 /// The first step: reads the draft with `digest` and its `scope.submitted`.
 /// For a start it reads whether a start is approved and the newest start
@@ -335,9 +322,7 @@ fn approvals_of<L: Ledger + ?Sized>(
 /// that no longer judges clean, or whose digest is not the draft's is a
 /// ledger fault.
 fn accept_change(read: &Preview) -> Result<(ChangeSubmission, u64), Value> {
-    let kind = CHANGE_KINDS
-        .into_iter()
-        .find(|kind| kind.as_str() == read.kind);
+    let kind = change_kind(&read.kind);
     let judged = match (kind, &read.submission) {
         (Some(kind), Value::Object(body)) if body.get("kind") == Some(&json!(read.kind)) => {
             let mut members = body.clone();
