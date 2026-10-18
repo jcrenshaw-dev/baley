@@ -1,21 +1,25 @@
 //! The owner's scope commands (design 0004 sections 5 and 6, D-20): `baley
-//! scope approve <digest>` approves the newest start draft as the owner, the
-//! only way scope is approved (D-24), and `baley scope preview|show`, `baley
-//! phase show`, `baley backlog show` and `baley story show` print what the
-//! ledger holds through the same reads as `document`, recording nothing. A
-//! submission comes only from a session, so no command here submits scope.
+//! scope approve <digest>` approves the newest draft of a start or a change
+//! as the owner, the only way scope is approved (D-24); `baley phase
+//! reorder|withdraw`, `baley story reassign|drop` and `baley backlog reorder`
+//! submit the id-only changes as drafts the owner then approves; and `baley
+//! scope preview|show`, `baley phase show`, `baley backlog show` and `baley
+//! story show` print what the ledger holds through the same reads as
+//! `document`, recording nothing. Declarations, edits and `project describe`
+//! come only from a session, since an agent drafts their text.
 //!
 //! Gathering finds the project and opens the ledger; judging, the arguments,
-//! the command an approval is recorded under and what is printed, is done by
-//! the pure functions below. Every text from the ledger is printed as
-//! `escape_debug` writes it, so a recorded line break cannot forge a line.
+//! the commands an approval or a submission is recorded under and what is
+//! printed, is done by the pure functions below. Every text from the ledger
+//! is printed as `escape_debug` writes it, so a recorded line break cannot
+//! forge a line.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use baley_core::capture::NO_SUCH_PHASE;
 use baley_core::policy::recorded::recorded_policy;
-use baley_core::policy::{CONFIG_UNAVAILABLE, SettingsFile};
+use baley_core::policy::{CONFIG_UNAVAILABLE, EffectivePolicy, SettingsFile};
 use baley_core::scope::{
     ChangeKind, ChangeSubmission, Destination, START_KIND, ScopeChange, UNKNOWN_DRAFT,
     judge_change, judge_submission,
@@ -52,17 +56,18 @@ pub struct ScopeArgs {
 
 #[derive(clap::Subcommand, Debug)]
 enum ScopeCommand {
-    /// Approve the newest start draft by its digest, as the owner. Phase
-    /// numbers and story ids are assigned now and printed.
+    /// Approve the newest draft of a start or a change by its digest, as the
+    /// owner. Phase numbers and story ids a start or a declaration gets are
+    /// assigned now, and the phases and stories it changed are printed.
     Approve {
-        /// The draft's digest from the scope-submit receipt: 64 lowercase
+        /// The draft's digest from its submission's receipt: 64 lowercase
         /// hexadecimal characters.
         #[arg(value_name = "DIGEST")]
         digest: String,
     },
     /// Print a draft by its digest, exactly as an approval would record it.
     Preview {
-        /// The draft's digest from the scope-submit receipt.
+        /// The draft's digest from its submission's receipt.
         #[arg(value_name = "DIGEST")]
         digest: String,
     },
@@ -70,7 +75,8 @@ enum ScopeCommand {
     Show,
 }
 
-/// `baley phase`: the owner's reads of accepted phases.
+/// `baley phase`: the owner's reads of accepted phases, and the phase
+/// changes the owner submits.
 #[derive(clap::Args, Debug)]
 pub struct PhaseArgs {
     #[command(subcommand)]
@@ -85,9 +91,27 @@ enum PhaseCommand {
         #[arg(value_name = "NUMBER")]
         number: String,
     },
+    /// Submit a new phase order as a draft, which the owner approves with
+    /// baley scope approve.
+    Reorder {
+        /// Every phase in the roadmap's order, each once, in the new order.
+        #[arg(value_name = "NUMBER", required = true)]
+        numbers: Vec<String>,
+    },
+    /// Submit a phase's withdrawal as a draft, which the owner approves with
+    /// baley scope approve.
+    Withdraw {
+        /// The phase to withdraw.
+        #[arg(value_name = "NUMBER")]
+        number: String,
+        /// One decision for each story the phase serves: STORY=PHASE moves
+        /// the story to that phase, STORY=drop drops it.
+        #[arg(value_name = "DECISION")]
+        decisions: Vec<String>,
+    },
 }
 
-/// `baley backlog`: the owner's read of the backlog.
+/// `baley backlog`: the owner's read of the backlog, and its reorder.
 #[derive(clap::Args, Debug)]
 pub struct BacklogArgs {
     #[command(subcommand)]
@@ -98,9 +122,18 @@ pub struct BacklogArgs {
 enum BacklogCommand {
     /// Print every accepted story in priority order.
     Show,
+    /// Submit a new priority order as a draft, which the owner approves with
+    /// baley scope approve.
+    Reorder {
+        /// Every active and deferred story's id, each once, in the new
+        /// priority order.
+        #[arg(value_name = "ID", required = true)]
+        ids: Vec<String>,
+    },
 }
 
-/// `baley story`: the owner's reads of accepted stories.
+/// `baley story`: the owner's reads of accepted stories, and the story
+/// changes the owner submits.
 #[derive(clap::Args, Debug)]
 pub struct StoryArgs {
     #[command(subcommand)]
@@ -112,6 +145,23 @@ enum StoryCommand {
     /// Print one accepted story.
     Show {
         /// The story id Baley assigned at approval.
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Submit a story's move to another phase or the backlog as a draft,
+    /// which the owner approves with baley scope approve.
+    Reassign {
+        /// The story to move.
+        #[arg(value_name = "ID")]
+        id: String,
+        /// The phase number that serves it now, or backlog.
+        #[arg(value_name = "PHASE")]
+        to: String,
+    },
+    /// Submit a story's drop as a draft, which the owner approves with baley
+    /// scope approve.
+    Drop {
+        /// The story to drop.
         #[arg(value_name = "ID")]
         id: String,
     },
@@ -132,27 +182,40 @@ pub fn run(args: ScopeArgs) -> ExitCode {
 
 /// Runs one `baley phase` command and prints its result.
 pub fn run_phase(args: PhaseArgs) -> ExitCode {
-    let PhaseCommand::Show { number } = args.command;
-    emit(judge_number(&number).and_then(|number| {
-        reading(|store, project| phase_render(read::phase(store, project, number)))
-    }))
+    emit(match args.command {
+        PhaseCommand::Show { number } => judge_number(&number).and_then(|number| {
+            reading(|store, project| phase_render(read::phase(store, project, number)))
+        }),
+        PhaseCommand::Reorder { numbers } => submit_change(&ChangeWords::PhaseReorder(numbers)),
+        PhaseCommand::Withdraw { number, decisions } => {
+            submit_change(&ChangeWords::PhaseWithdraw {
+                phase: number,
+                decisions,
+            })
+        }
+    })
 }
 
 /// Runs one `baley backlog` command and prints its result.
 pub fn run_backlog(args: BacklogArgs) -> ExitCode {
-    let BacklogCommand::Show = args.command;
-    emit(reading(|store, project| {
-        backlog_render(read::backlog(store, project))
-    }))
+    emit(match args.command {
+        BacklogCommand::Show => {
+            reading(|store, project| backlog_render(read::backlog(store, project)))
+        }
+        BacklogCommand::Reorder { ids } => submit_change(&ChangeWords::BacklogReorder(ids)),
+    })
 }
 
 /// Runs one `baley story` command and prints its result.
 pub fn run_story(args: StoryArgs) -> ExitCode {
-    let StoryCommand::Show { id } = args.command;
-    emit(
-        judge_number(&id)
+    emit(match args.command {
+        StoryCommand::Show { id } => judge_number(&id)
             .and_then(|id| reading(|store, project| story_render(read::story(store, project, id)))),
-    )
+        StoryCommand::Reassign { id, to } => {
+            submit_change(&ChangeWords::StoryReassign { story: id, to })
+        }
+        StoryCommand::Drop { id } => submit_change(&ChangeWords::StoryDrop(id)),
+    })
 }
 
 fn emit(result: Result<Render, Render>) -> ExitCode {
@@ -248,40 +311,7 @@ fn approve(digest: &str) -> Result<Render, Render> {
     let project = &checkout.project;
     let judged =
         approve::judge(&store, project, digest).map_err(|answer| answer_render(&answer))?;
-
-    let reads = policy_step::gather(
-        &checkout.folders.config,
-        &checkout.root,
-        checkout.working.as_ref(),
-        &mut crate::process::System,
-    );
-    let policy = policy_step::build(&reads, None).map_err(|e| Render::refusal(e.to_string()))?;
-    let recorded =
-        recorded_policy(&checkout.root, &policy).map_err(|e| Render::refusal(e.to_string()))?;
-    let site = Site {
-        root: &checkout.root,
-        policy: &policy,
-        path: &recorded.checkout,
-    };
-    gather_and_admit(
-        &store,
-        project,
-        &site,
-        &mut crate::process::System,
-        new_request_id(),
-        &SystemClock::now(),
-        None,
-    )
-    .map_err(|e| display::entry_error(&e, &project.0))?;
-    let version = policy_step::step(
-        &store,
-        project,
-        &recorded,
-        new_request_id(),
-        &SystemClock::now(),
-        None,
-    )
-    .map_err(|e| display::store_error(&e, Some(&project.0)))?;
+    let (policy, version) = admitted(&store, &checkout)?;
 
     let owner = identity::owner(identity::owner_name(&policy), &mut crate::process::System)
         .map_err(Render::refusal)?;
@@ -297,15 +327,83 @@ fn approve(digest: &str) -> Result<Render, Render> {
     Ok(answer_render(&submit::answer(recorded, &store)))
 }
 
+/// One of the owner's change commands: the words are judged before anything
+/// is read, and the change is checked against accepted scope before checkout
+/// admission and the policy step, so a refused change records nothing at all.
+/// It is then recorded as the owner under the version in force, in a
+/// transaction that confirms the scope the check read has not moved (D-09).
+fn submit_change(words: &ChangeWords) -> Result<Render, Render> {
+    let change = command_change(words)?;
+    let checkout = checkout()?;
+    let store = open(&checkout)?;
+    let project = &checkout.project;
+    let read = submit::check_change(&store, project, &change)
+        .map_err(|answer| submission_render(&answer))?;
+    let (_, version) = admitted(&store, &checkout)?;
+
+    let command = submit_command(
+        project,
+        version,
+        change.digest(),
+        new_request_id(),
+        &SystemClock::now(),
+    )
+    .map_err(|e| Render::refusal(e.to_string()))?;
+    let recorded = submit::record_change(&store, &command, &change, Some(&read));
+    Ok(submission_render(&submit::answer(recorded, &store)))
+}
+
+/// Checkout admission and then the policy step, in the order every owner
+/// command that records scope runs them, so approvals and submissions cannot
+/// drift apart. It gives the policy built with no host, which names the
+/// owner, and the version the step returned.
+fn admitted(store: &SqliteStore, checkout: &Checkout) -> Result<(EffectivePolicy, u64), Render> {
+    let project = &checkout.project;
+    let reads = policy_step::gather(
+        &checkout.folders.config,
+        &checkout.root,
+        checkout.working.as_ref(),
+        &mut crate::process::System,
+    );
+    let policy = policy_step::build(&reads, None).map_err(|e| Render::refusal(e.to_string()))?;
+    let recorded =
+        recorded_policy(&checkout.root, &policy).map_err(|e| Render::refusal(e.to_string()))?;
+    let site = Site {
+        root: &checkout.root,
+        policy: &policy,
+        path: &recorded.checkout,
+    };
+    gather_and_admit(
+        store,
+        project,
+        &site,
+        &mut crate::process::System,
+        new_request_id(),
+        &SystemClock::now(),
+        None,
+    )
+    .map_err(|e| display::entry_error(&e, &project.0))?;
+    let version = policy_step::step(
+        store,
+        project,
+        &recorded,
+        new_request_id(),
+        &SystemClock::now(),
+        None,
+    )
+    .map_err(|e| display::store_error(&e, Some(&project.0)))?;
+    Ok((policy, version))
+}
+
 /// The digest argument: exactly 64 lowercase hexadecimal characters, as
-/// the scope-submit receipt writes it. Anything else is refused before the
+/// a submission's receipt writes it. Anything else is refused before the
 /// ledger is read, and the refusal echoes none of it.
 pub(crate) fn judge_digest(text: &str) -> Result<Hash, Render> {
     let lowercase_hex =
         text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     lowercase_hex.then(|| Hash::from_hex(text)).flatten().ok_or_else(|| {
         Render::refusal(
-            "a draft digest is 64 lowercase hexadecimal characters, as the scope-submit receipt gives it",
+            "a draft digest is 64 lowercase hexadecimal characters, as a submission's receipt gives it",
         )
     })
 }
@@ -334,10 +432,6 @@ pub(crate) fn approve_command(
 /// approval's is: the owner as actor, no caller, Baley's clock and
 /// `policy_version` in both its digest and itself. The version is safe in the
 /// digest because a command-line request id is always fresh.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the owner's change commands call it")
-)]
 pub(crate) fn submit_command(
     project: &ProjectId,
     policy_version: u64,
@@ -431,10 +525,6 @@ pub(crate) fn answer_render(answer: &Value) -> Render {
 /// the draft and the command that approves it, exit 0, since the owner
 /// approves at the terminal what they just submitted; a refusal or a failure
 /// as `answer_render` prints them.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the owner's change commands call it")
-)]
 pub(crate) fn submission_render(answer: &Value) -> Render {
     if answer["status"] != "ok" {
         return answer_render(answer);
@@ -468,10 +558,6 @@ pub(crate) fn judge_number(text: &str) -> Result<u32, Render> {
 }
 
 /// The words of one of the owner's change commands, as clap gives them.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the owner's change commands call it")
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChangeWords {
     /// `phase reorder <NUMBER>...`.
@@ -491,25 +577,13 @@ pub(crate) enum ChangeWords {
 
 /// What a withdrawal decision's target is written as for a story to drop,
 /// and a reassignment's for the backlog.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the owner's change commands call it")
-)]
 const DROP_WORD: &str = "drop";
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the owner's change commands call it")
-)]
 const BACKLOG_WORD: &str = "backlog";
 
 /// The kind a command's words name and the members a session sends for the
 /// same change, decisions in the order given. Every number is judged by
 /// `judge_number`, and a word in another form is refused before the ledger
 /// is read, echoing none of it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the owner's change commands call it")
-)]
 pub(crate) fn change_members(words: &ChangeWords) -> Result<(ChangeKind, Value), Render> {
     let numbers = |items: &[String]| {
         items
@@ -564,10 +638,6 @@ pub(crate) fn change_members(words: &ChangeWords) -> Result<(ChangeKind, Value),
 
 /// One withdrawal decision, `<STORY>=<PHASE>` or `<STORY>=drop`, as the
 /// member a session sends.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the owner's change commands call it")
-)]
 fn decision_members(decision: &str) -> Result<Value, Render> {
     let form = || {
         Render::refusal(
@@ -587,10 +657,6 @@ fn decision_members(decision: &str) -> Result<Value, Render> {
 /// The change a command's words make, judged as a session's members are, so
 /// the same change has the same draft digest from either surface. A judgement
 /// refusal prints as the session would get it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the owner's change commands call it")
-)]
 pub(crate) fn command_change(words: &ChangeWords) -> Result<ChangeSubmission, Render> {
     let (kind, members) = change_members(words)?;
     judge_change(kind, &members)
