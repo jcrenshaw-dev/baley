@@ -284,9 +284,10 @@ The operation is `story truths submit` and `story truths approve` in [0005](0005
 |---|---|---|
 | `digest` | digest | The SHA-256 of the submission's canonical JSON, its identity as a draft |
 | `kind` | enum | The change kind, as in `scope.approved` |
+| `target` | text | The change the draft belongs to among its kind's drafts: `project` for a start; the phase number of a `phase-edit` or `phase-withdraw`; the story id of a `story-edit`, `story-reassign` or `story-drop`; `order` for either reorder; `description` for `project-describe`; the draft's own digest for a `phase-declare` or `story-declare` |
 | `body` | payload reference | The submission's canonical JSON as a `record` payload, which the event attaches |
 
-Recorded once per submit, a repeated digest included. The accepted scope views ignore it.
+The payload is at version 2. Only starts were recorded at version 1, which had no `target`, so a version-1 event reads with the start's target `project`, and a version-1 event of any other kind is refused rather than filed under a guessed target. Recorded once per submit, a repeated digest included. The accepted scope views ignore it.
 
 ### project.described (event, `project` stream)
 
@@ -295,37 +296,45 @@ Recorded once per submit, a repeated digest included. The accepted scope views i
 | `what` | text | What the project is |
 | `core_value` | text | The one thing it must do well |
 | `constraints` | list of text | What it must not do or depend on |
-| `submission` | digest | The submission this came from |
+| `submission` | digest | The submission this came from: a start or a `project-describe` |
+
+An approved start and every approved `project-describe` record one, and every earlier one stays in the record; the `roadmap` view holds the latest.
 
 ### story.declared, story.corrected, story.reassigned, story.reprioritized, story.dropped (events, `roadmap` stream)
 
+Each event carries the fields its name is listed against, and `submission`.
+
 | Field | Type | Meaning |
 |---|---|---|
-| `id` | integer | The story id: a whole number from 1, assigned by Baley at declaration as the next after the highest ever declared, never reused |
+| `id` | integer | The story id: a whole number from 1, assigned by Baley at declaration as the next after the highest ever declared, never reused (declared, corrected, reassigned, dropped) |
 | `sentence` | text | The wording (declared, corrected) |
-| `status` | `active`, `deferred`, `excluded`, `dropped` | The status after the event |
+| `status` | `active`, `deferred`, `excluded`, `dropped` | The status after the event (declared, corrected, reassigned, dropped). A correction keeps the status; a reassignment to a phase makes it `active` and one to the backlog keeps it; a drop makes it `dropped` |
 | `phase` | phase number or null | The phase it is committed to (declared, reassigned); null means the backlog |
-| `order` | list of story ids | The full priority order after the event (reprioritized) |
-| `submission` | digest | The submission this came from |
+| `order` | list of story ids | The priority order the change gives, every active and deferred story once (reprioritized). It names no single story, so the event has no `id`; dropped and excluded stories follow the ordered ones in their current relative order |
+| `submission` | digest | The submission this came from (every event) |
 
 ### phase.declared, phase.reordered, phase.withdrawn (events, `roadmap` stream)
+
+Each event carries the fields its name is listed against, and `submission`.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `number` | integer | The phase's permanent number (declared, withdrawn) |
 | `name`, `goal` | text | (declared) |
-| `detail` | payload reference | The detail text as a `record` payload (declared) |
+| `detail` | payload reference | The detail text as a `record` payload, which the event attaches (declared) |
 | `depends_on` | list of phase numbers | (declared) |
 | `stories` | list of story ids | The active stories served (declared) |
-| `order` | list of phase numbers | The full order after the event (reordered) |
-| `submission` | digest | The submission this came from |
+| `order` | list of phase numbers | The full order after the event, a withdrawn phase left out (reordered) |
+| `submission` | digest | The submission this came from (every event) |
+
+A start records one `phase.declared` per phase and one `phase.reordered`; a `phase-declare` records one of each; a `phase-edit` records a whole `phase.declared` for the same number, the fields it leaves out taken from accepted scope at approval; a `phase-withdraw` records `phase.withdrawn`, the stories' events and `phase.reordered`.
 
 ### scope.approved (event, `project` stream)
 
 | Field | Type | Meaning |
 |---|---|---|
 | `submission` | digest | The approved submission |
-| `kind` | enum | `start`, `phase-declare`, `phase-edit`, `phase-reorder`, `phase-withdraw`, `story-declare`, `story-edit`, `story-reassign`, `story-drop`, `backlog-reorder`. A revision of a story's truths is approved by `story truths approve` and recorded as `story.refined` ([0005](0005-context-plans-and-acceptance.md)), not here |
+| `kind` | enum | `start`, `project-describe`, `phase-declare`, `phase-edit`, `phase-reorder`, `phase-withdraw`, `story-declare`, `story-edit`, `story-reassign`, `story-drop`, `backlog-reorder`. A revision of a story's truths is approved by `story truths approve` and recorded as `story.refined` ([0005](0005-context-plans-and-acceptance.md)), not here |
 | `owner` | text | The owner's identity: `owner.name` from the global settings, else git `user.name` |
 | `at` | time | Baley's clock when the approval was recorded, the same as the command's time |
 
@@ -350,11 +359,11 @@ Every view is kept per project, and only `draft` reads a submission. The accepte
 
 | View | Key | Content |
 |---|---|---|
-| `draft` | project, digest | One document per submitted digest: the change kind, the sequence and time of that digest's latest submission, and its body's hash, never the body. Its `newest` index lists a kind's drafts newest first by that sequence, so the newest draft of a change is the first it gives. When this project purges the body, the document gains `state` `purged` and the purge's reason and is kept, so a read answers the tombstone and never opens the body ([0001](0001-evidence-ledger.md)) |
-| `roadmap` | project | One document: the latest project description; the declared phases by number, each with name, goal, dependencies, stories and status; the latest phase order; the stories in priority order, each with id, wording, status, phase and truth count; and the highest phase number and story id ever declared, which never go down, so an approval numbers past every declaration, withdrawn phases included |
-| `phase` | project, phase number | One document per declared phase: name, goal, dependencies, stories, status, the approving digest, the declaration's time and sequence, and the detail body's hash, never the text. Its `by_status` index lists phases by status, then number. A later declaration of the same number replaces the document. The current context (truth versions), plans, execution and completion state Hardin needs are added by the events that record them |
+| `draft` | project, digest | One document per submitted digest: the change kind, the target, the sequence and time of that digest's latest submission, and its body's hash, never the body. Each digest is filed under its kind and target. Its `newest` index lists one change's drafts, by kind and then target, newest first by that sequence, so the newest draft of a change is the first it gives. When this project purges the body, the document gains `state` `purged` and the purge's reason and is kept, so a read answers the tombstone and never opens the body ([0001](0001-evidence-ledger.md)) |
+| `roadmap` | project | One document: the latest project description; every phase ever declared, by number, each with name, goal, dependencies, the stories it serves now and status, `declared` or `withdrawn`; the latest phase order; the stories in priority order, each with id, wording, status, the phase serving it now and truth count; and the highest phase number and story id ever declared, which never go down, so an approval numbers past every declaration, withdrawn phases included. A withdrawn phase keeps its entry and is outside the order, so a roadmap read, `baley scope show` and `document` alike, gives the phases in order and then each withdrawn phase by number. Every event that moves a story keeps a phase's stories and the story's phase in step: a declaration commits the stories it lists and returns to the backlog those it no longer lists, a reassignment moves the story, and a drop takes it off its phase and keeps it with status `dropped`. A reprioritization puts the stories it lists first and every other story after them in its current relative order. This is the document a change is judged against, and the description read for refinement and planning |
+| `phase` | project, phase number | One document per declared phase: name, goal, dependencies, the stories its latest declaration listed, status, `declared` or `withdrawn`, the approving digest, the declaration's time and sequence, and the detail body's hash, never the text. Its `by_status` index lists phases by status, then number. A later declaration of the same number replaces the document. A withdrawal keeps it with every field and status `withdrawn`, so a withdrawn phase is still read by its number. A reassignment or drop since the latest declaration names no earlier phase, so the stories a phase serves now are the `roadmap` view's, which a phase read gives. The current context (truth versions), plans, execution and completion state Hardin needs are added by the events that record them |
 | `phase_detail` | project, `phase.declared` sequence | One document per phase declaration: the phase number and the detail body's hash. It is keyed by the declaration's sequence because a purge names each released body by sequence and hash; a `phase` document names its sequence. When this project purges the body, the document gains `state` `purged` and the purge's reason, so a phase read answers them and never opens the body |
-| `backlog` | project | One document: the stories in priority order, each with id, wording, status, phase, refinement, truth count and size, the view [0005](0005-context-plans-and-acceptance.md) reads. Refinement is `unrefined`, the truth count 0 and the size none until refinement and sizing record them |
+| `backlog` | project | One document: the stories in priority order, each with id, wording, status, phase, refinement, truth count and size, the view [0005](0005-context-plans-and-acceptance.md) reads. A declared story goes last. It follows corrections, reassignments, drops and reprioritizations, and the phase declarations that commit a story they list or release one they no longer list; a dropped story stays with status `dropped` and no phase. Refinement is `unrefined`, the truth count 0 and the size none until refinement and sizing record them |
 
 ## 7. States
 
