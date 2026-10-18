@@ -481,8 +481,9 @@ fn owner_command(
 
 /// What the approval's answer prints, a start's or a change's: the receipt's
 /// three lines, an empty list as `none`, exit 0; a refusal as `<code>:
-/// <reason>`, exit 2, a stale draft's naming the first part that differs; a
-/// failure the same way, exit 1.
+/// <reason>`, exit 2, a stale draft's naming the first part that differs, a
+/// malformed submission's naming its section and field; a failure the same
+/// way, exit 1.
 pub(crate) fn answer_render(answer: &Value) -> Render {
     let text = |name: &str| escaped(answer[name].as_str().unwrap_or_default());
     let joined = |name: &str| {
@@ -493,8 +494,16 @@ pub(crate) fn answer_render(answer: &Value) -> Render {
         or_none(numbers)
     };
     let mut line = format!("{}: {}", text("code"), text("reason"));
-    if let Some(path) = answer["details"]["path"].as_str() {
+    let details = &answer["details"];
+    if let Some(path) = details["path"].as_str() {
         line = format!("{line}: {}", escaped(path));
+    }
+    if let (Some(section), Some(field)) = (details["section"].as_str(), details["field"].as_str()) {
+        line = format!(
+            "{line}: section {}, field {}",
+            escaped(section),
+            escaped(field)
+        );
     }
     match answer["status"].as_str() {
         Some("ok") => Render {
@@ -1235,6 +1244,21 @@ mod tests {
             busy.lines
         );
         assert_eq!((busy.code, busy.error), (1, true));
+    }
+
+    #[test]
+    fn a_malformed_submission_refusal_printed_without_its_section_and_field_is_caught() {
+        let reason = "a field of the submission is missing, blank, of the wrong type, unknown or out of range, so nothing was recorded. The details name it";
+        let malformed = answer_render(&json!({"status": "refused",
+            "code": "malformed-submission", "reason": reason, "slot": "submission",
+            "details": {"section": "decisions", "field": "decisions[1].story"}}));
+        assert_eq!(
+            malformed.lines,
+            [format!(
+                "malformed-submission: {reason}: section decisions, field decisions[1].story"
+            )]
+        );
+        assert_eq!((malformed.code, malformed.error), (2, true));
     }
 
     /// W's digest: phase 2 withdrawn with its story moved to phase 1.
