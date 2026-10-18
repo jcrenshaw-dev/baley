@@ -149,11 +149,11 @@ pub fn judge<S: Ledger + Views + Payloads + ?Sized>(
 }
 
 /// The first step for a change draft, in this order: its body judged
-/// again under its kind, its `scope.submitted` at its sequence, an approval
-/// of its digest recorded after that sequence, and the newest draft of the
-/// same kind and target, then the approval judgement (D-02, D-03); then
-/// accepted scope read and the change judged against it as it stands now,
-/// refused as at submission with slot `digest` (D-12). A `phase-edit` that
+/// again under its kind, its `scope.submitted` at its sequence, accepted
+/// scope, an approval of its digest recorded after that sequence, and the
+/// newest draft of the same kind and target, then the approval judgement
+/// (D-02, D-03); then the change judged against that scope as it stands
+/// now, refused as at submission with slot `digest` (D-12). A `phase-edit` that
 /// gives no detail keeps the one in force, read here, since a transaction
 /// has no payload read; one this project purged is never opened.
 fn judge_change_draft<S: Ledger + Views + Payloads + ?Sized>(
@@ -164,6 +164,10 @@ fn judge_change_draft<S: Ledger + Views + Payloads + ?Sized>(
     let (change, seq) = accept_change(read)?;
     let digest = change.digest();
     let recorded = submitted_at(store, project, digest, seq).map_err(busy)?;
+    // Scope before the approvals: an approval landing after the approvals
+    // read then lands after this read too, and its roadmap event moves a
+    // document the second step confirms.
+    let scope = read::scope(store, project).map_err(|error| scope_unread(&error))?;
     let approvals = approvals_of(store, project, digest).map_err(busy)?;
     let prior = approvals.iter().find(|approval| approval.seq > seq);
     let newest = match store
@@ -195,7 +199,6 @@ fn judge_change_draft<S: Ledger + Views + Payloads + ?Sized>(
     // An approved judgement had a newest draft.
     let (newest, newest_seq) =
         newest.ok_or_else(|| change_refused(&ChangeApprovalRefusal::UnknownDraft))?;
-    let scope = read::scope(store, project).map_err(|error| scope_unread(&error))?;
     let accepted = scope
         .accepted()
         .ok_or_else(|| scope_unread(&ReadError::Unreadable(String::new())))?;
@@ -460,9 +463,11 @@ fn change_decision(
 ) -> Result<Decision, StoreError> {
     let change = &draft.change;
     confirm_draft(tx, judged)?;
-    // A transaction cannot ask for an approval after a sequence, so one
-    // before the latest submission is left to the scope documents: every
-    // change approval appends a roadmap event, which moves them.
+    // A transaction cannot ask for an approval after a sequence, so when
+    // one preceded the latest submission a second is left to the scope
+    // documents. The first step read them before the approvals, so any
+    // approval it missed landed after that read, and every change approval
+    // appends an event the roadmap document projects, which moves it.
     let approved = approval_of(judged.digest);
     if !draft.approved_before && tx.event_exists(&approved)? {
         return Err(StoreError::Stale(StaleInput::Absence(Absence::Event(
@@ -723,10 +728,17 @@ fn refused(refusal: &ApprovalRefusal) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::ops::RangeInclusive;
+
     use baley_core::scope::{
         BACKLOG_VIEW, PHASE_VIEW, ROADMAP_VIEW, backlog_key, phase_key, roadmap_key,
     };
-    use baley_store::{Actor, Caller, Event, OutcomeKind, Refusal as StoreRefusal};
+    use baley_store::{
+        Actor, Anchor, Caller, Claim, ClaimId, ClaimOwner, Claimed, Decide, DecideClaim,
+        DecideReconcile, DocKey, Event, Head, OutcomeKind, Page, PayloadBody, PayloadStatus,
+        ReconcileAuthority, Refusal as StoreRefusal, VerifyReport,
+    };
     use serde_json::json;
 
     use super::*;
@@ -1308,6 +1320,205 @@ mod tests {
             .count();
         assert_eq!(approvals, 1);
         assert_busy(&answer(result, &store));
+    }
+
+    /// The real store, with `land` run once just after the `after`-th read
+    /// of the approval history returns: the window in which another
+    /// approval can commit between the first step's reads.
+    struct ApprovesDuring<'a> {
+        store: &'a baley_store_sqlite::SqliteStore,
+        after: usize,
+        reads: Cell<usize>,
+        land: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+    }
+
+    impl<'a> ApprovesDuring<'a> {
+        fn new(
+            store: &'a baley_store_sqlite::SqliteStore,
+            after: usize,
+            land: impl FnOnce() + 'a,
+        ) -> Self {
+            Self {
+                store,
+                after,
+                reads: Cell::new(0),
+                land: RefCell::new(Some(Box::new(land))),
+            }
+        }
+
+        fn landed(&self) -> bool {
+            self.land.borrow().is_none()
+        }
+    }
+
+    impl Ledger for ApprovesDuring<'_> {
+        fn transact(
+            &self,
+            command: &Command,
+            decide: &mut Decide<'_>,
+        ) -> Result<Recorded, StoreError> {
+            Ledger::transact(self.store, command, decide)
+        }
+
+        fn claim(
+            &self,
+            command: &Command,
+            decide: &mut DecideClaim<'_>,
+        ) -> Result<Claimed, StoreError> {
+            Ledger::claim(self.store, command, decide)
+        }
+
+        fn renew_lease(
+            &self,
+            project: &ProjectId,
+            claim: &ClaimId,
+            owner: &ClaimOwner,
+            at: &str,
+        ) -> Result<(), StoreError> {
+            Ledger::renew_lease(self.store, project, claim, owner, at)
+        }
+
+        fn complete(
+            &self,
+            command: &Command,
+            owner: &ClaimOwner,
+            decide: &mut Decide<'_>,
+        ) -> Result<Recorded, StoreError> {
+            Ledger::complete(self.store, command, owner, decide)
+        }
+
+        fn reconcile(
+            &self,
+            command: &Command,
+            claim: &ClaimId,
+            authority: ReconcileAuthority,
+            decide: &mut DecideReconcile<'_>,
+        ) -> Result<Recorded, StoreError> {
+            Ledger::reconcile(self.store, command, claim, authority, decide)
+        }
+
+        fn open_claims(&self, project: &ProjectId) -> Result<Vec<Claim>, StoreError> {
+            Ledger::open_claims(self.store, project)
+        }
+
+        fn stream(
+            &self,
+            project: &ProjectId,
+            stream: &StreamName,
+            from_version: u64,
+            page: PageRequest,
+        ) -> Result<Page<Event>, StoreError> {
+            Ledger::stream(self.store, project, stream, from_version, page)
+        }
+
+        fn history(
+            &self,
+            project: &ProjectId,
+            range: RangeInclusive<u64>,
+            filter: &HistoryFilter,
+            page: PageRequest,
+        ) -> Result<Page<Event>, StoreError> {
+            let read = Ledger::history(self.store, project, range, filter, page);
+            if filter.types == [SCOPE_APPROVED] {
+                self.reads.set(self.reads.get() + 1);
+                if self.reads.get() == self.after {
+                    let land = self.land.borrow_mut().take();
+                    if let Some(land) = land {
+                        land();
+                    }
+                }
+            }
+            read
+        }
+
+        fn head(&self, project: &ProjectId) -> Result<Option<Head>, StoreError> {
+            Ledger::head(self.store, project)
+        }
+
+        fn verify(
+            &self,
+            project: &ProjectId,
+            anchor: Option<&Anchor>,
+        ) -> Result<VerifyReport, StoreError> {
+            Ledger::verify(self.store, project, anchor)
+        }
+    }
+
+    impl Views for ApprovesDuring<'_> {
+        fn get(
+            &self,
+            project: &ProjectId,
+            view: &str,
+            key: &DocKey,
+        ) -> Result<Option<Document>, StoreError> {
+            Views::get(self.store, project, view, key)
+        }
+
+        fn get_many(
+            &self,
+            project: &ProjectId,
+            view: &str,
+            keys: &[DocKey],
+        ) -> Result<Vec<Option<Document>>, StoreError> {
+            Views::get_many(self.store, project, view, keys)
+        }
+
+        fn find(
+            &self,
+            project: &ProjectId,
+            view: &str,
+            query: &IndexQuery,
+        ) -> Result<Page<Document>, StoreError> {
+            Views::find(self.store, project, view, query)
+        }
+    }
+
+    impl Payloads for ApprovesDuring<'_> {
+        fn open(&self, hash: &Hash) -> Result<PayloadBody<'_>, StoreError> {
+            Payloads::open(self.store, hash)
+        }
+
+        fn status(&self, hash: &Hash) -> Result<PayloadStatus, StoreError> {
+            Payloads::status(self.store, hash)
+        }
+    }
+
+    #[test]
+    fn a_resubmitted_change_approved_twice_by_an_approval_between_its_reads_is_caught() {
+        use baley_core::scope::ChangeKind;
+
+        // Each pass lands the other approval after one more of the first
+        // step's approval-history reads, until a pass makes no such read.
+        let mut after = 1;
+        loop {
+            let (_dir, store) = approved();
+            let (declared, _) =
+                approve_change(&store, ChangeKind::PhaseDeclare, &p(), (R2, T4), (R3, T5));
+            let resubmitted =
+                submit_change(&store, ChangeKind::PhaseDeclare, &p(), R4, T6).unwrap();
+            assert_eq!(digest_of(&resubmitted), declared);
+            let racing = ApprovesDuring::new(&store, after, || {
+                let judged = judge(&store, &project(), declared).unwrap();
+                approve(&store, Some(&judged), R6, 6, T7).unwrap();
+            });
+
+            let first = judge(&racing, &project(), declared);
+            if !racing.landed() {
+                break;
+            }
+            let reply = match first {
+                Err(refusal) => refusal,
+                Ok(judged) => answer(approve(&store, Some(&judged), R7, 7, T8), &store),
+            };
+            assert_ne!(reply["status"], "ok", "after read {after}: {reply}");
+            let approvals = of_type(&history(&store), "scope.approved")
+                .into_iter()
+                .filter(|event| event.payload["submission"] == declared.to_hex())
+                .count();
+            assert_eq!(approvals, 2, "after read {after}");
+            after += 1;
+        }
+        assert!(after > 1, "the first step read no approval history");
     }
 
     #[test]
