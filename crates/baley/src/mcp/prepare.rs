@@ -62,8 +62,7 @@ const PLACE_LEDGER: &str = "ledger";
 const PLACE_GIT: &str = "git";
 const PLACE_CHECKOUT: &str = "checkout";
 
-/// A project read or write ready to run, and for a write prepared fresh, the
-/// policy it was judged under.
+/// A project read or write ready to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prepared {
     /// The project the working tree's `baley.toml` names, known to the ledger.
@@ -73,12 +72,6 @@ pub struct Prepared {
     pub root: PathBuf,
     /// The domain command to run. `Some` exactly when a write was requested.
     pub command: Option<Command>,
-    /// The effective policy built with no host, the one the checkout's facts
-    /// come from and the one the command line builds, so a host section
-    /// cannot give a session another owner. `Some` exactly when a write was
-    /// prepared fresh: a read and a request the ledger already holds read no
-    /// settings.
-    pub policy: Option<EffectivePolicy>,
 }
 
 /// The identity a served write supplies, which preparation carries into the
@@ -242,7 +235,7 @@ enum Next {
     Failed(Envelope<Value>),
     /// The write's own check ended the call with this answer.
     Checked(Value),
-    /// Boxed, since a fresh write carries its whole policy.
+    /// Boxed, since a prepared write carries its whole command.
     Ready(Box<Prepared>),
 }
 
@@ -359,7 +352,6 @@ fn next(call: &Call, seen: &Seen) -> Next {
             project,
             root,
             command: None,
-            policy: None,
         }));
     };
     let Some(working) = working.as_ref().ok().and_then(Option::as_ref) else {
@@ -454,7 +446,6 @@ fn write_next(
                 project,
                 root,
                 command: Some(command),
-                policy: Some(policies.facts),
             }))
         }
     }
@@ -474,7 +465,6 @@ fn held(
             project: project.clone(),
             root: root.to_path_buf(),
             command: Some(replay.clone()),
-            policy: None,
         }))),
         Ok(Some(_)) => Some(failed(
             LEDGER_UNAVAILABLE,
@@ -506,8 +496,7 @@ fn unavailable_file(file: &Path) -> Next {
 /// transaction keeps the final say on a replay. Otherwise it reads and validates
 /// the settings, gathers the checkout's facts through `process` and admits
 /// the checkout, runs the policy step for `host`, and returns the domain
-/// command carrying the version the step returned, with the policy built with
-/// no host that the write was judged under. Checkout admission and the
+/// command carrying the version the step returned. Checkout admission and the
 /// policy step each record as Baley with the server caller at `at`, in their
 /// own transactions. `config` is the config folder, where the global file is.
 /// `store` is `None` when the ledger was not opened at startup.
@@ -1175,41 +1164,6 @@ mod tests {
                 "a refused checkout admission must end the preparation"
             );
         }
-    }
-
-    #[test]
-    fn a_fresh_write_prepared_without_its_policy_or_a_replay_given_one_is_caught() {
-        let owned = |mut seen: Seen| {
-            let mut reads = reads(SECTIONED);
-            reads.global = Ok(Some(settings::file(
-                Path::new("/c/config.toml"),
-                b"[owner]\nname = \"Ada Owner\"\n".to_vec(),
-            )));
-            seen.reads = Some(reads);
-            seen
-        };
-        let mut fresh = admitted(owned(looked_up()));
-        fresh.stepped = Some(Ok(5));
-        let Next::Ready(prepared) = write_step(&fresh) else {
-            panic!("the step's version is observed, so the write is ready");
-        };
-        let policy = prepared.policy.expect("a fresh write carries its policy");
-        assert_eq!(
-            policy.settings["owner.name"].value,
-            Some(baley_core::policy::Value::PersonName("Ada Owner".into()))
-        );
-
-        let replay = owned(with_replay(known_project(), Ok(Some(completed_request()))));
-        let Next::Ready(prepared) = write_step(&replay) else {
-            panic!("a known request is ready with no other step");
-        };
-        assert_eq!(prepared.policy, None);
-
-        let caller = caller("/real/r/p", "/w");
-        let Next::Ready(prepared) = next(&read_call(&caller), &known_project()) else {
-            panic!("a read is ready at the known-project check");
-        };
-        assert_eq!(prepared.policy, None);
     }
 
     #[test]
