@@ -69,7 +69,7 @@ In the component view of [0002](0002-system-design.md) (Figure 4) this area is o
 | PRJ-R16 | A revision is refused with `dispatch-active` while a worker is dispatched on a phase that committed the story. | A running worker must finish or be stopped under the truths it was given. | PRJ-R14 | Active |
 | PRJ-R17 | A story's wording is corrected by `story edit`, at any time, for any active story; every earlier wording is kept. Correcting a story no phase serves (dropped or excluded) is refused with `story-not-served`. | One place to fix wording, and no editing of what the project no longer promises. | EVD-R2 | Active |
 | PRJ-R18 | A request that names a phase, story or plan that does not exist is refused with `no-such-phase`, `no-such-story` or `no-such-plan`, naming it. "Unavailable" is answered only for a temporary condition. | A mistake must read as a mistake. | SYS-P10 | Active |
-| PRJ-R19 | Every scope change (project start; phase declare, edit, reorder and withdraw; story declare, edit, reassign and drop; backlog reorder; and a revision of a story's truths, `story truths submit` in [0005](0005-context-plans-and-acceptance.md)) is a submission with a preview and an owner approval by digest, recorded as events that keep every earlier record. | Scope changes only with a record of what changed, who approved it and when. | SYS-P5, SYS-P6 | Active |
+| PRJ-R19 | Every scope change (project start; project describe; phase declare, edit, reorder and withdraw; story declare, edit, reassign and drop; backlog reorder; and a revision of a story's truths, `story truths submit` in [0005](0005-context-plans-and-acceptance.md)) is a submission with a preview and an owner approval by digest, recorded as events that keep every earlier record. | Scope changes only with a record of what changed, who approved it and when. | SYS-P5, SYS-P6 | Active |
 | PRJ-R20 | The project description is recorded as `project.described` on the project stream and served to refinement and planning ([0005](0005-context-plans-and-acceptance.md)) beside the roadmap. It is revised the same way as any scope change. | The planner and the analyzer work from what the owner said the project is. | PRJ-R2 | Active |
 
 ## 4. Roles and actors
@@ -89,7 +89,13 @@ The analyzer and the plan checker take no part in this area; they act on a story
 
 Every operation here is implemented once in the library and served as a typed operation on the host interface, reachable from a session through the stub skill that names it ([ADR 0009](../adr/0009-served-instructions.md)). The owner's own acts and reads also have commands under `baley project`, `baley scope`, `baley phase`, `baley story` and `baley backlog`, the same `baley story` namespace that holds the refinement operations of [0005](0005-context-plans-and-acceptance.md), and each command calls the same function as the operation a session calls ([ADR 0044](../adr/0044-owner-acts-on-the-command-line.md)). Every approval is the exception: it is given only on the command line and is never served over MCP, because over MCP the call comes from the model and nothing proves a person answered, while the sandbox keeps agents from running the command line against Baley's home, where the ledger lives. A submission comes from the planner's work, so `scope submit` is served to a session only.
 
-Each change follows the same three steps: submit (the submission is recorded as a draft and its digest returned), approve (the owner's yes to that digest, at the terminal), record (the approval's events). Every submission is recorded in the ledger as a draft when it is submitted ([ADR 0043](../adr/0043-submissions-recorded-as-drafts.md)). A draft survives a restart, can be read by its digest from any session or from the terminal, and can be approved until a newer submission for the same change is recorded; the newer one is then the newest draft, even when it repeats an earlier digest. The end of a session discards no draft. Recording a submission changes no accepted scope: only an approval does.
+Each change follows the same three steps: submit (the submission is recorded as a draft and its digest returned), approve (the owner's yes to that digest, at the terminal), record (the approval's events). Every submission is recorded in the ledger as a draft when it is submitted ([ADR 0043](../adr/0043-submissions-recorded-as-drafts.md)). A draft survives a restart, can be read by its digest from any session or from the terminal, and can be approved until a newer submission for the same change, the same kind and target, is recorded; the newer one is then the newest draft, even when it repeats an earlier digest. A change draft approved after its latest submission is not approved again; submitting the same content again makes it a fresh draft that can be. The end of a session discards no draft. Recording a submission changes no accepted scope: only an approval does.
+
+After the start, each change is its own `baley_apply` operation, spelled with a hyphen: `project-describe`, `phase-declare`, `phase-edit`, `phase-reorder`, `phase-withdraw`, `story-declare`, `story-edit`, `story-reassign`, `story-drop` and `backlog-reorder`. Each takes a `request_id`, a UUID in lowercase hyphenated form that a retry of the same change repeats, and a `submission` holding the change's members, which the subsections below list; an argument other than those two is refused `invalid-arguments`, and so is a `request_id` in any other form. A change names phases by their numbers and stories by their ids, never by position or label. Baley adds a `kind` member holding the operation's spelling, so a `kind` the caller sends is an unknown member. The owner also has five commands for the changes that carry only numbers and ids: `baley phase reorder <NUMBER>...`, `baley phase withdraw <NUMBER> [<STORY>=<PHASE>|<STORY>=drop]...`, `baley story reassign <ID> <PHASE>|backlog`, `baley story drop <ID>` and `baley backlog reorder <ID>...`. Each turns its words into the members a session sends, so it records the same draft, with the same digest, for the same content, and a word that is not a whole number from 1, `drop` or `backlog` where the command takes one is refused before the ledger is read. A command records its draft as the owner with no caller, after checkout admission and the policy step, as `scope approve` does, and prints the draft's kind, digest and time and the `baley scope approve` command that approves it, exit 0. Declarations, edits and `project describe` come only from a session, since an agent drafts their text.
+
+A change's body is its members with the kind added, and its digest is the SHA-256 of that body's canonical JSON, so two kinds with the same content, a `phase reorder` and a `backlog reorder` holding the same order, have different digests. A start's body has no `kind` member. Each draft also has a target, the change it belongs to among its kind's drafts: the phase number of a `phase edit` or `phase withdraw`; the story id of a `story edit`, `story reassign` or `story drop`; `order` for either reorder; `description` for `project describe`; a declaration's own digest for a `phase declare` or `story declare`, since each declaration is a change of its own; and `project` for a start. So edits of two different phases are both approvable, and a newer edit of one phase makes only that phase's older edit stale. A change's receipt gives `status` `ok`, the `digest`, the `kind` and `recorded_at`, never the change.
+
+A change is judged whole in two parts. Its shape comes first: the submission must be an object, an unknown member anywhere in it is refused before any other fault, then each member is judged in the order its subsection lists it. A fault is `malformed-submission`, its details naming the `section` and the `field`, such as `depends_on[1]` or `decisions[0].to`. Text is taken as written and must not be empty or only whitespace; a phase number or story id is a whole number from 1 to 4,294,967,295; a list of numbers repeats none. Then, before the write is prepared, the change is judged against accepted scope as the `roadmap` view holds it. A change submitted before the start is approved is refused `project-not-started`, so no phase or story is declared outside the start's order; after it, each kind's rules run in the order its refusal table gives, so one change always gets one answer. A withdrawn phase is no phase a change can name: a change naming one is refused `no-such-phase`. A refusal records nothing. A body identical to one purged from the ledger cannot be stored again, and the call is answered `failed` `text-purged` with nothing recorded; the same `request_id` with a different change, or another kind, is refused `request-id-reuse`.
 
 ### project start
 
@@ -130,81 +136,141 @@ Each change follows the same three steps: submit (the submission is recorded as 
 
 ### scope approve
 
-- **Inputs:** the draft's digest alone, as the receipt writes it: 64 lowercase hexadecimal characters. Anything else is refused before the ledger is read. The owner and the time are Baley's: the owner is `owner.name` from the global settings, else git `user.name` ([0012](0012-host-interface.md) HST-R10), and the time is Baley's clock when the approval is recorded. Nothing a caller sends supplies either.
-- **Outputs:** in one transaction, in this order: `project.described`; one `story.declared` per story, in submission order, with ids Baley assigns as the next whole numbers after the highest story id ever declared; one `phase.declared` per phase, in roadmap order, numbered as the next whole numbers after the highest phase number ever declared, withdrawn phases included, with its dependencies as phase numbers, its stories as story ids and its detail stored as a `record` payload; one `phase.reordered` with the new numbers in roadmap order; and `scope.approved` last, binding the digest, with the owner's name and Baley's time. Every event is recorded with actor `owner`. A story's `phase` is the number of the phase that lists it, or none when no phase does. The receipt gives the kind, the digest, the owner, the time, the assigned phase numbers in roadmap order and the assigned story ids in submission order, and the command prints them as three lines, exit 0.
+- **Inputs:** the digest of any draft, a start's or a change's, alone, as the receipt writes it: 64 lowercase hexadecimal characters. Anything else is refused before the ledger is read. The owner and the time are Baley's: the owner is `owner.name` from the global settings, else git `user.name` ([0012](0012-host-interface.md) HST-R10), and the time is Baley's clock when the approval is recorded. Nothing a caller sends supplies either.
+- **Outputs:** for a start, in one transaction, in this order: `project.described`; one `story.declared` per story, in submission order, with ids Baley assigns as the next whole numbers after the highest story id ever declared; one `phase.declared` per phase, in roadmap order, numbered as the next whole numbers after the highest phase number ever declared, withdrawn phases included, with its dependencies as phase numbers, its stories as story ids and its detail stored as a `record` payload; one `phase.reordered` with the new numbers in roadmap order; and `scope.approved` last, binding the digest, with the owner's name and Baley's time. A story's `phase` is the number of the phase that lists it, or none when no phase does. For a change, in one transaction, the events its subsection names, taken over accepted scope as the transaction reads it, then `scope.approved` of the change's kind. Every event is recorded with actor `owner`. The receipt gives the kind, the digest, the owner, the time, the phase numbers and the story ids the approval recorded (for a start, the assigned phase numbers in roadmap order and story ids in submission order; for a change, the phase it declared, edited or withdrew and the stories it declared, corrected, moved or dropped), and the command prints them as three lines, an empty list as `none`, exit 0.
 - **Refusals:** judged in this order, so one approval always gets one answer. Each prints `<code>: <reason>`, a stale draft's followed by the path, and exits 2.
 
   | Code | When | Requirement |
   |---|---|---|
-  | `unknown-draft` | No draft has the digest, or its `scope.submitted` is not found among the events | PRJ-R19 |
-  | `project-already-started` | The project's start is approved. Judged before staleness, so once one start draft is approved, approving any other start draft is refused this way, not with `stale-draft` | PRJ-R6 |
-  | `stale-draft` | A newer submission of the same kind was recorded after this draft's latest submission. The details name the first differing part as a path into the content, looked for in member order (the description, then the stories entry by entry, then the roadmap entry by entry), such as `roadmap[1].goal` | PRJ-R19 |
+  | `unknown-draft` | No draft has the digest, its `scope.submitted` at its latest submission is not found among the events, or no newest draft of its change is listed | PRJ-R19 |
+  | `project-already-started` | A start draft, and the project's start is approved. Judged before staleness, so once one start draft is approved, approving any other start draft is refused this way, not with `stale-draft` | PRJ-R6 |
+  | `draft-approved` | A change draft already approved after its latest submission. The details name that approval's `owner` and `at`. Judged before staleness, since the draft was already acted on | PRJ-R19 |
+  | `stale-draft` | A newer submission for the same change, the same kind and target, was recorded after this draft's latest submission. The details name the first differing part as a path into the content, looked for in the kind's member order: for a start, the description, then the stories entry by entry, then the roadmap entry by entry, such as `roadmap[1].goal`; for a change, its members in the order its subsection lists them, inside a list entry by entry and inside a withdrawal's decisions member by member, such as `decisions[0].to`. A member one draft holds and the other lacks differs | PRJ-R19 |
 
-  Run outside a checkout of a project it is refused `not-a-project`, and for a project the ledger does not list, `project-not-in-ledger`. With neither `owner.name` nor git `user.name` readable it is refused `owner-identity-missing`, naming both ways to set one; that refusal comes after checkout admission and the policy step, whose records stand. A draft whose body this project purged, or whose body no longer judges as the submission its digest names, is never approved: the answer is `failed` `ledger-unavailable`, exit 1. So is an approval whose numbering would pass the largest phase number or story id Baley can hold (4,294,967,295), and its transaction records nothing, since wrapping would reuse a number.
+  A change draft that passes these is judged again against accepted scope as it stands at approval, with the same refusals and the same order as at submission, so an approval after scope moved is refused what a submission now would be. Those refusals name the `digest` as the slot at fault, where a submission's name the `submission`.
+
+  Run outside a checkout of a project it is refused `not-a-project`, and for a project the ledger does not list, `project-not-in-ledger`. With neither `owner.name` nor git `user.name` readable it is refused `owner-identity-missing`, naming both ways to set one; that refusal comes after checkout admission and the policy step, whose records stand. A draft whose body this project purged, or whose body no longer judges as the submission its digest names, is never approved: the answer is `failed` `ledger-unavailable`, exit 1. So is an approval of a start, a `phase declare` or a `story declare` whose numbering would pass the largest phase number or story id Baley can hold (4,294,967,295), and its transaction records nothing, since wrapping would reuse a number. A `phase edit` that gives no detail keeps the detail in force; when this project purged that detail the approval is answered `failed` `text-purged`, naming `detail`, with nothing recorded, and the edit must give a new detail.
 
   Served on the command line only, as `baley scope approve <digest>`, and never over MCP: over MCP the call comes from the model and nothing proves a person answered, while the sandbox keeps agents from running the command line against Baley's home, where the ledger lives ([ADR 0044](../adr/0044-owner-acts-on-the-command-line.md)). `baley_apply` has no `scope-approve` spelling, so a call spelled that way is refused `unknown-operation`.
 
 ### Refusals judged against the ledger
 
-A `scope submit` or `scope approve` refusal judged against the ledger records nothing at all. It is judged from the ledger before the write is prepared: over MCP after the replay lookup and before the settings are read, on the command line before checkout admission. So no checkout admission (`checkout.seen`), no policy step (`policy.effective`) and no `command.completed` is recorded for it. A refusal of the submission's content is judged before the ledger is read at all.
+A refusal of a start submission, a change submission or an approval judged against the ledger records nothing at all. It is judged from the ledger before the write is prepared: over MCP after the replay lookup and before the settings are read, on the command line before checkout admission. So no checkout admission (`checkout.seen`), no policy step (`policy.effective`) and no `command.completed` is recorded for it. A start's start-once check, a change's judgement against accepted scope and an approval's whole judgement are each judged this way. A refusal of the submission's content, its shape, is judged before the ledger is read at all.
 
-A retry of a `scope submit` request already completed, the same `request_id` with the same submission, is answered with its recorded receipt and never refused `project-already-started`, even when the start was approved since. When the start-once check refuses, the request is looked up again first, so a request recorded since the first lookup is replayed rather than refused. Each `baley scope approve` is a new request, so it has no retry by id: running it again after its approval is judged afresh and refused `project-already-started`.
+A retry of a submission request already completed, the same `request_id` with the same submission, is answered with its recorded receipt and never refused, even when scope moved since: a retried start is not refused `project-already-started` after the start was approved, and a retried change is not refused by the scope it was checked against. When the check refuses, the request is looked up again first, so a request recorded since the first lookup is replayed rather than refused. The library function Build 4 T9's `phase plan` records a `phase edit` with does the same: it looks its request up before the scope check and again after a check that refuses, and answers with the digest its recorded receipt names, so a receipt the ledger holds for another change under the same request is `request-id-reuse`. Each `baley scope approve`, and each of the owner's change commands, is a new request, so it has no retry by id: running an approval again after it was recorded is judged afresh and refused `project-already-started` for a start or `draft-approved` for a change.
 
-When another submission or approval lands between a call's judgement and its transaction, that transaction records nothing. A submission's transaction confirms that no start approval exists. An approval's confirms that the draft's latest submission, its `scope.submitted`, the absence of a start approval and the newest start draft are what the judgement read. When any of them moved, the call is answered `failed` `ledger-busy`, retryable, and the retry is judged afresh. The checkout admission and policy step recorded before the transaction stand.
+When another submission or approval lands between a call's judgement and its transaction, that transaction records nothing. A start submission's transaction confirms that no start approval exists. A change submission's confirms that the `roadmap` document and every `phase` document its check read are unchanged. A start approval's confirms that the draft's latest submission, its `scope.submitted`, the absence of a start approval and the newest start draft are what the judgement read. A change approval's confirms the draft's latest submission and its `scope.submitted`, that no approval of its digest landed since, that the newest draft of its change is the one read, by digest and sequence, and that every scope document the judgement read is unchanged; for a `phase edit` that keeps the detail in force, it also confirms that the `phase_detail` document the detail came from has not moved and is not purged, so a detail purged between the steps is never stored again. The first step reads accepted scope before the earlier approvals of the digest, so an approval landing between those reads lands after the scope read, moves the `roadmap` document, and the second step refuses. When any of them moved, the call is answered `failed` `ledger-busy`, retryable, and the retry is judged afresh. The checkout admission and policy step recorded before the transaction stand.
+
+### project describe
+
+- **Inputs:** exactly the start's `description` members: `what` and `core_value`, each text, and `constraints`, a list of text that may be empty, judged by the start's description rule. Over MCP the operation is `project-describe`; it has no owner command.
+- **Outputs:** the receipt with the digest; the preview is read by the digest as any draft's is. On approval `project.described` with the whole new description, then `scope.approved` of kind `project-describe`. Every earlier `project.described` stays in the record. The description refinement and planning read ([0005](0005-context-plans-and-acceptance.md)) is the `roadmap` view's, so it changes only when the owner approves this exact digest; a pending draft never reaches it.
+- **Refusals:**
+
+  | Code | When | Requirement |
+  |---|---|---|
+  | `malformed-submission` | A member is missing, blank, of the wrong type or unknown; the details name the member, such as `constraints[0]` | PRJ-R3 |
+  | `project-not-started` | The project's start is not approved, so there is no description to revise. A start records its own description | PRJ-R20 |
 
 ### phase declare
 
-- **Inputs:** the declaration shape: name, goal, detail, dependencies, stories served; optional position (default: last).
-- **Outputs:** preview and digest; on approval `phase.declared` with the next number and `phase.reordered`.
-- **Refusals:** `malformed-submission`, `story-double-assigned`, `dependency-cycle`, `no-such-story`, `no-such-phase` (a dependency that does not exist) (PRJ-R3, PRJ-R4, PRJ-R11, PRJ-R18).
+- **Inputs:** the declaration shape, in this order: `name`, `goal` and `detail`, each text; `depends_on`, the numbers of the phases it depends on; `stories`, the ids of the active stories it serves; and an optional `position`, its 1-based place in the phase order, last when left out. Over MCP the operation is `phase-declare`; it has no owner command.
+- **Outputs:** the receipt with the digest. On approval `phase.declared`, numbered one past the highest phase number ever declared, withdrawn phases included, with its detail stored as a `record` payload; then `phase.reordered` with the new phase at its position, or last; then `scope.approved`. Each story it lists is committed to it.
+- **Refusals:** in this order.
+
+  | Code | When | Requirement |
+  |---|---|---|
+  | `malformed-submission` | The shape: a member missing, blank, of the wrong type or unknown, a repeated entry in `depends_on` or `stories`, or a `position` of 0 | PRJ-R3 |
+  | `project-not-started` | The project's start is not approved | PRJ-R19 |
+  | `no-such-phase` | A dependency names no declared phase, or a withdrawn one (names it) | PRJ-R18 |
+  | `no-such-story` | A story id no story has (names it) | PRJ-R18 |
+  | `malformed-submission` | A listed story is not `active`; the field is its entry, such as `stories[0]` | PRJ-R4 |
+  | `story-double-assigned` | Another declared phase serves a listed story (names the story and that phase) | PRJ-R4 |
+  | `malformed-submission` | `position` is past one after the last phase in the order | PRJ-R10 |
+  | `dependency-order` | Its position places it before a phase it depends on (names it and that phase) | PRJ-R11 |
 
 ### phase edit
 
-- **Inputs:** a phase number and the fields that change (name, goal, detail, dependencies, stories served).
-- **Outputs:** preview and digest; on approval a new `phase.declared` for the same number, keeping the earlier one.
-- **Refusals:** as `phase declare`, plus `no-such-phase`, plus `phase-complete` when the stories served would change on a complete phase (PRJ-R13).
+- **Inputs:** `phase`, the phase's number, and only the fields that change, at least one: `name`, `goal` or `detail` as text, `depends_on` as phase numbers, `stories` as story ids. Over MCP the operation is `phase-edit`; it has no owner command. Build 4 T9's `phase plan` records and approves an edit through the same library functions, with plain values.
+- **Outputs:** the receipt with the digest. On approval a whole new `phase.declared` for the same number: each field the edit gives, and each it leaves out taken from the phase as accepted scope holds it at approval, its stories being those it serves then and its detail the detail in force, stored again as a `record` payload. Then `scope.approved`. The earlier declaration stays in the record. A story the edit adds is committed to the phase, and one it leaves out returns to the backlog and keeps its status.
+- **Refusals:** in this order.
+
+  | Code | When | Requirement |
+  |---|---|---|
+  | `malformed-submission` | The shape, as `phase declare`, or no field to change, which names `submission` | PRJ-R3 |
+  | `project-not-started` | The project's start is not approved | PRJ-R19 |
+  | `no-such-phase` | No declared phase has the number, or it is withdrawn | PRJ-R18 |
+  | `phase-complete` | The phase is complete and the stories it serves would change (names it) | PRJ-R13 |
+  | `no-such-phase` | A dependency names no declared phase, or a withdrawn one (names it) | PRJ-R18 |
+  | `no-such-story` | A story id no story has (names it) | PRJ-R18 |
+  | `malformed-submission` | A listed story is not `active`, such as `stories[0]` | PRJ-R4 |
+  | `story-double-assigned` | Another declared phase serves a listed story (names the story and that phase) | PRJ-R4 |
+  | `dependency-cycle` | The new dependencies put phases on a cycle, a phase depending on itself included (names every phase on it, ascending) | PRJ-R11 |
+  | `dependency-order` | Its dependencies include a phase later than it in the order (names it and that phase) | PRJ-R11 |
 
 ### phase reorder
 
-- **Inputs:** the full order of phase numbers.
-- **Outputs:** preview and digest; on approval `phase.reordered`.
-- **Refusals:** `no-such-phase`, `order-incomplete` (a phase missing or repeated), `dependency-order` (a phase placed before one it depends on) (PRJ-R10, PRJ-R11, PRJ-R18).
+- **Inputs:** `order`, the number of every declared phase, each once, in the new order. Over MCP the operation is `phase-reorder`; the owner's command is `baley phase reorder <NUMBER>...`.
+- **Outputs:** the receipt with the digest. On approval `phase.reordered` with the order, then `scope.approved`.
+- **Refusals:** in this order.
+
+  | Code | When | Requirement |
+  |---|---|---|
+  | `malformed-submission` | The shape: `order` missing, empty, or holding an entry that is not a phase number | PRJ-R3 |
+  | `project-not-started` | The project's start is not approved | PRJ-R19 |
+  | `no-such-phase` | An entry names no declared phase, or a withdrawn one (names it) | PRJ-R18 |
+  | `order-incomplete` | A declared phase is missing or repeated. The details list, ascending, the numbers the order must hold | PRJ-R10 |
+  | `dependency-order` | A phase is placed before one it depends on (names it and that phase) | PRJ-R11 |
 
 ### phase withdraw
 
-- **Inputs:** a phase number; for each active story it serves, the phase it moves to or `drop`.
-- **Outputs:** preview (the roadmap without the phase, the stories' new phases or dropped status) and digest; on approval `phase.withdrawn`, one `story.reassigned` or `story.dropped` per story, `phase.reordered`.
-- **Refusals:**
+- **Inputs:** `phase`, the phase's number, and `decisions`, one for each story it serves, each with the story's id in `story` and, in `to`, the number of the phase that serves it instead or `drop`. No story is decided twice. Over MCP the operation is `phase-withdraw`; the owner's command is `baley phase withdraw <NUMBER> [<STORY>=<PHASE>|<STORY>=drop]...`.
+- **Outputs:** the receipt with the digest; the preview shows the phase and each decision. On approval `phase.withdrawn`; then, for each story the phase serves, in its order, `story.reassigned` to its new phase, which makes it `active`, or `story.dropped`; then `phase.reordered` with the order without the phase; then `scope.approved`. The phase keeps every record and its `phase` and `roadmap` entries, with status `withdrawn`, outside the order. Its number is never reused, and a capture, a change or a dependency that names it is refused `no-such-phase`.
+- **Refusals:** in this order, completion before execution, since a complete phase is never withdrawn whatever its execution.
 
   | Code | When | Requirement |
   |---|---|---|
-  | `no-such-phase` | The phase does not exist | PRJ-R18 |
+  | `malformed-submission` | The shape: a member missing, of the wrong type or unknown, a story decided twice, or a `to` that is neither a phase number nor `drop` | PRJ-R3 |
+  | `project-not-started` | The project's start is not approved | PRJ-R19 |
+  | `no-such-phase` | No declared phase has the number, or it is already withdrawn | PRJ-R18 |
+  | `phase-complete` | The phase is complete (names it) | PRJ-R13 |
   | `execution-present` | Execution has started and is not undone (names the phase and the undo) | PRJ-R13 |
-  | `phase-complete` | The phase is complete | PRJ-R13 |
-  | `phase-complete` | A story is moved to a complete phase (names that phase) | PRJ-R13 |
-  | `story-undecided` | An active story it serves has no decision (names it) | PRJ-R12 |
-  | `no-such-phase` | A story is moved to a phase that does not exist | PRJ-R18 |
+  | `phase-complete` | A decision moves a story to a complete phase (names that phase) | PRJ-R13 |
+  | `phase-has-dependents` | Another declared phase depends on this one (names every such phase, ascending). The owner edits their dependencies first | PRJ-R11 |
+  | `story-undecided` | A story it serves has no decision (names it) | PRJ-R12 |
+  | `no-such-story` | A decision names a story the phase does not serve (names it) | PRJ-R18 |
+  | `no-such-phase` | A decision moves a story to a phase that is not declared, is withdrawn, or is the phase being withdrawn (names it) | PRJ-R18 |
 
 ### story declare, story edit, story reassign, story drop
 
-- **Inputs:** `declare`: sentence, status, phase served. `edit`: id, new sentence. `reassign`: id, new phase. `drop`: id.
-- **Outputs:** preview and digest; on approval `story.declared`, `story.corrected`, `story.reassigned` or `story.dropped`.
-- **Refusals:**
+- **Inputs:** `story declare`: exactly `sentence`, text; `status`, `active`, `deferred` or `excluded`; and `phase`, the number of the phase that serves it, or null for the backlog, a phase only for an `active` story. A capture id or any other member is unknown. `story edit`: `story`, its id, and `sentence`, the corrected text. `story reassign`: `story`, its id, and `phase`, the number of the phase that serves it now, or null for the backlog. `story drop`: `story`, its id. Over MCP the operations are `story-declare`, `story-edit`, `story-reassign` and `story-drop`; the owner's commands are `baley story reassign <ID> <PHASE>|backlog` and `baley story drop <ID>`.
+- **Outputs:** the receipt with the digest. On approval, then `scope.approved`: `story.declared` with the id one past the highest ever declared, last in priority order; `story.corrected` with the new wording and the status it holds; `story.reassigned`, which makes a story given a phase `active` and leaves one sent to the backlog with its status; or `story.dropped`, which takes the story off any phase and gives it status `dropped`. Every earlier event stays in the record.
+- **Refusals:** for each kind, the shape's `malformed-submission`, then `project-not-started`, then the rows that name the kind, in this order.
 
   | Code | When | Requirement |
   |---|---|---|
-  | `no-such-story` | The id does not exist | PRJ-R18 |
-  | `no-such-phase` | The phase does not exist | PRJ-R18 |
-  | `story-not-served` | `edit` on a dropped or excluded story | PRJ-R17 |
-  | `story-shipped` | `reassign` or `drop` on a story a complete phase served | PRJ-R13 |
-  | `phase-complete` | `declare` or `reassign` into a complete phase (names it) | PRJ-R13 |
-  | `malformed-submission` | Blank sentence or unknown status | PRJ-R3 |
+  | `malformed-submission` | A member missing, blank, of the wrong type or unknown; a `status` that is not `active`, `deferred` or `excluded`; or a `declare` giving a phase to a story that is not `active`, which names `phase` | PRJ-R3 |
+  | `project-not-started` | The project's start is not approved | PRJ-R19 |
+  | `no-such-phase` | `declare` into a phase that is not declared, or is withdrawn (names it) | PRJ-R18 |
+  | `phase-complete` | `declare` into a complete phase (names it) | PRJ-R13 |
+  | `no-such-story` | `edit`, `reassign` or `drop` of an id no story has (names it) | PRJ-R18 |
+  | `story-not-served` | `edit`, `reassign` or `drop` of a dropped or excluded story, both final (names the story and its status) | PRJ-R17 |
+  | `story-shipped` | `reassign` or `drop` of a story a complete phase serves (names the story and the phase) | PRJ-R13 |
+  | `phase-complete` | `reassign` into a complete phase (names it) | PRJ-R13 |
+  | `no-such-phase` | `reassign` to a phase that is not declared, or is withdrawn (names it) | PRJ-R18 |
 
 ### backlog reorder
 
-- **Inputs:** the full priority order of active and deferred story ids.
-- **Outputs:** preview and digest; on approval `story.reprioritized`.
-- **Refusals:** `no-such-story`, `order-incomplete` (an id missing or repeated) (PRJ-R4, PRJ-R18).
+- **Inputs:** `order`, the id of every active and deferred story, each once, in the new priority order. Over MCP the operation is `backlog-reorder`; the owner's command is `baley backlog reorder <ID>...`.
+- **Outputs:** the receipt with the digest. On approval `story.reprioritized` with the order, then `scope.approved`. Dropped and excluded stories stay in the backlog, outside the order, after the ordered stories in their current relative order.
+- **Refusals:** in this order.
+
+  | Code | When | Requirement |
+  |---|---|---|
+  | `malformed-submission` | The shape: `order` missing, empty, or holding an entry that is not a story id | PRJ-R3 |
+  | `project-not-started` | The project's start is not approved | PRJ-R19 |
+  | `no-such-story` | An entry names no story (names it) | PRJ-R18 |
+  | `order-incomplete` | An active or deferred story is missing or repeated, or a dropped or excluded story is listed. The details list, ascending, the ids the order must hold | PRJ-R4 |
 
 ### Revising a story's truths
 
