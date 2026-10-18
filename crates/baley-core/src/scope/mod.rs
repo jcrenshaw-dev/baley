@@ -47,8 +47,8 @@ pub use phase::{
 pub use roadmap::{ROADMAP_VIEW, RoadmapProjector, roadmap_key, roadmap_spec};
 pub use rules::{
     AcceptedScope, DEPENDENCY_ORDER, EXECUTION_PRESENT, NO_SUCH_STORY, ORDER_INCOMPLETE,
-    PHASE_COMPLETE, PROJECT_NOT_STARTED, PhaseProgress, STORY_SHIPPED, ScopeRefusal,
-    judge_progress, judge_scope_change,
+    PHASE_COMPLETE, PHASE_HAS_DEPENDENTS, PROJECT_NOT_STARTED, PhaseProgress, STORY_SHIPPED,
+    STORY_UNDECIDED, ScopeRefusal, judge_progress, judge_scope_change,
 };
 pub use submission::{
     DEPENDENCY_CYCLE, Description, MALFORMED_SUBMISSION, PROJECT_ALREADY_STARTED, Phase,

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
-use super::change::{ChangeSubmission, PhaseDeclaration, ScopeChange};
+use super::change::{ChangeSubmission, Decision, Destination, PhaseDeclaration, ScopeChange};
 use super::submission::{DEPENDENCY_CYCLE, MALFORMED_SUBMISSION, STORY_DOUBLE_ASSIGNED};
 use crate::capture::NO_SUCH_PHASE;
 
@@ -33,6 +33,12 @@ pub const NO_SUCH_STORY: &str = "no-such-story";
 /// The refusal code for a change submitted or approved before the
 /// project's start is approved.
 pub const PROJECT_NOT_STARTED: &str = "project-not-started";
+/// The refusal code for a withdrawal that leaves a story of the phase
+/// without a decision.
+pub const STORY_UNDECIDED: &str = "story-undecided";
+/// The refusal code for withdrawing a phase other declared phases depend
+/// on.
+pub const PHASE_HAS_DEPENDENTS: &str = "phase-has-dependents";
 
 /// What has happened in one phase, as PRJ-R13 judges a change to it. A
 /// phase with no entry has neither execution nor completion.
@@ -200,6 +206,11 @@ pub enum ScopeRefusal {
     DependencyOrder { phase: u32, depends_on: u32 },
     /// The order does not hold each of `order` exactly once.
     OrderIncomplete { order: Vec<u32> },
+    /// The withdrawn phase serves this story and the withdrawal gives it
+    /// no decision.
+    StoryUndecided { story: u32 },
+    /// These declared phases, ascending, depend on the withdrawn one.
+    PhaseHasDependents { phases: Vec<u32> },
     /// The phase has execution present, which `undo` must undo first.
     ExecutionPresent { phase: u32, undo: String },
     /// The phase is complete.
@@ -220,6 +231,8 @@ impl ScopeRefusal {
             Self::DependencyCycle { .. } => DEPENDENCY_CYCLE,
             Self::DependencyOrder { .. } => DEPENDENCY_ORDER,
             Self::OrderIncomplete { .. } => ORDER_INCOMPLETE,
+            Self::StoryUndecided { .. } => STORY_UNDECIDED,
+            Self::PhaseHasDependents { .. } => PHASE_HAS_DEPENDENTS,
             Self::ExecutionPresent { .. } => EXECUTION_PRESENT,
             Self::PhaseComplete { .. } => PHASE_COMPLETE,
             Self::StoryShipped { .. } => STORY_SHIPPED,
@@ -233,12 +246,16 @@ impl ScopeRefusal {
             Self::NoSuchPhase { phase } | Self::PhaseComplete { phase } => {
                 json!({"phase": phase})
             }
-            Self::NoSuchStory { story } => json!({"story": story}),
+            Self::NoSuchStory { story } | Self::StoryUndecided { story } => {
+                json!({"story": story})
+            }
             Self::Malformed { section, field } => json!({"section": section, "field": field}),
             Self::StoryDoubleAssigned { story, phase } | Self::StoryShipped { story, phase } => {
                 json!({"story": story, "phase": phase})
             }
-            Self::DependencyCycle { phases } => json!({"phases": phases}),
+            Self::DependencyCycle { phases } | Self::PhaseHasDependents { phases } => {
+                json!({"phases": phases})
+            }
             Self::DependencyOrder { phase, depends_on } => {
                 json!({"phase": phase, "depends_on": depends_on})
             }
@@ -289,6 +306,14 @@ pub fn judge_scope_change(
             Ok(())
         }
         ScopeChange::PhaseReorder { order } => judge_reorder(order, scope),
+        ScopeChange::PhaseWithdraw { phase, decisions } => {
+            let phase = *phase;
+            let Some(held) = scope.declared(phase) else {
+                return Err(ScopeRefusal::NoSuchPhase { phase });
+            };
+            judge_progress(change, scope, progress)?;
+            judge_withdrawal(held, decisions, scope)
+        }
         _ => Ok(()),
     }
 }
@@ -362,6 +387,50 @@ fn judge_members(
                 phase: other.number,
             });
         }
+    }
+    Ok(())
+}
+
+/// A withdrawal of `withdrawn`: no declared phase depends on it, so the
+/// owner edits those dependencies first (D-04); every story it serves has a
+/// decision (PRJ-R12); each decision is for one of those stories; and a
+/// story moved goes to another declared phase (D-07).
+fn judge_withdrawal(
+    withdrawn: &HeldPhase,
+    decisions: &[Decision],
+    scope: &AcceptedScope,
+) -> Result<(), ScopeRefusal> {
+    let phase = withdrawn.number;
+    let dependents: BTreeSet<u32> = scope
+        .declared_phases()
+        .filter(|held| held.number != phase && held.depends_on.contains(&phase))
+        .map(|held| held.number)
+        .collect();
+    if !dependents.is_empty() {
+        return Err(ScopeRefusal::PhaseHasDependents {
+            phases: dependents.into_iter().collect(),
+        });
+    }
+    if let Some(&story) = withdrawn
+        .stories
+        .iter()
+        .find(|story| !decisions.iter().any(|decision| decision.story == **story))
+    {
+        return Err(ScopeRefusal::StoryUndecided { story });
+    }
+    if let Some(decision) = decisions
+        .iter()
+        .find(|decision| !withdrawn.stories.contains(&decision.story))
+    {
+        return Err(ScopeRefusal::NoSuchStory {
+            story: decision.story,
+        });
+    }
+    if let Some(to) = decisions.iter().find_map(|decision| match decision.to {
+        Destination::Phase(to) if to == phase || scope.declared(to).is_none() => Some(to),
+        _ => None,
+    }) {
+        return Err(ScopeRefusal::NoSuchPhase { phase: to });
     }
     Ok(())
 }
@@ -855,5 +924,75 @@ mod tests {
             );
         }
         assert_eq!(judged(&d1(), &a0()), Ok(()));
+    }
+
+    fn withdraw(value: Value) -> ChangeSubmission {
+        change(ChangeKind::PhaseWithdraw, value)
+    }
+
+    #[test]
+    fn a_withdrawal_leaving_a_story_undecided_or_dependents_behind_accepted_is_caught() {
+        assert_eq!(
+            judged(
+                &withdraw(json!({"phase": 1, "decisions": [{"story": 1, "to": "drop"}]})),
+                &a0()
+            ),
+            Err(("phase-has-dependents", json!({"phases": [2]})))
+        );
+        assert_eq!(
+            judged(&withdraw(json!({"phase": 2, "decisions": []})), &a0()),
+            Err(("story-undecided", json!({"story": 2})))
+        );
+        for decided in [json!(1), json!("drop")] {
+            assert_eq!(
+                judged(
+                    &withdraw(json!({"phase": 2, "decisions": [{"story": 2, "to": decided}]})),
+                    &a0()
+                ),
+                Ok(()),
+                "{decided}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_withdrawal_moving_a_story_nowhere_or_deciding_another_phases_story_accepted_is_caught() {
+        for (value, expected) in [
+            (
+                json!({"phase": 2, "decisions": [{"story": 2, "to": 2}]}),
+                ("no-such-phase", json!({"phase": 2})),
+            ),
+            (
+                json!({"phase": 2, "decisions": [{"story": 2, "to": 9}]}),
+                ("no-such-phase", json!({"phase": 9})),
+            ),
+            (
+                json!({"phase": 2,
+                    "decisions": [{"story": 2, "to": 1}, {"story": 1, "to": "drop"}]}),
+                ("no-such-story", json!({"story": 1})),
+            ),
+            (
+                json!({"phase": 9, "decisions": []}),
+                ("no-such-phase", json!({"phase": 9})),
+            ),
+        ] {
+            assert_eq!(
+                judged(&withdraw(value.clone()), &a0()),
+                Err(expected),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_withdrawal_judged_before_its_facts_is_caught() {
+        assert_eq!(
+            judged_over(
+                &withdraw(json!({"phase": 2, "decisions": []})),
+                &a0(),
+                &f1()
+            ),
+            Err(("phase-complete", json!({"phase": 2})))
+        );
     }
 }
