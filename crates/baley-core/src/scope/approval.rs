@@ -762,6 +762,14 @@ mod tests {
                 Some(json!({"owner": "Ada Owner", "at": "2026-10-13T09:00:07Z"}))
             ))
         );
+        // Being the newest draft does not make an approved draft approvable again.
+        assert_eq!(
+            answer(facts(Some(&e_a), true, Some(approved), Some(&e_a))),
+            Err((
+                "draft-approved",
+                Some(json!({"owner": "Ada Owner", "at": "2026-10-13T09:00:07Z"}))
+            ))
+        );
         assert_eq!(
             answer(facts(Some(&e_a), true, None, Some(&e_a2))),
             Err(("stale-draft", Some(json!({"path": "goal"}))))
