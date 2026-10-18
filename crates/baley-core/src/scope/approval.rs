@@ -750,6 +750,11 @@ mod tests {
             answer(facts(Some(&e_a), false, None, Some(&e_a2))),
             Err(("unknown-draft", None))
         );
+        // A missing newest draft is judged before a prior approval.
+        assert_eq!(
+            answer(facts(Some(&e_a), true, Some(approved), None)),
+            Err(("unknown-draft", None))
+        );
         assert_eq!(
             answer(facts(Some(&e_a), true, Some(approved), Some(&e_a2))),
             Err((
