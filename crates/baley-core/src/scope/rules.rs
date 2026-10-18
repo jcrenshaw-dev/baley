@@ -1249,4 +1249,16 @@ pub(super) mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_story_declared_into_a_complete_phase_accepted_is_caught() {
+        let declare_1 = change(
+            ChangeKind::StoryDeclare,
+            json!({"sentence": "s", "status": "active", "phase": 1}),
+        );
+        assert_eq!(
+            judged_over(&declare_1, &a0(), &f2()),
+            Err(("phase-complete", json!({"phase": 1})))
+        );
+    }
 }
