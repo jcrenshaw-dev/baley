@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value, json};
 
 use super::change::{ChangeSubmission, Decision, Destination, PhaseDeclaration, ScopeChange};
-use super::submission::{DEPENDENCY_CYCLE, MALFORMED_SUBMISSION, STORY_DOUBLE_ASSIGNED};
+use super::submission::{
+    DEPENDENCY_CYCLE, MALFORMED_SUBMISSION, STORY_DOUBLE_ASSIGNED, StoryStatus,
+};
 use crate::capture::NO_SUCH_PHASE;
 
 /// The refusal code for withdrawing a phase whose execution must be undone
@@ -75,6 +77,16 @@ impl HeldStatus {
         }
     }
 
+    /// The status as a submission states it, or `None` for `dropped`.
+    pub(super) fn stated(self) -> Option<StoryStatus> {
+        match self {
+            Self::Active => Some(StoryStatus::Active),
+            Self::Deferred => Some(StoryStatus::Deferred),
+            Self::Excluded => Some(StoryStatus::Excluded),
+            Self::Dropped => None,
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
@@ -106,13 +118,15 @@ pub(super) struct HeldStory {
 
 /// Accepted scope as the `roadmap` document holds it: every phase ever
 /// declared, withdrawn ones included, the phase order, the stories in
-/// priority order, and the highest phase number ever declared.
+/// priority order, and the highest phase number and story id ever
+/// declared.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AcceptedScope {
     pub(super) phases: Vec<HeldPhase>,
     pub(super) order: Vec<u32>,
     pub(super) stories: Vec<HeldStory>,
     pub(super) highest_phase: u32,
+    pub(super) highest_story: u32,
 }
 
 impl AcceptedScope {
@@ -161,6 +175,7 @@ impl AcceptedScope {
             order: wholes(document.get("order"))?,
             stories,
             highest_phase: whole(document.get("highest_phase"))?,
+            highest_story: whole(document.get("highest_story"))?,
         })
     }
 

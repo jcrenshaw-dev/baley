@@ -12,10 +12,14 @@ use super::approval::{NumbersExhausted, event, next_numbers};
 use super::change::{ChangeSubmission, Destination, ScopeChange};
 use super::event::{
     PHASE_DECLARED, PHASE_DECLARED_VERSION, PHASE_REORDERED, PHASE_REORDERED_VERSION,
-    PHASE_WITHDRAWN, PHASE_WITHDRAWN_VERSION, PROJECT_STREAM, ROADMAP_STREAM, SCOPE_APPROVED,
-    SCOPE_APPROVED_VERSION, STORY_DROPPED, STORY_DROPPED_VERSION, STORY_REASSIGNED,
-    STORY_REASSIGNED_VERSION, approved_payload, phase_declared_payload, phase_reordered_payload,
-    phase_withdrawn_payload, story_dropped_payload, story_reassigned_payload,
+    PHASE_WITHDRAWN, PHASE_WITHDRAWN_VERSION, PROJECT_DESCRIBED, PROJECT_DESCRIBED_VERSION,
+    PROJECT_STREAM, ROADMAP_STREAM, SCOPE_APPROVED, SCOPE_APPROVED_VERSION, STORY_CORRECTED,
+    STORY_CORRECTED_VERSION, STORY_DECLARED, STORY_DECLARED_VERSION, STORY_DROPPED,
+    STORY_DROPPED_VERSION, STORY_REASSIGNED, STORY_REASSIGNED_VERSION, STORY_REPRIORITIZED,
+    STORY_REPRIORITIZED_VERSION, approved_payload, described_payload, phase_declared_payload,
+    phase_reordered_payload, phase_withdrawn_payload, story_corrected_payload,
+    story_declared_payload, story_dropped_payload, story_reassigned_payload,
+    story_reprioritized_payload,
 };
 use super::rules::AcceptedScope;
 use super::submission::StoryStatus;
@@ -33,14 +37,18 @@ use super::submission::StoryStatus;
 /// detail or the one in force. A withdrawal records `phase.withdrawn`, then
 /// each of the phase's stories moved or dropped in its stories' order, then
 /// the order without it.
+/// A story declaration takes the id one past the highest ever declared and
+/// goes last in priority order; a story given a phase becomes active, and
+/// one sent to the backlog or corrected keeps its status.
 ///
 /// When a number would pass `u32::MAX` it is [`NumbersExhausted`] and no
 /// events are given.
 ///
 /// # Panics
 ///
-/// When a declaration or an edit has no `detail`, or an edit names a phase
-/// `scope` does not hold. The scope judgement refuses such an edit first.
+/// When a declaration or an edit has no `detail`, an edit names a phase
+/// `scope` does not hold, or a story change names a story it does not hold
+/// or one dropped. The scope judgement refuses such a change first.
 pub fn change_events(
     change: &ChangeSubmission,
     scope: &AcceptedScope,
@@ -156,13 +164,65 @@ pub fn change_events(
                 Vec::new(),
             ));
         }
-        ScopeChange::ProjectDescribe(_)
-        | ScopeChange::StoryDeclare { .. }
-        | ScopeChange::StoryEdit { .. }
-        | ScopeChange::StoryReassign { .. }
-        | ScopeChange::StoryDrop { .. }
-        | ScopeChange::BacklogReorder { .. } => {
-            todo!("the story, backlog and description events")
+        ScopeChange::StoryDeclare {
+            sentence,
+            status,
+            phase,
+        } => {
+            let id = next_numbers(scope.highest_story, 1)?[0];
+            events.push(roadmap(
+                STORY_DECLARED,
+                STORY_DECLARED_VERSION,
+                story_declared_payload(id, sentence, *status, *phase, digest),
+                Vec::new(),
+            ));
+        }
+        ScopeChange::StoryEdit { story, sentence } => {
+            events.push(roadmap(
+                STORY_CORRECTED,
+                STORY_CORRECTED_VERSION,
+                story_corrected_payload(*story, sentence, held_status(scope, *story), digest),
+                Vec::new(),
+            ));
+        }
+        ScopeChange::StoryReassign { story, phase } => {
+            // A story given a phase is promised, so a deferred one becomes
+            // active (Figure 2); one sent to the backlog keeps its status.
+            let status = match phase {
+                Some(_) => StoryStatus::Active,
+                None => held_status(scope, *story),
+            };
+            events.push(roadmap(
+                STORY_REASSIGNED,
+                STORY_REASSIGNED_VERSION,
+                story_reassigned_payload(*story, status, *phase, digest),
+                Vec::new(),
+            ));
+        }
+        ScopeChange::StoryDrop { story } => {
+            events.push(roadmap(
+                STORY_DROPPED,
+                STORY_DROPPED_VERSION,
+                story_dropped_payload(*story, digest),
+                Vec::new(),
+            ));
+        }
+        ScopeChange::BacklogReorder { order } => {
+            events.push(roadmap(
+                STORY_REPRIORITIZED,
+                STORY_REPRIORITIZED_VERSION,
+                story_reprioritized_payload(order, digest),
+                Vec::new(),
+            ));
+        }
+        ScopeChange::ProjectDescribe(description) => {
+            events.push(event(
+                PROJECT_STREAM,
+                PROJECT_DESCRIBED,
+                PROJECT_DESCRIBED_VERSION,
+                described_payload(description, digest),
+                Vec::new(),
+            ));
         }
     }
     events.push(event(
@@ -175,6 +235,19 @@ pub fn change_events(
     Ok(events)
 }
 
+/// Story `id`'s status in accepted scope.
+///
+/// # Panics
+///
+/// When the scope holds no such story or it is dropped. The scope judgement
+/// refuses a change to either first.
+fn held_status(scope: &AcceptedScope, id: u32) -> StoryStatus {
+    scope
+        .story(id)
+        .and_then(|story| story.status.stated())
+        .expect("an approved story change names a story still served")
+}
+
 #[cfg(test)]
 mod tests {
     //! Expected payloads are written out from design 0004 section 6's field
@@ -184,7 +257,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::scope::rules::tests::{a0, a1, change, p, scope, with};
+    use crate::scope::rules::tests::{a0, a1, change, d1, p, scope, with};
     use crate::scope::{ChangeKind, ChangeSubmission};
 
     const AT: &str = "2026-10-13T09:00:05Z";
@@ -359,5 +432,122 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn a_declared_story_given_a_reused_id_or_wrapped_is_caught() {
+        let declare = change(
+            ChangeKind::StoryDeclare,
+            json!({"sentence": "Owners read progress", "status": "active", "phase": 1}),
+        );
+        let digest = declare.digest().to_hex();
+        assert_eq!(
+            placed(&events_of(&declare, &a0(), None)),
+            [
+                (
+                    "story.declared",
+                    "roadmap",
+                    &json!({"id": 4, "sentence": "Owners read progress", "status": "active",
+                        "phase": 1, "submission": digest})
+                ),
+                (
+                    "scope.approved",
+                    "project",
+                    &approved(&digest, "story-declare")
+                ),
+            ]
+        );
+        let full = scope(&with(a0(), &[("/highest_story", json!(4_294_967_295_u64))]));
+        assert_eq!(
+            change_events(&declare, &full, None, "Ada Owner", AT),
+            Err(NumbersExhausted)
+        );
+    }
+
+    #[test]
+    fn a_reassigned_deferred_story_left_deferred_is_caught() {
+        for (value, expected) in [
+            (
+                json!({"story": 3, "phase": 2}),
+                json!({"id": 3, "status": "active", "phase": 2}),
+            ),
+            (
+                json!({"story": 1, "phase": null}),
+                json!({"id": 1, "status": "active", "phase": null}),
+            ),
+            (
+                json!({"story": 3, "phase": null}),
+                json!({"id": 3, "status": "deferred", "phase": null}),
+            ),
+        ] {
+            let reassign = change(ChangeKind::StoryReassign, value.clone());
+            let mut expected = expected;
+            expected["submission"] = json!(reassign.digest().to_hex());
+            let events = events_of(&reassign, &a0(), None);
+            assert_eq!(events[0].type_name, "story.reassigned", "{value}");
+            assert_eq!(events[0].payload, expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn a_story_change_event_missing_its_status_order_or_description_is_caught() {
+        const D1: &str = "db6830acb9a086805f20c56b6dbec837c2fa59938cfabcec77d3ed5336ec1213";
+        for (change, kind, first) in [
+            (
+                change(
+                    ChangeKind::StoryEdit,
+                    json!({"story": 3, "sentence": "Teammates read the backlog"}),
+                ),
+                "story-edit",
+                (
+                    "story.corrected",
+                    "roadmap",
+                    json!({"id": 3, "sentence": "Teammates read the backlog",
+                        "status": "deferred"}),
+                ),
+            ),
+            (
+                change(ChangeKind::StoryDrop, json!({"story": 1})),
+                "story-drop",
+                (
+                    "story.dropped",
+                    "roadmap",
+                    json!({"id": 1, "status": "dropped"}),
+                ),
+            ),
+            (
+                change(ChangeKind::BacklogReorder, json!({"order": [2, 1, 3]})),
+                "backlog-reorder",
+                (
+                    "story.reprioritized",
+                    "roadmap",
+                    json!({"order": [2, 1, 3]}),
+                ),
+            ),
+            (
+                d1(),
+                "project-describe",
+                (
+                    "project.described",
+                    "project",
+                    json!({"what": "A ledger for agent work",
+                        "core_value": "Nothing moves on an unproven claim",
+                        "constraints": ["One binary", "No server"]}),
+                ),
+            ),
+        ] {
+            let digest = change.digest().to_hex();
+            let (type_name, stream, mut payload) = first;
+            payload["submission"] = json!(digest);
+            assert_eq!(
+                placed(&events_of(&change, &a0(), None)),
+                [
+                    (type_name, stream, &payload),
+                    ("scope.approved", "project", &approved(&digest, kind)),
+                ],
+                "{kind}"
+            );
+        }
+        assert_eq!(d1().digest().to_hex(), D1);
     }
 }
