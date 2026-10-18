@@ -15,15 +15,16 @@ use std::collections::BTreeMap;
 use baley_core::scope::{
     AcceptedScope, ApprovalFacts, ApprovalRefusal, ChangeApprovalFacts, ChangeApprovalRefusal,
     ChangeKind, ChangeSubmission, DRAFT_NEWEST_INDEX, DRAFT_VIEW, NumbersExhausted, PHASE_DECLARED,
-    PHASE_WITHDRAWN, PROJECT_STREAM, PriorApproval, ROADMAP_VIEW, SCOPE_APPROVED, SCOPE_SUBMITTED,
-    START_KIND, START_TARGET, STORY_CORRECTED, STORY_DECLARED, STORY_DROPPED, STORY_REASSIGNED,
-    ScopeChange, Submission, change_events, draft_key, judge_approval, judge_change,
-    judge_change_approval, judge_scope_change, judge_submission, roadmap_key, start_events,
+    PHASE_DETAIL_VIEW, PHASE_WITHDRAWN, PROJECT_STREAM, PriorApproval, ROADMAP_VIEW,
+    SCOPE_APPROVED, SCOPE_SUBMITTED, START_KIND, START_TARGET, STORY_CORRECTED, STORY_DECLARED,
+    STORY_DROPPED, STORY_REASSIGNED, ScopeChange, Submission, change_events, draft_key,
+    judge_approval, judge_change, judge_change_approval, judge_scope_change, judge_submission,
+    roadmap_key, start_events,
 };
 use baley_store::{
-    Absence, Actor, Command, Decision, Document, EVENT_PAGE_BOUND, EventMatch, Hash, HistoryFilter,
-    IndexQuery, KeyValue, Ledger, Observed, OutcomeKind, PageRequest, Payloads, ProjectId,
-    Recorded, RetentionClass, StaleInput, StoreError, StreamName, Transaction, Views,
+    Absence, Actor, Command, Decision, DocKey, Document, EVENT_PAGE_BOUND, EventMatch, Hash,
+    HistoryFilter, IndexQuery, KeyValue, Ledger, Observed, OutcomeKind, PageRequest, Payloads,
+    ProjectId, Recorded, RetentionClass, StaleInput, StoreError, StreamName, Transaction, Views,
 };
 use serde_json::{Value, json};
 
@@ -75,7 +76,20 @@ struct ChangeDraft {
     /// Accepted scope as the change was judged against it.
     scope: ScopeRead,
     /// The detail in force a `phase-edit` that gives none keeps.
-    detail: Option<String>,
+    detail: Option<CarriedDetail>,
+}
+
+/// The detail in force a `phase-edit` keeps, with the `phase_detail`
+/// document it was read under, so the second step can confirm this project
+/// has not purged it since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CarriedDetail {
+    /// The detail text.
+    text: String,
+    /// The `phase_detail` document's key.
+    key: DocKey,
+    /// Its `produced_seq` when read.
+    seq: u64,
 }
 
 /// Every change kind, so a draft's recorded kind can be named back.
@@ -224,16 +238,22 @@ fn detail_in_force<S: Views + Payloads + ?Sized>(
     store: &S,
     project: &ProjectId,
     change: &ChangeSubmission,
-) -> Result<Option<String>, Value> {
+) -> Result<Option<CarriedDetail>, Value> {
     let ScopeChange::PhaseEdit { phase, fields } = &change.change else {
         return Ok(None);
     };
     if fields.detail.is_some() {
         return Ok(None);
     }
-    match read::phase(store, project, *phase) {
-        Ok(held) => match held.detail {
-            Detail::Text(text) => Ok(Some(text)),
+    // The document before the text, so a purge after this read moves it.
+    let document = match read::detail_document(store, project, *phase) {
+        Ok(document) => document,
+        Err(ReadError::Store(error)) => return Err(busy(error)),
+        Err(_) => None,
+    };
+    match (read::phase(store, project, *phase), document) {
+        (Ok(held), Some((key, seq))) => match held.detail {
+            Detail::Text(text) => Ok(Some(CarriedDetail { text, key, seq })),
             Detail::Purged(_) => Err(failed(
                 TEXT_PURGED,
                 format!(
@@ -242,8 +262,8 @@ fn detail_in_force<S: Views + Payloads + ?Sized>(
                 "detail",
             )),
         },
-        Err(ReadError::Store(error)) => Err(busy(error)),
-        Err(_) => Err(failed(
+        (Err(ReadError::Store(error)), _) => Err(busy(error)),
+        _ => Err(failed(
             LEDGER_UNAVAILABLE,
             format!("phase {phase} is recorded, but its detail cannot be read"),
             PLACE_LEDGER,
@@ -476,12 +496,16 @@ fn change_decision(
     }
     confirm_newest(tx, judged, change.kind().as_str(), change.target())?;
     read::confirm(tx, &draft.scope)?;
+    if let Some(carried) = &draft.detail {
+        confirm_detail(tx, carried)?;
+    }
     let text = match &change.change {
         ScopeChange::PhaseDeclare(declaration) => Some(declaration.detail.as_str()),
         // A carried detail is the detail in force, so it has that hash.
-        ScopeChange::PhaseEdit { fields, .. } => {
-            fields.detail.as_deref().or(draft.detail.as_deref())
-        }
+        ScopeChange::PhaseEdit { fields, .. } => fields
+            .detail
+            .as_deref()
+            .or(draft.detail.as_ref().map(|carried| carried.text.as_str())),
         _ => None,
     };
     let detail = match text {
@@ -526,6 +550,26 @@ fn change_decision(
         observed: Observed::default(),
         git: None,
     })
+}
+
+/// The `phase_detail` document a carried detail was read under has not
+/// moved and does not read purged. A purge changes only that document, so
+/// without this a detail purged between the steps would be stored again.
+fn confirm_detail(tx: &mut dyn Transaction, carried: &CarriedDetail) -> Result<(), StoreError> {
+    let now = tx.get(PHASE_DETAIL_VIEW, &carried.key)?;
+    let purged = now
+        .as_ref()
+        .is_some_and(|document| document.body.get("state").and_then(Value::as_str).is_some());
+    let now = now.map(|document| document.produced_seq);
+    if purged || now != Some(carried.seq) {
+        return Err(StoreError::Stale(StaleInput::Document {
+            view: PHASE_DETAIL_VIEW.into(),
+            key: carried.key.clone(),
+            seen: Some(carried.seq),
+            now,
+        }));
+    }
+    Ok(())
 }
 
 /// An approval of `digest` on the project stream.
@@ -1077,6 +1121,33 @@ mod tests {
         assert_eq!(answer["place"], "detail", "{answer}");
         assert_eq!(answer["retryable"], false, "{answer}");
         assert_eq!(head(&store), after);
+    }
+
+    #[test]
+    fn an_edit_carrying_a_detail_purged_between_its_steps_recorded_is_caught() {
+        use baley_core::scope::ChangeKind;
+
+        // The other project holds the same detail, so the purge releases
+        // only this project's references and the body stays stored.
+        let (_dir, store) = two_projects();
+        for held in [project(), project_b()] {
+            let digest = digest_of(&submit_in(&store, &held, &s1(), R1, 1, T1).unwrap());
+            approve_draft_in(&store, &held, digest);
+        }
+        let recorded = submit_change(&store, ChangeKind::PhaseEdit, &e_b(), R4, T4).unwrap();
+        let judged = judge(&store, &project(), digest_of(&recorded)).unwrap();
+        let detail =
+            Hash::from_hex("0eae12e355314abb5595d44ce4f4014a294d8d4cf709555975ef5f41648d7339")
+                .unwrap();
+        purge_in(&store, &project(), detail, "pasted a secret");
+        let after = head(&store);
+
+        let result = approve(&store, Some(&judged), R6, 6, T5);
+        assert!(matches!(result, Err(StoreError::Stale(_))), "{result:?}");
+        assert_eq!(head(&store), after);
+        assert_busy(&answer(result, &store));
+        let phase = read::phase(&store, &project(), 2).unwrap();
+        assert_eq!(phase.detail, Detail::Purged("pasted a secret".into()));
     }
 
     /// Records `value` as a change of `kind` under `submit_id` at

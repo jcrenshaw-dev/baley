@@ -451,6 +451,26 @@ pub fn phase<S: Views + Payloads + ?Sized>(
     })
 }
 
+/// The key and `produced_seq` of the `phase_detail` document phase
+/// `number`'s detail is read under, or none when the view holds no such
+/// phase or document. A purge of that detail moves the document, so a
+/// transaction carrying the detail confirms it against these.
+pub fn detail_document<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    number: u32,
+) -> Result<Option<(DocKey, u64)>, ReadError> {
+    let Some(document) = read::<PhaseDocument, _>(store, project, PHASE_VIEW, &phase_key(number))?
+    else {
+        return Ok(None);
+    };
+    let key = phase_detail_key(document.declared_seq);
+    Ok(store
+        .get(project, PHASE_DETAIL_VIEW, &key)
+        .map_err(ReadError::Store)?
+        .map(|held| (key, held.produced_seq)))
+}
+
 /// A detail body this project still holds, read as text.
 fn detail_text<P: Payloads + ?Sized>(payloads: &P, hash: &str) -> Result<String, ReadError> {
     let hash = Hash::from_hex(hash).ok_or_else(|| unreadable(PHASE_DETAIL_VIEW))?;
