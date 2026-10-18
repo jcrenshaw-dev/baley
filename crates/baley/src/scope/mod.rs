@@ -25,16 +25,17 @@ pub(crate) mod fixtures {
 
     use baley_core::scope::{ChangeKind, ChangeSubmission, judge_change};
     use baley_core::scope::{
-        PHASE_REORDERED, PHASE_REORDERED_VERSION, PHASE_WITHDRAWN, PHASE_WITHDRAWN_VERSION,
-        PROJECT_STREAM, ROADMAP_STREAM, SCOPE_APPROVED, SCOPE_APPROVED_VERSION, STORY_DROPPED,
-        STORY_DROPPED_VERSION, STORY_REASSIGNED, STORY_REASSIGNED_VERSION, StoryStatus,
-        approved_payload, judge_submission, phase_reordered_payload, phase_withdrawn_payload,
+        PHASE_DECLARED, PHASE_DECLARED_VERSION, PHASE_REORDERED, PHASE_REORDERED_VERSION,
+        PHASE_WITHDRAWN, PHASE_WITHDRAWN_VERSION, PROJECT_STREAM, ROADMAP_STREAM, SCOPE_APPROVED,
+        SCOPE_APPROVED_VERSION, STORY_DROPPED, STORY_DROPPED_VERSION, STORY_REASSIGNED,
+        STORY_REASSIGNED_VERSION, StoryStatus, approved_payload, judge_submission,
+        phase_declared_payload, phase_reordered_payload, phase_withdrawn_payload,
         story_dropped_payload, story_reassigned_payload,
     };
     use baley_store::{
         Actor, Admin, Answer, Command, CommandKind, Decision, Event, Hash, HistoryFilter, Ledger,
-        NewEvent, Observed, OutcomeKind, PageRequest, ProjectId, Recorded, RequestId, ServerCaller,
-        StoreError, StreamName,
+        NewEvent, Observed, OutcomeKind, PageRequest, PayloadRef, ProjectId, Recorded, RequestId,
+        ServerCaller, StoreError, StreamName,
     };
     use baley_store_sqlite::SqliteStore;
     use serde_json::{Value, json};
@@ -51,6 +52,7 @@ pub(crate) mod fixtures {
     pub const T6: &str = "2026-10-13T09:00:06Z";
     pub const T7: &str = "2026-10-13T09:00:07Z";
     pub const T8: &str = "2026-10-13T09:00:08Z";
+    pub const T9: &str = "2026-10-13T09:00:09Z";
     pub const ID: &str = "6f1c2a4e-8b1d-4c3a-9e2f-0a5b7c9d1e3f";
     /// A second project, for reads that must not see another project's purge.
     pub const ID_B: &str = "7a2d3b5f-9c0e-4f1a-8b2c-3d4e5f6a7b8c";
@@ -123,6 +125,17 @@ pub(crate) mod fixtures {
     /// E_B, an edit of phase 2's goal.
     pub fn e_b() -> Value {
         json!({"phase": 2, "goal": "The owner approves every change"})
+    }
+
+    /// W, phase 2 withdrawn with its story moved to phase 1.
+    pub fn w() -> Value {
+        json!({"phase": 2, "decisions": [{"story": 2, "to": 1}]})
+    }
+
+    /// P, a new phase depending on phase 1.
+    pub fn p() -> Value {
+        json!({"name": "Reports", "goal": "The owner reads progress",
+            "detail": "Progress from the ledger", "depends_on": [1], "stories": []})
     }
 
     /// D1, a revised description.
@@ -402,6 +415,27 @@ pub(crate) mod fixtures {
             PHASE_WITHDRAWN_VERSION,
             phase_withdrawn_payload(number, APPENDED),
         )
+    }
+
+    /// A `phase.declared` numbered `number` with `detail`, a body already
+    /// stored, serving no story.
+    pub fn phase_declared(number: u32, detail: PayloadRef) -> NewEvent {
+        NewEvent {
+            attachments: vec![detail.clone()],
+            ..roadmap_event(
+                PHASE_DECLARED,
+                PHASE_DECLARED_VERSION,
+                phase_declared_payload(
+                    number,
+                    "Late",
+                    "Numbered last",
+                    &detail,
+                    &[],
+                    &[],
+                    APPENDED,
+                ),
+            )
+        }
     }
 
     /// A `phase.reordered` giving `order`.

@@ -13,10 +13,11 @@
 use std::collections::BTreeMap;
 
 use baley_core::scope::{
-    ApprovalFacts, ApprovalRefusal, ChangeApprovalFacts, ChangeApprovalRefusal, ChangeKind,
-    ChangeSubmission, DRAFT_NEWEST_INDEX, DRAFT_VIEW, NumbersExhausted, PHASE_DECLARED,
-    PROJECT_STREAM, PriorApproval, ROADMAP_VIEW, SCOPE_APPROVED, SCOPE_SUBMITTED, START_KIND,
-    START_TARGET, STORY_DECLARED, ScopeChange, Submission, draft_key, judge_approval, judge_change,
+    AcceptedScope, ApprovalFacts, ApprovalRefusal, ChangeApprovalFacts, ChangeApprovalRefusal,
+    ChangeKind, ChangeSubmission, DRAFT_NEWEST_INDEX, DRAFT_VIEW, NumbersExhausted, PHASE_DECLARED,
+    PHASE_WITHDRAWN, PROJECT_STREAM, PriorApproval, ROADMAP_VIEW, SCOPE_APPROVED, SCOPE_SUBMITTED,
+    START_KIND, START_TARGET, STORY_CORRECTED, STORY_DECLARED, STORY_DROPPED, STORY_REASSIGNED,
+    ScopeChange, Submission, change_events, draft_key, judge_approval, judge_change,
     judge_change_approval, judge_scope_change, judge_submission, roadmap_key, start_events,
 };
 use baley_store::{
@@ -351,19 +352,25 @@ fn change_refused(refusal: &ChangeApprovalRefusal) -> Value {
 }
 
 /// The second step: records the approval judged by the first step under a
-/// copy of `command` whose actor is the owner, so the approval is the
-/// owner's whichever surface relayed it, with `owner` as the owner's name
-/// and the command's time as Baley's (D-18). The caller, request id, digest
+/// copy of `command` whose actor is the owner, with `owner` as the owner's
+/// name and the command's time as Baley's (D-18). The approval is the
+/// owner's, given at the terminal by `baley scope approve`, which builds its
+/// command as the owner's with no caller; the decision records under the
+/// owner whatever actor the command carries. The caller, request id, digest
 /// and policy version are the command's.
 ///
 /// Before it appends anything the decision confirms what the first step
-/// read: the draft at the sequence read, its `scope.submitted`, still no
-/// start approved, and the same newest start draft by digest and sequence.
-/// When any of them moved, a submission or another approval landed between
-/// the steps, and the decision returns `StoreError::Stale` with nothing
-/// recorded. A retry of a request the store holds is answered from its
-/// record before any decision runs, so it needs no reads; a decision asked
-/// to run without them records nothing.
+/// read: the draft at the sequence read and its `scope.submitted`, no
+/// approval of it since, and the same newest draft of its change by digest
+/// and sequence; for a change, also every scope document the first step
+/// judged it against. When any of them moved, a submission or another
+/// approval landed between the steps, and the decision returns
+/// `StoreError::Stale` with nothing recorded. A change's events are taken
+/// over the `roadmap` document read inside the transaction; numbering past
+/// the largest is `StoreError::Unavailable` with nothing recorded (D-14). A
+/// retry of a request the store holds is answered from its record before
+/// any decision runs, so it needs no reads; a decision asked to run without
+/// them records nothing.
 pub fn record<L: Ledger + ?Sized>(
     store: &L,
     command: &Command,
@@ -383,11 +390,7 @@ pub fn record<L: Ledger + ?Sized>(
         };
         let submission = match &judged.approving {
             Approving::Start(submission) => submission,
-            Approving::Change(_) => {
-                return Err(StoreError::Unavailable(
-                    "a change approval is not recorded yet".into(),
-                ));
-            }
+            Approving::Change(draft) => return change_decision(tx, judged, draft, owner, &at),
         };
         confirm(tx, judged)?;
         let (highest_phase, highest_story) = highest(tx.get(ROADMAP_VIEW, &roadmap_key())?)?;
@@ -440,10 +443,104 @@ pub fn record<L: Ledger + ?Sized>(
     })
 }
 
-/// Confirms inside the transaction what the first step read. A start
-/// approval is checked here rather than declared as an observed absence,
-/// because this approval appends one itself.
+/// Records an approved change inside the transaction, once what the first
+/// step read is confirmed.
+fn change_decision(
+    tx: &mut dyn Transaction,
+    judged: &Judged,
+    draft: &ChangeDraft,
+    owner: &str,
+    at: &str,
+) -> Result<Decision, StoreError> {
+    let change = &draft.change;
+    confirm_draft(tx, judged)?;
+    // A transaction cannot ask for an approval after a sequence, so one
+    // before the latest submission is left to the scope documents: every
+    // change approval appends a roadmap event, which moves them.
+    let approved = approval_of(judged.digest);
+    if !draft.approved_before && tx.event_exists(&approved)? {
+        return Err(StoreError::Stale(StaleInput::Absence(Absence::Event(
+            approved,
+        ))));
+    }
+    confirm_newest(tx, judged, change.kind().as_str(), change.target())?;
+    read::confirm(tx, &draft.scope)?;
+    let text = match &change.change {
+        ScopeChange::PhaseDeclare(declaration) => Some(declaration.detail.as_str()),
+        // A carried detail is the detail in force, so it has that hash.
+        ScopeChange::PhaseEdit { fields, .. } => {
+            fields.detail.as_deref().or(draft.detail.as_deref())
+        }
+        _ => None,
+    };
+    let detail = match text {
+        Some(text) => Some(tx.put_payload(text.as_bytes(), RetentionClass::Record)?),
+        None => None,
+    };
+    let roadmap = tx.get(ROADMAP_VIEW, &roadmap_key())?;
+    let scope = AcceptedScope::read(roadmap.as_ref().map(|document| &document.body))
+        .ok_or_else(|| StoreError::Unavailable("the roadmap document cannot be read".into()))?;
+    let events =
+        change_events(change, &scope, detail.as_ref(), owner, at).map_err(|NumbersExhausted| {
+            StoreError::Unavailable(
+                "the roadmap has no phase numbers or story ids left for this approval".into(),
+            )
+        })?;
+    let named = |types: &[&str], field: &str| -> Vec<Value> {
+        events
+            .iter()
+            .filter(|event| types.contains(&event.type_name.as_str()))
+            .map(|event| event.payload[field].clone())
+            .collect()
+    };
+    let receipt = json!({
+        "status": "ok",
+        "kind": change.kind().as_str(),
+        "digest": judged.digest.to_hex(),
+        "owner": owner,
+        "at": at,
+        "phases": named(&[PHASE_DECLARED, PHASE_WITHDRAWN], "number"),
+        "stories": named(
+            &[STORY_DECLARED, STORY_CORRECTED, STORY_REASSIGNED, STORY_DROPPED],
+            "id",
+        ),
+    });
+    for event in events {
+        tx.append(event)?;
+    }
+    Ok(Decision {
+        kind: OutcomeKind::Done,
+        answer: receipt,
+        sensitive: false,
+        observed: Observed::default(),
+        git: None,
+    })
+}
+
+/// An approval of `digest` on the project stream.
+fn approval_of(digest: Hash) -> EventMatch {
+    EventMatch {
+        type_name: SCOPE_APPROVED.into(),
+        stream: Some(StreamName(PROJECT_STREAM.into())),
+        fields: BTreeMap::from([("submission".to_string(), json!(digest.to_hex()))]),
+    }
+}
+
+/// Confirms inside the transaction what the first step read of a start. A
+/// start approval is checked here rather than declared as an observed
+/// absence, because this approval appends one itself.
 fn confirm(tx: &mut dyn Transaction, judged: &Judged) -> Result<(), StoreError> {
+    confirm_draft(tx, judged)?;
+    if tx.event_exists(&start_approval())? {
+        return Err(StoreError::Stale(StaleInput::Absence(Absence::Event(
+            start_approval(),
+        ))));
+    }
+    confirm_newest(tx, judged, START_KIND, START_TARGET)
+}
+
+/// The draft is at the sequence read and its `scope.submitted` is there.
+fn confirm_draft(tx: &mut dyn Transaction, judged: &Judged) -> Result<(), StoreError> {
     let key = draft_key(judged.digest);
     let now = tx.get(DRAFT_VIEW, &key)?.as_ref().and_then(sequence);
     let submitted = EventMatch {
@@ -459,15 +556,21 @@ fn confirm(tx: &mut dyn Transaction, judged: &Judged) -> Result<(), StoreError> 
             now,
         }));
     }
-    if tx.event_exists(&start_approval())? {
-        return Err(StoreError::Stale(StaleInput::Absence(Absence::Event(
-            start_approval(),
-        ))));
-    }
+    Ok(())
+}
+
+/// The newest draft of the change filed under `kind` and `target` is the
+/// one the first step read.
+fn confirm_newest(
+    tx: &mut dyn Transaction,
+    judged: &Judged,
+    kind: &str,
+    target: &str,
+) -> Result<(), StoreError> {
     // Compared by digest and sequence, never by time: two submissions can
     // share a time.
     let newest = tx
-        .find(DRAFT_VIEW, &newest_query(START_KIND, START_TARGET))?
+        .find(DRAFT_VIEW, &newest_query(kind, target))?
         .items
         .into_iter()
         .next();
@@ -617,7 +720,7 @@ mod tests {
     use baley_core::scope::{
         BACKLOG_VIEW, PHASE_VIEW, ROADMAP_VIEW, backlog_key, phase_key, roadmap_key,
     };
-    use baley_store::{Actor, Caller, OutcomeKind, Refusal as StoreRefusal};
+    use baley_store::{Actor, Caller, Event, OutcomeKind, Refusal as StoreRefusal};
     use serde_json::json;
 
     use super::*;
@@ -956,6 +1059,249 @@ mod tests {
         assert_eq!(answer["place"], "detail", "{answer}");
         assert_eq!(answer["retryable"], false, "{answer}");
         assert_eq!(head(&store), after);
+    }
+
+    /// Records `value` as a change of `kind` under `submit_id` at
+    /// `submitted`, then approves it through both steps under `approve_id`
+    /// at `approved`.
+    fn approve_change(
+        store: &baley_store_sqlite::SqliteStore,
+        kind: baley_core::scope::ChangeKind,
+        value: &Value,
+        (submit_id, submitted): (&str, &str),
+        (approve_id, approved): (&str, &str),
+    ) -> (Hash, Recorded) {
+        let digest = digest_of(&submit_change(store, kind, value, submit_id, submitted).unwrap());
+        let judged = judge(store, &project(), digest).unwrap();
+        let recorded = approve(store, Some(&judged), approve_id, 0xa, approved).unwrap();
+        (digest, recorded)
+    }
+
+    /// The events request `request_id` recorded.
+    fn recorded_by(store: &baley_store_sqlite::SqliteStore, request_id: &str) -> Vec<Event> {
+        history(store)
+            .into_iter()
+            .filter(|event| event.request_id.0 == request_id)
+            .collect()
+    }
+
+    fn types(events: &[Event]) -> Vec<&str> {
+        events
+            .iter()
+            .map(|event| event.type_name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_change_approval_recorded_as_baley_losing_the_old_declaration_or_reusing_a_number_is_caught()
+     {
+        use baley_core::scope::ChangeKind;
+
+        let (_dir, store) = approved();
+        let db = json!({"payload": "0eae12e355314abb5595d44ce4f4014a294d8d4cf709555975ef5f41648d7339",
+            "bytes": 18, "class": "record"});
+        let dp = json!({"payload": "40cd320a31a7ab226dc42f8ca21d7c9159fcdbec87ff12f2b1a8fc362ac0642a",
+            "bytes": 24, "class": "record"});
+        let as_owner = |events: &[Event]| {
+            for event in events {
+                assert_eq!(event.actor, Actor::Owner, "{}", event.type_name);
+                assert_eq!(
+                    event.caller,
+                    Some(Caller::Server(caller())),
+                    "{}",
+                    event.type_name
+                );
+            }
+        };
+
+        let (e_b, _) = approve_change(&store, ChangeKind::PhaseEdit, &e_b(), (R4, T4), (R6, T5));
+        let events = recorded_by(&store, R6);
+        assert_eq!(
+            types(&events),
+            ["phase.declared", "scope.approved", "command.completed"]
+        );
+        assert_eq!(
+            events[0].payload,
+            json!({"number": 2, "name": "Approval", "goal": "The owner approves every change",
+                "detail": db, "depends_on": [1], "stories": [2], "submission": E_B_DIGEST})
+        );
+        assert_eq!(
+            events[1].payload,
+            json!({"submission": e_b.to_hex(), "kind": "phase-edit", "owner": OWNER, "at": T5})
+        );
+        as_owner(&events);
+        let all = history(&store);
+        let goals: Vec<&Value> = of_type(&all, "phase.declared")
+            .into_iter()
+            .filter(|event| event.payload["number"] == 2)
+            .map(|event| &event.payload["goal"])
+            .collect();
+        assert_eq!(
+            goals,
+            ["The owner approves", "The owner approves every change"]
+        );
+
+        let (w, _) = approve_change(&store, ChangeKind::PhaseWithdraw, &w(), (R7, T6), (R8, T7));
+        let events = recorded_by(&store, R8);
+        assert_eq!(
+            types(&events),
+            [
+                "phase.withdrawn",
+                "story.reassigned",
+                "phase.reordered",
+                "scope.approved",
+                "command.completed"
+            ]
+        );
+        let w_hex = w.to_hex();
+        assert_eq!(events[0].payload, json!({"number": 2, "submission": w_hex}));
+        assert_eq!(
+            events[1].payload,
+            json!({"id": 2, "status": "active", "phase": 1, "submission": w_hex})
+        );
+        assert_eq!(
+            events[2].payload,
+            json!({"order": [1], "submission": w_hex})
+        );
+        assert_eq!(
+            events[3].payload,
+            json!({"submission": w_hex, "kind": "phase-withdraw", "owner": OWNER, "at": T7})
+        );
+        as_owner(&events);
+        let roadmap = store
+            .get(&project(), ROADMAP_VIEW, &roadmap_key())
+            .unwrap()
+            .unwrap()
+            .body;
+        assert_eq!(roadmap["order"], json!([1]));
+        let held: Vec<Value> = roadmap["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|phase| json!([phase["number"], phase["status"], phase["stories"]]))
+            .collect();
+        assert_eq!(
+            held,
+            [json!([1, "declared", [1, 2]]), json!([2, "withdrawn", []])]
+        );
+        let phase = store
+            .get(&project(), PHASE_VIEW, &phase_key(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(phase.body["status"], "withdrawn");
+
+        let (p, recorded) =
+            approve_change(&store, ChangeKind::PhaseDeclare, &p(), (R2, T8), (R3, T9));
+        let events = recorded_by(&store, R3);
+        assert_eq!(
+            types(&events),
+            [
+                "phase.declared",
+                "phase.reordered",
+                "scope.approved",
+                "command.completed"
+            ]
+        );
+        let p_hex = p.to_hex();
+        assert_eq!(
+            events[0].payload,
+            json!({"number": 3, "name": "Reports", "goal": "The owner reads progress",
+                "detail": dp, "depends_on": [1], "stories": [], "submission": p_hex})
+        );
+        assert_eq!(
+            events[1].payload,
+            json!({"order": [1, 3], "submission": p_hex})
+        );
+        assert_eq!(
+            events[2].payload,
+            json!({"submission": p_hex, "kind": "phase-declare", "owner": OWNER, "at": T9})
+        );
+        as_owner(&events);
+        assert_eq!(
+            receipt(&recorded),
+            json!({"status": "ok", "kind": "phase-declare", "digest": p_hex, "owner": OWNER,
+                "at": T9, "phases": [3], "stories": []})
+        );
+    }
+
+    #[test]
+    fn a_change_approval_recorded_after_scope_moved_since_its_first_step_is_caught() {
+        use baley_core::scope::ChangeKind;
+
+        let (_dir, store) = approved();
+        let w = digest_of(&submit_change(&store, ChangeKind::PhaseWithdraw, &w(), R4, T4).unwrap());
+        let judged = judge(&store, &project(), w).unwrap();
+        append(&store, R6, T4, vec![story_reassigned(3, 1)]);
+        let after = head(&store);
+
+        let result = approve(&store, Some(&judged), R7, 7, T5);
+        assert!(matches!(result, Err(StoreError::Stale(_))), "{result:?}");
+        assert_eq!(head(&store), after);
+        assert_busy(&answer(result, &store));
+    }
+
+    #[test]
+    fn a_declaration_past_the_largest_number_recorded_is_caught() {
+        use baley_core::scope::ChangeKind;
+
+        let (_dir, store) = approved();
+        let detail = baley_store::PayloadRef {
+            hash: Hash::from_hex(
+                "0eae12e355314abb5595d44ce4f4014a294d8d4cf709555975ef5f41648d7339",
+            )
+            .unwrap(),
+            bytes: 18,
+            class: RetentionClass::Record,
+        };
+        append(
+            &store,
+            R6,
+            T3,
+            vec![
+                phase_declared(u32::MAX, detail),
+                phase_reordered(&[1, 2, u32::MAX]),
+            ],
+        );
+        let p = digest_of(&submit_change(&store, ChangeKind::PhaseDeclare, &p(), R4, T4).unwrap());
+        let judged = judge(&store, &project(), p).unwrap();
+        let before = head(&store);
+
+        let result = approve(&store, Some(&judged), R7, 7, T5);
+        assert!(
+            matches!(result, Err(StoreError::Unavailable(_))),
+            "{result:?}"
+        );
+        assert_eq!(head(&store), before);
+        let value = answer(result, &store);
+        assert_eq!(value["status"], "failed", "{value}");
+        assert_eq!(value["code"], "ledger-unavailable", "{value}");
+        assert_eq!(value["retryable"], false, "{value}");
+    }
+
+    #[test]
+    fn a_change_approved_twice_in_a_race_is_caught() {
+        use baley_core::scope::ChangeKind;
+
+        let (_dir, store) = approved();
+        let w = digest_of(&submit_change(&store, ChangeKind::PhaseWithdraw, &w(), R4, T4).unwrap());
+        let judged = judge(&store, &project(), w).unwrap();
+        append(
+            &store,
+            R6,
+            T5,
+            vec![scope_approved(w, "phase-withdraw", T5)],
+        );
+        let after = head(&store);
+
+        let result = approve(&store, Some(&judged), R7, 7, T6);
+        assert!(matches!(result, Err(StoreError::Stale(_))), "{result:?}");
+        assert_eq!(head(&store), after);
+        let approvals = of_type(&history(&store), "scope.approved")
+            .into_iter()
+            .filter(|event| event.payload["submission"] == w.to_hex())
+            .count();
+        assert_eq!(approvals, 1);
+        assert_busy(&answer(result, &store));
     }
 
     #[test]
