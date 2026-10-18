@@ -314,9 +314,11 @@ pub fn record_change<L: Ledger + ?Sized>(
 /// recorded as `check_change` and `record_change` do. A request the ledger
 /// already holds is replayed before the check, as preparation does over MCP,
 /// so a retry of a completed edit gets its recorded answer however scope has
-/// moved since. The answer is the draft's digest, or the answer that refused
-/// or failed it. The draft is approved through `approve::judge` and
-/// `approve::record`.
+/// moved since. The answer is the digest the recorded receipt names, or the
+/// answer that refused or failed it; a receipt the store replayed for another
+/// change recorded under the same command is a reused request id, since this
+/// edit was never recorded. The draft is approved through `approve::judge`
+/// and `approve::record`.
 pub fn submit_phase_edit<S: Ledger + Views + Payloads>(
     store: &S,
     command: &Command,
@@ -352,10 +354,35 @@ pub fn submit_phase_edit<S: Ledger + Views + Payloads>(
         let read = check_change(store, &command.project, &change)?;
         record_change(store, command, &change, Some(&read))
     };
-    match result {
-        Ok(_) => Ok(change.digest()),
-        Err(error) => Err(answer(Err(error), store)),
+    recorded_digest(answer(result, store), &change)
+}
+
+/// The digest `answer`, a scope call's recorded answer, names when it is
+/// `change`'s. An `ok` receipt for another change is a reused request id;
+/// any other answer is returned as it is.
+fn recorded_digest(answer: Value, change: &ChangeSubmission) -> Result<Hash, Value> {
+    if answer["status"] != "ok" {
+        return Err(answer);
     }
+    match answer
+        .get("digest")
+        .and_then(Value::as_str)
+        .and_then(Hash::from_hex)
+    {
+        Some(digest) if digest == change.digest() => Ok(digest),
+        _ => Err(request_id_reused()),
+    }
+}
+
+/// The `refused` answer for a request id already used for another scope
+/// call.
+fn request_id_reused() -> Value {
+    Refusal::new(
+        REQUEST_ID_REUSE,
+        "this request_id was already used for a different scope call, so nothing was recorded. A new call needs a new request_id",
+    )
+    .slot("request_id")
+    .value()
 }
 
 /// Whether the ledger holds a record of `command`'s request, looked up as
@@ -422,12 +449,7 @@ pub fn answer(result: Result<Recorded, StoreError>, payloads: &dyn Payloads) -> 
                 ),
             }
         }
-        Err(StoreError::Refused(StoreRefusal::RequestDigestMismatch { .. })) => Refusal::new(
-            REQUEST_ID_REUSE,
-            "this request_id was already used for a different scope call, so nothing was recorded. A new call needs a new request_id",
-        )
-        .slot("request_id")
-        .value(),
+        Err(StoreError::Refused(StoreRefusal::RequestDigestMismatch { .. })) => request_id_reused(),
         Err(StoreError::Refused(StoreRefusal::PayloadTombstoned(_))) => failed(
             TEXT_PURGED,
             "this exact text was purged from the ledger and cannot be stored again, so nothing was recorded",
@@ -782,6 +804,34 @@ mod tests {
             .filter(|event| event.payload["digest"] == E_B_DIGEST)
             .count();
         assert_eq!(drafts, 1);
+    }
+
+    #[test]
+    fn a_phase_edit_answered_with_a_digest_its_replay_never_recorded_is_caught() {
+        use baley_core::scope::PhaseFields;
+
+        let (_dir, store) = approved();
+        let goal = PhaseFields {
+            goal: Some("The owner approves every change".into()),
+            ..PhaseFields::default()
+        };
+        let edit = command(SUBMIT_COMMAND, R4, 4, T4);
+        submit_phase_edit(&store, &edit, 2, &goal).unwrap();
+        let before = head(&store);
+
+        let name = PhaseFields {
+            name: Some("Approvals".into()),
+            ..PhaseFields::default()
+        };
+        let other = submit_phase_edit(&store, &edit, 2, &name).unwrap_err();
+        assert_eq!(other["status"], "refused", "{other}");
+        assert_eq!(other["code"], "request-id-reuse", "{other}");
+        assert_eq!(other["slot"], "request_id", "{other}");
+        assert_eq!(head(&store), before);
+
+        let again = submit_phase_edit(&store, &edit, 2, &goal);
+        assert_eq!(again, Ok(Hash::from_hex(E_B_DIGEST).unwrap()));
+        assert_eq!(head(&store), before);
     }
 
     #[test]
