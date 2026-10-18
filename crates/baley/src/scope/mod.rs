@@ -25,8 +25,11 @@ pub(crate) mod fixtures {
 
     use baley_core::scope::{ChangeKind, ChangeSubmission, judge_change};
     use baley_core::scope::{
+        PHASE_REORDERED, PHASE_REORDERED_VERSION, PHASE_WITHDRAWN, PHASE_WITHDRAWN_VERSION,
         PROJECT_STREAM, ROADMAP_STREAM, SCOPE_APPROVED, SCOPE_APPROVED_VERSION, STORY_DROPPED,
-        STORY_DROPPED_VERSION, approved_payload, judge_submission, story_dropped_payload,
+        STORY_DROPPED_VERSION, STORY_REASSIGNED, STORY_REASSIGNED_VERSION, StoryStatus,
+        approved_payload, judge_submission, phase_reordered_payload, phase_withdrawn_payload,
+        story_dropped_payload, story_reassigned_payload,
     };
     use baley_store::{
         Actor, Admin, Answer, Command, CommandKind, Decision, Event, Hash, HistoryFilter, Ledger,
@@ -373,6 +376,33 @@ pub(crate) mod fixtures {
             payload: approved_payload(digest, kind, "Ada Owner", at),
             attachments: Vec::new(),
         }
+    }
+
+    /// A `phase.withdrawn` of phase `number`.
+    pub fn phase_withdrawn(number: u32) -> NewEvent {
+        roadmap_event(
+            PHASE_WITHDRAWN,
+            PHASE_WITHDRAWN_VERSION,
+            phase_withdrawn_payload(number, APPENDED),
+        )
+    }
+
+    /// A `phase.reordered` giving `order`.
+    pub fn phase_reordered(order: &[u32]) -> NewEvent {
+        roadmap_event(
+            PHASE_REORDERED,
+            PHASE_REORDERED_VERSION,
+            phase_reordered_payload(order, APPENDED),
+        )
+    }
+
+    /// A `story.reassigned` making story `id` active in `phase`.
+    pub fn story_reassigned(id: u32, phase: u32) -> NewEvent {
+        roadmap_event(
+            STORY_REASSIGNED,
+            STORY_REASSIGNED_VERSION,
+            story_reassigned_payload(id, StoryStatus::Active, Some(phase), APPENDED),
+        )
     }
 
     /// A `story.dropped` of story `id`.

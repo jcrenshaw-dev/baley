@@ -318,7 +318,7 @@ struct RoadmapDocument {
 }
 
 /// A `phase` document: its detail is found by the sequence it was declared
-/// at.
+/// at. Its stories are read from the roadmap instead.
 #[derive(Deserialize)]
 struct PhaseDocument {
     number: u32,
@@ -327,7 +327,6 @@ struct PhaseDocument {
     status: String,
     declared_seq: u64,
     depends_on: Vec<u32>,
-    stories: Vec<u32>,
 }
 
 /// A `phase_detail` document: the detail body's hex hash, and this
@@ -346,8 +345,9 @@ struct BacklogDocument {
 }
 
 /// Reads `project`'s accepted roadmap from its `roadmap` document, the
-/// phases in the document's `order`. No document is a project with no
-/// approved scope.
+/// phases in the document's `order`, then each withdrawn phase in number
+/// order, which keeps its entry but leaves the order (D-07). No document is
+/// a project with no approved scope.
 pub fn roadmap<S: Views + ?Sized>(store: &S, project: &ProjectId) -> Result<Roadmap, ReadError> {
     let Some(document) = read::<RoadmapDocument, _>(store, project, ROADMAP_VIEW, &roadmap_key())?
     else {
@@ -357,15 +357,19 @@ pub fn roadmap<S: Views + ?Sized>(store: &S, project: &ProjectId) -> Result<Road
             stories: Vec::new(),
         });
     };
-    // Every phase is in the order exactly once; anything else is a broken
-    // document, never a roadmap with a phase dropped.
-    if document.order.len() != document.phases.len() {
+    // Every phase not withdrawn is in the order exactly once and no
+    // withdrawn phase is; anything else is a broken document, never a
+    // roadmap with a phase dropped.
+    let (withdrawn, held): (Vec<RoadmapPhase>, Vec<RoadmapPhase>) = document
+        .phases
+        .into_iter()
+        .partition(|phase| phase.status == WITHDRAWN);
+    if document.order.len() != held.len() {
         return Err(unreadable(ROADMAP_VIEW));
     }
-    let mut phases = Vec::with_capacity(document.order.len());
+    let mut phases = Vec::with_capacity(held.len() + withdrawn.len());
     for number in &document.order {
-        let phase = document
-            .phases
+        let phase = held
             .iter()
             .find(|phase| phase.number == *number)
             .ok_or_else(|| unreadable(ROADMAP_VIEW))?;
@@ -374,6 +378,8 @@ pub fn roadmap<S: Views + ?Sized>(store: &S, project: &ProjectId) -> Result<Road
         }
         phases.push(phase.clone());
     }
+    // The projector keeps phases by number, so these are in number order.
+    phases.extend(withdrawn);
     Ok(Roadmap {
         description: document.description,
         phases,
@@ -381,10 +387,16 @@ pub fn roadmap<S: Views + ?Sized>(store: &S, project: &ProjectId) -> Result<Road
     })
 }
 
+/// The status a withdrawn phase holds.
+const WITHDRAWN: &str = "withdrawn";
+
 /// Reads accepted phase `number` from the `phase` view, with its detail
 /// from its body, or the tombstone its `phase_detail` document holds when
 /// this project purged that body. The purge state is checked before the
-/// body is opened, since a body is stored by hash for every project.
+/// body is opened, since a body is stored by hash for every project. Its
+/// stories are the ones its `roadmap` entry says it serves now, after any
+/// reassign or drop, since the `phase` document keeps the stories its latest
+/// declaration listed. A withdrawn phase reads with its status.
 pub fn phase<S: Views + Payloads + ?Sized>(
     store: &S,
     project: &ProjectId,
@@ -392,6 +404,15 @@ pub fn phase<S: Views + Payloads + ?Sized>(
 ) -> Result<Phase, ReadError> {
     let document = read::<PhaseDocument, _>(store, project, PHASE_VIEW, &phase_key(number))?
         .ok_or(ReadError::NoSuchPhase)?;
+    let stories = read::<RoadmapDocument, _>(store, project, ROADMAP_VIEW, &roadmap_key())?
+        .and_then(|roadmap| {
+            roadmap
+                .phases
+                .into_iter()
+                .find(|phase| phase.number == number)
+        })
+        .map(|phase| phase.stories)
+        .ok_or_else(|| unreadable(ROADMAP_VIEW))?;
     let held = read::<DetailDocument, _>(
         store,
         project,
@@ -411,7 +432,7 @@ pub fn phase<S: Views + Payloads + ?Sized>(
         status: document.status,
         detail,
         depends_on: document.depends_on,
-        stories: document.stories,
+        stories,
     })
 }
 
@@ -958,6 +979,51 @@ mod tests {
         append(&store, R3, T3, vec![story_dropped(3)]);
         let moved = confirmed("8c9d0e1f-2a3b-4c4d-9e5f-6a7b8c9d0e1f");
         assert!(matches!(moved, Err(StoreError::Stale(_))), "{moved:?}");
+    }
+
+    #[test]
+    fn a_withdrawn_phase_left_out_of_the_roadmap_read_or_read_in_its_order_is_caught() {
+        let (_dir, store) = approved();
+        append(
+            &store,
+            R2,
+            T4,
+            vec![
+                phase_withdrawn(2),
+                story_reassigned(2, 1),
+                phase_reordered(&[1]),
+            ],
+        );
+        let read = roadmap(&store, &project()).unwrap();
+        let listed: Vec<(u32, &str, &[u32])> = read
+            .phases
+            .iter()
+            .map(|phase| {
+                (
+                    phase.number,
+                    phase.status.as_str(),
+                    phase.stories.as_slice(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [(1, "declared", &[1, 2][..]), (2, "withdrawn", &[][..])]
+        );
+        assert_eq!(read.stories[1].id, 2);
+        assert_eq!(read.stories[1].phase, Some(1));
+
+        let withdrawn = phase(&store, &project(), 2).unwrap();
+        assert_eq!(withdrawn.status, "withdrawn");
+        assert_eq!(withdrawn.stories, Vec::<u32>::new());
+    }
+
+    #[test]
+    fn a_phase_read_with_the_stories_of_its_old_declaration_is_caught() {
+        let (_dir, store) = approved();
+        append(&store, R2, T4, vec![story_reassigned(3, 2)]);
+        assert_eq!(phase(&store, &project(), 2).unwrap().stories, [2, 3]);
+        assert_eq!(phase(&store, &project(), 1).unwrap().stories, [1]);
     }
 
     #[test]
