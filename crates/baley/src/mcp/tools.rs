@@ -349,20 +349,24 @@ mod tests {
         let schema = input_schema(Tool::Query);
         let identity = alternative_of_type(&schema["properties"]["identity"], "object");
         let objects = leaves(&identity);
-        assert_eq!(objects.len(), 4, "{identity}");
+        assert_eq!(objects.len(), 5, "{identity}");
         let object = &objects[0];
         assert_eq!(object["properties"]["kind"]["const"], "capture");
         assert_eq!(object["properties"]["id"]["type"], "string");
         assert_eq!(object["required"], json!(["kind", "id"]));
         assert_eq!(object["additionalProperties"], false);
-        // The scope kinds are objects with their own typed fields too, so no
-        // identity leaves room for loose text.
-        for (object, kind) in objects[1..].iter().zip(["draft", "roadmap", "story"]) {
+        // The scope and work-order kinds are objects with their own typed
+        // fields too, so no identity leaves room for loose text.
+        for (object, kind) in objects[1..]
+            .iter()
+            .zip(["draft", "roadmap", "story", "work_order"])
+        {
             assert_eq!(object["type"], "object", "{object}");
             assert_eq!(object["properties"]["kind"]["const"], kind, "{object}");
             assert_eq!(object["additionalProperties"], false, "{object}");
         }
         assert_eq!(objects[3]["properties"]["id"]["type"], "integer");
+        assert_eq!(objects[4]["properties"]["id"]["type"], "string");
         let parts = alternatives(&schema["properties"]["part"]);
         assert!(!parts.is_empty(), "no part in {schema}");
         for part in parts {
