@@ -12,3 +12,6 @@ pub mod route;
 /// The recording of one issued order: its inputs as `record` payloads and one
 /// `work_order.issued` on its subject's stream.
 pub mod issue;
+
+/// The reads of an order by its id and of the pending start order.
+pub mod read;
