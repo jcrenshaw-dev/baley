@@ -16,6 +16,7 @@ use crate::help::front_door;
 
 pub mod capture;
 pub mod read_contract;
+pub mod start;
 
 /// The served text of one instruction, pinned in source.
 #[derive(Debug, PartialEq, Eq)]
@@ -205,6 +206,28 @@ pub static ENTRIES: &[Entry] = &[
             version: read_contract::VERSION,
             hash: read_contract::HASH,
             body: read_contract::TEXT,
+        }),
+    },
+    // Build 4 serves the start planner's text inside the start order, never as a
+    // help row, so no session reaches it outside an order.
+    Entry {
+        identity: start::PLANNER_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: start::PLANNER_VERSION,
+            hash: start::PLANNER_HASH,
+            body: start::PLANNER_TEXT,
+        }),
+    },
+    // Build 4 serves the start survey beside the planner's text, listed in a
+    // start order only when the checkout already holds code.
+    Entry {
+        identity: start::SURVEY_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: start::SURVEY_VERSION,
+            hash: start::SURVEY_HASH,
+            body: start::SURVEY_TEXT,
         }),
     },
 ];
