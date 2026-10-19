@@ -5,14 +5,15 @@
 //! the caller to answer.
 
 use baley_core::policy::Role;
+use baley_core::scope::{PROJECT_STREAM, SCOPE_APPROVED, START_KIND};
 use baley_core::work_order::{
     PENDING, START_SUBJECT, WORK_ORDER_LIVE_INDEX, WORK_ORDER_VIEW, work_order_key,
 };
 use baley_store::{
-    EVENT_PAGE_BOUND, Hash, IndexQuery, KeyValue, Ledger, PAYLOAD_PURGED, PageRequest, ProjectId,
-    PurgedEvent, RETENTION_STREAM, StoreError, StreamName, Views,
+    EVENT_PAGE_BOUND, Hash, HistoryFilter, IndexQuery, KeyValue, Ledger, PAYLOAD_PURGED,
+    PageRequest, ProjectId, PurgedEvent, RETENTION_STREAM, StoreError, StreamName, Views,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// The document of order `id` in `project`, or `None` when the view holds
 /// none.
@@ -137,6 +138,54 @@ pub fn releases<L: Ledger + ?Sized>(
             None => return Ok(read),
         }
     }
+}
+
+/// The accepted result of a start order (D-03): the digest of `project`'s
+/// start approval when it is among `order`'s drafts, or `None`. An approval
+/// names only a digest, so the view cannot reach an order from it; the
+/// approval is read from the events, as `start_approved` reads it.
+pub fn accepted<L: Ledger + ?Sized>(
+    store: &L,
+    project: &ProjectId,
+    order: &Value,
+) -> Result<Option<String>, StoreError> {
+    let filter = HistoryFilter {
+        types: vec![SCOPE_APPROVED.into()],
+        git_commit: None,
+    };
+    let start = json!(START_KIND);
+    let mut after = None;
+    let approved = loop {
+        let page = store.history(
+            project,
+            1..=u64::MAX,
+            &filter,
+            PageRequest {
+                limit: EVENT_PAGE_BOUND,
+                after,
+            },
+        )?;
+        let found = page.items.into_iter().find_map(|event| {
+            (event.stream == PROJECT_STREAM && event.payload.get("kind") == Some(&start))
+                .then(|| event.payload.get("submission").cloned())
+                .flatten()
+        });
+        if found.is_some() {
+            break found;
+        }
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break None,
+        }
+    };
+    let Some(Value::String(digest)) = approved else {
+        return Ok(None);
+    };
+    let listed = order
+        .get("drafts")
+        .and_then(Value::as_array)
+        .is_some_and(|drafts| drafts.iter().any(|draft| draft.as_str() == Some(&digest)));
+    Ok(listed.then_some(digest))
 }
 
 #[cfg(test)]
@@ -294,6 +343,73 @@ mod tests {
     fn sha256(bytes: &[u8]) -> Hash {
         use sha2::{Digest, Sha256};
         Hash(Sha256::digest(bytes).into())
+    }
+
+    /// Records `value` as a start submission in `project` answering order
+    /// `id`, under `request_id`, and gives its digest.
+    fn answer_order(
+        store: &SqliteStore,
+        project: &ProjectId,
+        id: &str,
+        value: &serde_json::Value,
+        request_id: &str,
+    ) -> Hash {
+        let mut command = command_in(
+            project,
+            crate::scope::submit::SUBMIT_COMMAND,
+            request_id,
+            2,
+            T2,
+        );
+        command.caller = Some(Caller::Server(caller().with_work_order(id).unwrap()));
+        let submission = judge_submission(value).unwrap();
+        crate::scope::submit::record(store, &command, &submission).unwrap();
+        submission.digest()
+    }
+
+    #[test]
+    fn an_accepted_result_named_before_approval_or_for_another_orders_draft_is_caught() {
+        let (_dir, store) = two_projects();
+        let m_digest = M_DIGEST.to_string();
+        issue_in(&store, &project(), I0, I0, None, 1, &brief(), R1, T1);
+        let m_hash = answer_order(&store, &project(), I0, &m(), R2);
+        assert_eq!(m_hash.to_hex(), M_DIGEST);
+        let held = |project: &ProjectId, id: &str| order(&store, project, id).unwrap().unwrap();
+        assert_eq!(
+            accepted(&store, &project(), &held(&project(), I0)).unwrap(),
+            None
+        );
+        approve_draft_in(&store, &project(), m_hash);
+        assert_eq!(
+            accepted(&store, &project(), &held(&project(), I0)).unwrap(),
+            Some(m_digest.clone())
+        );
+
+        issue_in(&store, &project_b(), I1, I1, None, 1, &brief(), R1, T1);
+        answer_order(&store, &project_b(), I1, &m(), R2);
+        issue_in(&store, &project_b(), I2, I2, None, 1, &brief(), R3, T2);
+        let s1_hash = answer_order(&store, &project_b(), I2, &s1(), R4);
+        approve_draft_in(&store, &project_b(), s1_hash);
+        assert_eq!(
+            accepted(&store, &project_b(), &held(&project_b(), I1)).unwrap(),
+            None
+        );
+        assert_eq!(
+            accepted(&store, &project_b(), &held(&project_b(), I2)).unwrap(),
+            Some(s1_hash.to_hex())
+        );
+
+        use baley_store::Admin;
+        let third = ProjectId("8b3e4c6a-0d1f-4a2b-9c3d-4e5f6a7b8c9d".into());
+        store.create_project(&third, "third", T0).unwrap();
+        issue_in(&store, &third, I0, I0, None, 1, &brief(), R1, T1);
+        answer_order(&store, &third, I0, &m(), R2);
+        answer_order(&store, &third, I0, &s1(), R3);
+        answer_order(&store, &third, I0, &m(), R4);
+        approve_draft_in(&store, &third, m_hash);
+        let document = held(&third, I0);
+        assert_eq!(document["drafts"], json!([M_DIGEST, s1_hash.to_hex()]));
+        assert_eq!(accepted(&store, &third, &document).unwrap(), Some(m_digest));
     }
 
     #[test]
