@@ -1505,6 +1505,83 @@ mod tests {
     }
 
     #[test]
+    fn a_project_start_that_records_on_a_refusal_or_hides_its_settings_line_is_caught() {
+        use crate::mcp::work_order::tests::{B1, I0, issue_start};
+        use crate::mcp::work_order::{judge_start_arguments, settings_lines, start_check};
+        use crate::scope::fixtures;
+
+        let start = |brief: &str| json!({"operation": "project-start", "request_id": REQUEST, "brief": brief});
+        let judged = judge_start_arguments(&start(B1)).unwrap();
+        let caller = caller("/real/r/p", "/w");
+        // The plan only asks for the check, so this one is never run.
+        let check: &Check = &|_| panic!("the pure plan ran the check");
+        let call = Call {
+            check: Some(check),
+            ..write_call(&caller, &judged.request)
+        };
+
+        // (a) A project the ledger does not list.
+        let other = known(
+            with_file(walked()),
+            &["00000000-0000-4000-8000-000000000000"],
+        );
+        let value = assert_failed(
+            next(&call, &other),
+            "project-not-in-ledger",
+            "project",
+            false,
+        );
+        let reason = value["reason"].as_str().unwrap();
+        assert!(reason.contains("baley init"), "{reason}");
+
+        let (_dir, store) = fixtures::store();
+        issue_start(&store, &fixtures::project(), I0, fixtures::R1, fixtures::T1);
+        let before = fixtures::head(&store);
+
+        // (b) A blank or oversized brief.
+        for (brief, code) in [
+            (String::new(), "brief-blank"),
+            ("x".repeat(65_537), "brief-too-large"),
+        ] {
+            let refusal = judge_start_arguments(&start(&brief)).unwrap_err();
+            assert_eq!(refusal["status"], "refused", "{refusal}");
+            assert_eq!(refusal["code"], code, "{refusal}");
+            assert_eq!(refusal["slot"], "brief", "{refusal}");
+        }
+
+        // (c) A start while I0 is pending ends the call with the check's answer.
+        let refusal = start_check(&store, &ProjectId(ID.into())).unwrap_err();
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], "start-order-pending", "{refusal}");
+        assert_eq!(refusal["details"], json!({"work_order": I0}), "{refusal}");
+        assert!(
+            refusal["reason"].as_str().unwrap().contains(I0),
+            "{refusal}"
+        );
+        let mut seen = looked_up();
+        seen.checked = Some(Err(refusal.clone()));
+        seen.relooked = Some(Ok(None));
+        match next(&call, &seen) {
+            Next::Checked(answer) => assert_eq!(answer, refusal),
+            other => panic!("the check's refusal ends the call, got {other:?}"),
+        }
+        assert_eq!(fixtures::head(&store), before, "a refused start recorded");
+
+        // (d) No global file and a project file of `[project]` only.
+        let mut seen = admitted(with_reads(looked_up(), "[project]\n"));
+        seen.checked = Some(Ok(()));
+        seen.stepped = Some(Ok(3));
+        let Next::Ready(prepared) = next(&call, &seen) else {
+            panic!("a start with missing settings goes on");
+        };
+        let lines = settings_lines(&prepared.stepped.expect("the steps ran").policy);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        for line in &lines {
+            assert!(line.contains("baley config interview"), "{line}");
+        }
+    }
+
+    #[test]
     fn a_lookup_store_error_that_is_not_busy_or_unavailable() {
         let busy = with_replay(known_project(), Err(LedgerFault::Store(StoreError::Busy)));
         assert_failed(write_step(&busy), "ledger-busy", "ledger", true);

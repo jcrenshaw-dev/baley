@@ -5,15 +5,22 @@
 //! refusal records nothing.
 
 use baley_core::capture::is_blank;
-use baley_store::{CommandKind, Hash, InstructionEvidence, RequestId, request_digest};
+use baley_core::policy::{EffectivePolicy, Layer};
+use baley_core::work_order::START_ORDER_PENDING;
+use baley_store::{
+    CommandKind, Hash, InstructionEvidence, Ledger, ProjectId, RequestId, Views, request_digest,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::envelope::Refusal;
+use crate::mcp::capture::store_failed;
 use crate::mcp::client::MAX_ECHOED_BYTES;
 use crate::mcp::prepare::WriteRequest;
+use crate::scope::submit::{NOT_RECORDED_BUSY, start_once};
+use crate::work_order::read::pending_start;
 
 /// The command kind a project start is recorded under.
 pub const START_COMMAND: &str = "project.start";
@@ -142,6 +149,56 @@ pub fn judge_start_arguments(arguments: &Value) -> Result<JudgedStart, Value> {
     })
 }
 
+/// Project start's check, run by preparation after the replay lookup and
+/// before the settings, recording nothing: an approved start is
+/// `project-already-started` (D-19), and a pending start planner order is
+/// `start-order-pending`, naming it (D-02). A read fault is the store
+/// error's `failed` answer.
+pub fn start_check<S: Ledger + Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+) -> Result<(), Value> {
+    start_once(store, project)?;
+    let pending =
+        pending_start(store, project).map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?;
+    let Some(order) = pending else {
+        return Ok(());
+    };
+    let id = order.get("id").and_then(Value::as_str).unwrap_or_default();
+    Err(Refusal::new(
+        START_ORDER_PENDING,
+        format!(
+            "the start planner's work order {id} is still pending, so no other start was recorded. Read that order with `document`, or fail it with `work-order-fail` and retry it with `work-order-retry`"
+        ),
+    )
+    .slot("operation")
+    .details(json!({"work_order": id}))
+    .value())
+}
+
+/// The lines a start's answer carries when settings are missing (D-18):
+/// one when `policy`, the host's effective policy, has no global file, and
+/// one when no setting comes from the project file. Each says the defaults
+/// apply and names `baley config interview`; neither runs it.
+pub fn settings_lines(policy: &EffectivePolicy) -> Vec<String> {
+    let mut lines = Vec::new();
+    if policy.global.is_none() {
+        lines.push(
+            "There is no global settings file, so Baley's defaults apply. The owner can run `baley config interview` to choose settings".to_string(),
+        );
+    }
+    let from_project = policy
+        .settings
+        .values()
+        .any(|setting| matches!(setting.source.layer, Layer::Project | Layer::ProjectHost));
+    if !from_project {
+        lines.push(
+            "The project file sets nothing beyond [project], so Baley's defaults apply to this project. The owner can run `baley config interview` to choose settings".to_string(),
+        );
+    }
+    lines
+}
+
 /// Serde's text for a shape fault, cut to the echo limit with a closing
 /// `...`, since it repeats an unknown field's name at whatever length the
 /// caller sent.
@@ -158,11 +215,11 @@ fn bounded(text: String) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const R1: &str = "9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f";
-    const B1: &str = "Build a ledger for agent work";
+    pub(crate) const B1: &str = "Build a ledger for agent work";
     const B2: &str = "Build a ledger for agent work.";
 
     fn start(request_id: &str, brief: &str) -> Value {
@@ -221,5 +278,164 @@ mod tests {
         let refusal = refused(&start(&R1.to_uppercase(), B1));
         assert_eq!(refusal["code"], "invalid-arguments");
         assert_eq!(refusal["slot"], "request_id");
+    }
+
+    fn policy(global: Option<&str>, project: &str) -> EffectivePolicy {
+        use std::path::Path;
+
+        use baley_core::policy::{Host, Schema, effective_policy};
+        let global =
+            global.map(|text| crate::settings::file(Path::new("/c/config.toml"), text.into()));
+        let text = format!("[project]\nid = \"{ID}\"\nname = \"r\"\n{project}");
+        let project = crate::settings::file(Path::new("/real/r/baley.toml"), text.into_bytes());
+        effective_policy(
+            Schema::standard(),
+            Some(Host::ClaudeCode),
+            global.as_ref(),
+            Some(&project),
+        )
+        .unwrap()
+    }
+
+    const ID: &str = "6f1c2a4e-8b1d-4c3a-9e2f-0a5b7c9d1e3f";
+    const EFFORT_MAX: &str = "[roles.planner]\neffort = \"max\"\n";
+
+    fn about(lines: &[String]) -> Vec<&'static str> {
+        lines
+            .iter()
+            .map(|line| {
+                assert!(line.contains("baley config interview"), "{line}");
+                if line.contains("global settings file") {
+                    "global"
+                } else if line.contains("project file") {
+                    "project"
+                } else {
+                    panic!("a line about neither file: {line}")
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_settings_line_shown_beside_settings_or_missing_without_them_is_caught() {
+        let cases = [
+            (None, "", vec!["global", "project"]),
+            (Some(EFFORT_MAX), "", vec!["project"]),
+            (None, "[roles.planner]\neffort = \"low\"\n", vec!["global"]),
+            (
+                None,
+                "[host.claude-code]\nescalate_on_failure = true\n",
+                vec!["global"],
+            ),
+            (
+                Some(EFFORT_MAX),
+                "[roles.planner]\neffort = \"low\"\n",
+                vec![],
+            ),
+        ];
+        for (global, project, expected) in cases {
+            let lines = settings_lines(&policy(global, project));
+            assert_eq!(about(&lines), expected, "{global:?} {project:?}: {lines:?}");
+        }
+    }
+
+    /// Records a pending start planner order `id` in `project` under
+    /// `request_id` at `at`, as project start records one.
+    pub(crate) fn issue_start(
+        store: &baley_store_sqlite::SqliteStore,
+        project: &ProjectId,
+        id: &str,
+        request_id: &str,
+        at: &str,
+    ) {
+        use std::collections::BTreeSet;
+        use std::num::NonZeroU32;
+
+        use baley_core::policy::{AcceptedNames, Host, Role, Schema, effective_policy};
+        use baley_core::work_order::START_SUBJECT;
+
+        use crate::scope::fixtures::command_in;
+        use crate::work_order::issue::{self, Input, Issue, start_absences};
+
+        let policy =
+            effective_policy(Schema::standard(), Some(Host::ClaudeCode), None, None).unwrap();
+        let names = AcceptedNames {
+            names: BTreeSet::new(),
+            version: 0,
+        };
+        let attempt = NonZeroU32::new(1).unwrap();
+        let route = crate::work_order::route::compose(
+            &policy,
+            1,
+            Host::ClaudeCode,
+            Role::Planner,
+            attempt,
+            &names,
+        )
+        .unwrap();
+        let absences = start_absences();
+        let further = serde_json::Map::new();
+        let inputs = [Input::Bytes {
+            name: "brief",
+            bytes: B1.as_bytes(),
+        }];
+        let issue = Issue {
+            id,
+            request: id,
+            parent: None,
+            subject: START_SUBJECT,
+            route: &route,
+            instructions: &[],
+            inputs: &inputs,
+            absences: &absences,
+            streams: &[],
+            further: &further,
+        };
+        let command = command_in(project, START_COMMAND, request_id, 1, at);
+        let answer = issue::answer(issue::record(store, &command, Some(&issue)), store);
+        assert_eq!(answer["status"], "ok", "{answer}");
+    }
+
+    pub(crate) const I0: &str = "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+
+    #[test]
+    fn a_start_check_passing_an_approved_start_or_a_pending_order_is_caught() {
+        use baley_core::work_order::{WORK_ORDER_FAILED, failed_payload};
+        use baley_store::{NewEvent, StreamName};
+
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        assert_eq!(start_check(&store, &project()), Ok(()));
+
+        issue_start(&store, &project(), I0, R1, T1);
+        let refusal = start_check(&store, &project()).unwrap_err();
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], "start-order-pending", "{refusal}");
+        assert_eq!(refusal["slot"], "operation", "{refusal}");
+        assert_eq!(refusal["details"], json!({"work_order": I0}), "{refusal}");
+
+        let digest = receipt(&submit_in(&store, &project_b(), &m(), R1, 1, T1).unwrap())["digest"]
+            .as_str()
+            .and_then(Hash::from_hex)
+            .unwrap();
+        approve_draft_in(&store, &project_b(), digest);
+        let refusal = start_check(&store, &project_b()).unwrap_err();
+        assert_eq!(refusal["code"], "project-already-started", "{refusal}");
+
+        append(
+            &store,
+            R2,
+            T4,
+            vec![NewEvent {
+                stream: StreamName("roadmap".into()),
+                type_name: WORK_ORDER_FAILED.into(),
+                type_version: 1,
+                git: None,
+                payload: failed_payload(I0, "the planner stopped"),
+                attachments: vec![],
+            }],
+        );
+        assert_eq!(start_check(&store, &project()), Ok(()));
     }
 }
