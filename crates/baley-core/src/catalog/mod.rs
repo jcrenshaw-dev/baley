@@ -12,6 +12,7 @@ use std::fmt;
 use crate::policy::{Host, UNKNOWN_MODEL};
 
 pub mod detection;
+pub mod effort;
 pub mod events;
 pub mod lookup;
 pub mod owner;
@@ -19,6 +20,10 @@ pub mod seed;
 pub mod tables;
 pub mod view;
 
+pub use effort::{
+    EFFORT_ROWS, EFFORT_TABLE_DATE, EFFORT_TABLE_SOURCE, EffortRow, SupportedEffort,
+    supported_effort,
+};
 pub use events::{
     MODELS_DETECTED, MODELS_DETECTED_VERSION, MODELS_DETECTION_FAILED,
     MODELS_DETECTION_FAILED_VERSION, MODELS_OWNER_CHANGED, MODELS_OWNER_CHANGED_VERSION,
