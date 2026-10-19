@@ -208,6 +208,7 @@ pub const APPLY_OPERATIONS: &[Operation] = &[
     with_project("backlog-reorder"),
     with_project("project-start"),
     with_project("work-order-fail"),
+    with_project("work-order-retry"),
 ];
 
 /// A spelling served only from a project, which its call prepares.
@@ -368,6 +369,9 @@ enum RequestShape {
     // `work-order-fail` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "work-order-fail")]
     WorkOrderFail(#[allow(dead_code)] crate::mcp::work_order::FailShape),
+    // `work-order-retry` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "work-order-retry")]
+    WorkOrderRetry(#[allow(dead_code)] crate::mcp::work_order::RetryShape),
 }
 
 fn invalid_arguments(reason: impl Into<String>) -> Value {
@@ -645,6 +649,7 @@ pub(crate) mod expected {
         "backlog-reorder",
         "project-start",
         "work-order-fail",
+        "work-order-retry",
     ];
 }
 
@@ -710,6 +715,7 @@ mod tests {
                     "backlog-reorder",
                     "project-start",
                     "work-order-fail",
+                    "work-order-retry",
                 ]
                 .contains(n)
             }) {
@@ -745,6 +751,7 @@ mod tests {
             "backlog-reorder",
             "project-start",
             "work-order-fail",
+            "work-order-retry",
         ] {
             assert_eq!(
                 lookup(Tool::Apply, Some(name)),
@@ -1259,5 +1266,37 @@ mod tests {
             assert!(required.contains(&json!(name)), "{name} in {served}");
         }
         assert!(!required.contains(&json!("instruction")), "{served}");
+    }
+
+    #[test]
+    fn the_work_order_operations_out_of_the_baseline_order_or_unserved_are_caught() {
+        let names: Vec<&str> = APPLY_OPERATIONS.iter().map(|op| op.name).collect();
+        let served = ["project-start", "work-order-fail", "work-order-retry"];
+        assert_eq!(names[names.len().saturating_sub(3)..], served);
+        for name in served {
+            assert_eq!(
+                lookup(Tool::Apply, Some(name)),
+                Lookup::Available {
+                    needs_project: true
+                },
+                "{name}"
+            );
+        }
+        for (name, required) in [
+            (
+                "work-order-fail",
+                &["request_id", "work_order", "reason"][..],
+            ),
+            ("work-order-retry", &["request_id", "work_order"][..]),
+        ] {
+            let answer =
+                schema_answer(&json!({"operation": "schema", "tool": "apply", "for": name}));
+            assert_eq!(answer["status"], "ok", "{answer}");
+            let listed = answer["schema"]["required"].as_array().unwrap();
+            for field in required {
+                assert!(listed.contains(&json!(field)), "{field} in {answer}");
+            }
+            assert!(!listed.contains(&json!("instruction")), "{answer}");
+        }
     }
 }

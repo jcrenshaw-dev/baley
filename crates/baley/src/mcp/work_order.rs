@@ -3,7 +3,9 @@
 //! start planner on the `roadmap` stream, with the brief as a `record`
 //! payload, after the arguments, the start check and preparation pass.
 //! `work-order-fail` records one `work_order.failed` for a pending order a
-//! session reports could not launch or returned without a valid result. A
+//! session reports could not launch or returned without a valid result.
+//! `work-order-retry` records the next attempt of a failed order as a new
+//! `work_order.issued`, its route resolved again under the current policy. A
 //! refusal records nothing.
 
 use std::cell::RefCell;
@@ -11,13 +13,15 @@ use std::num::NonZeroU32;
 use std::path::Path;
 
 use baley_core::capture::is_blank;
-use baley_core::policy::{EffectivePolicy, Layer, Role};
+use baley_core::policy::{AcceptedNames, EffectivePolicy, Host, Layer, Role};
 use baley_core::work_order::{
-    NO_SUCH_WORK_ORDER, PENDING, START_ORDER_PENDING, START_SUBJECT, WORK_ORDER_NOT_PENDING,
+    ANSWERED, MATERIAL_UNAVAILABLE, NO_SUCH_WORK_ORDER, PENDING, Retry, RetryRefusal,
+    START_ORDER_PENDING, START_SUBJECT, WORK_ORDER_NOT_FAILED, WORK_ORDER_NOT_PENDING,
+    WORK_ORDER_RETRIED, WORK_ORDER_VIEW, judge_retry, work_order_key,
 };
 use baley_store::{
-    Command, CommandKind, Hash, InstructionEvidence, Ledger, ProjectId, RequestId, ServerCaller,
-    Views, request_digest,
+    Absence, Command, CommandKind, Document, Hash, InstructionEvidence, Ledger, ObservedDocument,
+    ProjectId, RETENTION_STREAM, RequestId, ServerCaller, StreamName, Views, request_digest,
 };
 use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
@@ -39,7 +43,7 @@ use crate::process::Process;
 use crate::scope::submit::{NOT_RECORDED_BUSY, start_once};
 use crate::work_order::fail::{self, Pending};
 use crate::work_order::issue::{self, Input, Issue, start_absences};
-use crate::work_order::read::{order_document, pending_start};
+use crate::work_order::read::{order_document, pending_start, releases};
 use crate::work_order::route::{compose, host_names};
 
 /// The command kind a project start is recorded under.
@@ -302,6 +306,7 @@ pub fn serve_start(arguments: &Value, preparation: &Preparation) -> Value {
         inputs: &inputs,
         absences: &absences,
         streams: &[],
+        documents: &[],
         further: &further,
     };
     issue::answer(issue::record(store, command, Some(&issue)), store)
@@ -557,6 +562,338 @@ fn prepared_write<'a>(
     }
 }
 
+/// The command kind a work order's retry is recorded under.
+pub const RETRY_COMMAND: &str = "work_order.retry";
+
+// `schema` serves this same declaration, so its doc comments are wire text.
+/// The arguments `work-order-retry` takes beside its `operation`. Unknown
+/// fields are refused.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetryShape {
+    /// A fresh UUID for this retry in lowercase hyphenated form. Sending the
+    /// same retry again sends the same id, and it issues no second attempt.
+    pub request_id: String,
+    /// The id of the failed work order to issue the next attempt of, as its
+    /// receipt gave it. It must be the newest attempt of its chain.
+    pub work_order: String,
+    /// The identity of the instruction the session followed, if it followed
+    /// one.
+    pub instruction: Option<String>,
+}
+
+/// The tagged form `work-order-retry`'s arguments arrive in.
+#[derive(Deserialize)]
+#[serde(tag = "operation")]
+enum RetryCall {
+    #[serde(rename = "work-order-retry")]
+    Retry(RetryShape),
+}
+
+/// A retry whose arguments passed every check made before preparation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JudgedRetry {
+    /// The write preparation carries into the domain command.
+    pub request: WriteRequest,
+    /// The failed order's id.
+    pub work_order: String,
+    /// The registry's evidence for the instruction the session named, if any.
+    pub instruction: Option<InstructionEvidence>,
+}
+
+/// Judges `work-order-retry`'s arguments before anything is prepared or
+/// recorded: the shape, then the request id, the order id and the
+/// instruction, in that order. The request digest covers the order alone, so
+/// the same retry sent again under its request id is replayed from its
+/// record and counts once (D-14). A fault is the `refused` answer, which
+/// records nothing.
+pub fn judge_retry_arguments(arguments: &Value) -> Result<JudgedRetry, Value> {
+    let shape = match serde_json::from_value::<RetryCall>(arguments.clone()) {
+        Ok(RetryCall::Retry(shape)) => shape,
+        Err(error) => return Err(shape_fault(&error)),
+    };
+    judge_request_id(&shape.request_id, "retry")?;
+    judge_order_id(&shape.work_order)?;
+    let instruction = judge_instruction(shape.instruction.as_deref())?;
+    let digest = request_digest(&json!({"command": RETRY_COMMAND, "work_order": shape.work_order}))
+        .expect("text is canonical");
+    Ok(JudgedRetry {
+        request: WriteRequest {
+            kind: CommandKind(RETRY_COMMAND.into()),
+            request_id: RequestId(shape.request_id),
+            digest,
+        },
+        work_order: shape.work_order,
+        instruction,
+    })
+}
+
+/// What a retry's check read, which its issue records and observes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedRetry {
+    /// What the retry re-issues, as the retry judge gave it.
+    pub retry: Retry,
+    /// The identities of the parent's instructions, in order.
+    pub instructions: Vec<String>,
+    /// The parent's document and each earlier attempt's, at the sequence that
+    /// last produced each.
+    pub documents: Vec<ObservedDocument>,
+    /// The `retention` stream's version the releases were read up to.
+    pub retention: u64,
+}
+
+/// A retry's check, run by preparation before admission and recording
+/// nothing. It reads the parent by id, none `no-such-work-order`, then each
+/// earlier attempt back to the chain's first order and this project's
+/// releases, and has the retry judge answer: a pending or answered order, or
+/// one whose chain an earlier attempt's return ended, `work-order-not-failed`
+/// (decision 2), one already retried `work-order-retried`, naming the retry,
+/// and one whose input this project purged `material-unavailable` (decision
+/// 1). A start order is then refused `start-order-pending` while another
+/// start order is pending, so a project keeps one live start order (D-02).
+pub fn retry_check<S: Ledger + Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    id: &str,
+) -> Result<CheckedRetry, Value> {
+    let read = |id: &str| {
+        order_document(store, project, id).map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))
+    };
+    let parent = read(id)?.ok_or_else(no_such_order)?;
+    let mut documents = vec![observed(id, &parent)];
+    let mut earlier = Vec::new();
+    let mut next = parent_of(&parent.body)?;
+    while let Some(at) = next {
+        // The view holds every parent before its child, so a missing one
+        // means the view cannot be read.
+        let document = read(&at)?.ok_or_else(order_unreadable)?;
+        documents.push(observed(&at, &document));
+        next = parent_of(&document.body)?;
+        earlier.push(document.body);
+    }
+    let releases =
+        releases(store, project).map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?;
+    let retry = judge_retry(&parent.body, &earlier, &releases.pairs())
+        .map_err(|refusal| retry_refused(id, refusal))?;
+    if is_start(&retry) {
+        let pending = pending_start(store, project)
+            .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?;
+        if let Some(order) = pending {
+            let pending = order.get("id").and_then(Value::as_str).unwrap_or_default();
+            return Err(Refusal::new(
+                START_ORDER_PENDING,
+                format!(
+                    "the start planner's work order {pending} is pending, so no retry of {id} was issued, since a project has one live start order. Read that order with `document`, or fail it with `work-order-fail` and retry it with `work-order-retry`"
+                ),
+            )
+            .slot("operation")
+            .details(json!({"work_order": pending}))
+            .value());
+        }
+    }
+    let instructions = match parent.body.get("instructions") {
+        Some(Value::Array(listed)) => listed
+            .iter()
+            .map(|entry| {
+                entry
+                    .get("identity")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(order_unreadable)?,
+        _ => return Err(order_unreadable()),
+    };
+    Ok(CheckedRetry {
+        retry,
+        instructions,
+        documents,
+        retention: releases.version,
+    })
+}
+
+/// Whether `retry` re-issues the start planner's order.
+fn is_start(retry: &Retry) -> bool {
+    retry.role == Role::Planner && retry.subject == START_SUBJECT
+}
+
+/// Order `id`'s document as a decision observes it.
+fn observed(id: &str, document: &Document) -> ObservedDocument {
+    ObservedDocument {
+        view: WORK_ORDER_VIEW.into(),
+        key: work_order_key(id),
+        produced_seq: Some(document.produced_seq),
+    }
+}
+
+/// The order an order document retries, if any.
+fn parent_of(body: &Value) -> Result<Option<String>, Value> {
+    match body.get("parent") {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(parent)) => Ok(Some(parent.clone())),
+        _ => Err(order_unreadable()),
+    }
+}
+
+/// The answer for the retry judge's refusal of order `id`.
+fn retry_refused(id: &str, refusal: RetryRefusal) -> Value {
+    match refusal {
+        RetryRefusal::NotFailed { state } => Refusal::new(
+            WORK_ORDER_NOT_FAILED,
+            format!(
+                "work order {id} is {state}, so no retry was issued. Only a failed order is retried: a pending one is failed first with `work-order-fail`, and an answered one has returned"
+            ),
+        )
+        .slot("work_order")
+        .details(json!({"state": state}))
+        .value(),
+        RetryRefusal::EarlierAnswered { work_order } => Refusal::new(
+            WORK_ORDER_NOT_FAILED,
+            format!(
+                "work order {work_order}, an earlier attempt of {id}, has returned, which ends the chain, so no retry was issued"
+            ),
+        )
+        .slot("work_order")
+        .details(json!({"state": ANSWERED, "work_order": work_order}))
+        .value(),
+        RetryRefusal::Retried { child } => Refusal::new(
+            WORK_ORDER_RETRIED,
+            format!(
+                "work order {id} was already retried as {child}, so no second retry was issued. Fail or retry {child}, the newest attempt, instead"
+            ),
+        )
+        .slot("work_order")
+        .details(json!({"work_order": child}))
+        .value(),
+        RetryRefusal::MaterialUnavailable { input } => Refusal::new(
+            MATERIAL_UNAVAILABLE,
+            format!(
+                "this project purged the {input} input of work order {id}, so no retry was issued. A retry carries its parent's inputs and never rebuilds them"
+            ),
+        )
+        .slot("work_order")
+        .details(json!({"input": input}))
+        .value(),
+        RetryRefusal::Exhausted => failed(
+            LEDGER_UNAVAILABLE,
+            format!("work order {id} is at the last attempt a chain can count, so no retry was issued"),
+            PLACE_LEDGER,
+        ),
+        RetryRefusal::Unreadable { .. } => order_unreadable(),
+    }
+}
+
+/// Issues the retry `checked` describes as order `id` under `command`: the
+/// route for the parent's role at the judged attempt under `policy`, the
+/// host's effective policy at the command's policy version, and the catalog
+/// `names` read now (D-15); the registry's current evidence for each
+/// instruction the parent listed; and the parent's inputs as they are held.
+/// The decision observes every document the check read and expects the
+/// `retention` stream where the check read it, so a retry, a submission or a
+/// purge landing since makes the call `ledger-busy` with nothing recorded; a
+/// retried start order also declares that no start order is pending.
+pub fn issue_retry(
+    store: &SqliteStore,
+    command: &Command,
+    checked: &CheckedRetry,
+    policy: &EffectivePolicy,
+    host: Host,
+    names: &AcceptedNames,
+    id: &str,
+) -> Value {
+    let retry = &checked.retry;
+    let route = match compose(
+        policy,
+        command.policy_version,
+        host,
+        retry.role,
+        retry.attempt,
+        names,
+    ) {
+        Ok(route) => route,
+        Err(refusal) => return Refusal::new(refusal.code(), refusal.to_string()).value(),
+    };
+    // The worker reads the text served now, so the order carries its evidence.
+    let mut instructions = Vec::with_capacity(checked.instructions.len());
+    for identity in &checked.instructions {
+        match crate::instruction::evidence(identity) {
+            Ok(evidence) => instructions.push(evidence),
+            Err(refusal) => return refusal,
+        }
+    }
+    let inputs: Vec<Input<'_>> = retry.inputs.iter().map(Input::Held).collect();
+    let absences: Vec<Absence> = if is_start(retry) {
+        start_absences()
+            .into_iter()
+            .filter(|absence| matches!(absence, Absence::Documents { .. }))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Every purge of this project moves this stream, and a transaction
+    // cannot re-read the releases themselves.
+    let streams = [(StreamName(RETENTION_STREAM.into()), checked.retention)];
+    let mut further = Map::new();
+    further.insert("parent".into(), json!(retry.parent));
+    let issue = Issue {
+        id,
+        request: &retry.request,
+        parent: Some(&retry.parent),
+        subject: &retry.subject,
+        route: &route,
+        instructions: &instructions,
+        inputs: &inputs,
+        absences: &absences,
+        streams: &streams,
+        documents: &checked.documents,
+        further: &further,
+    };
+    issue::answer(issue::record(store, command, Some(&issue)), store)
+}
+
+/// Serves one `work-order-retry` call for the session's `preparation`. The
+/// arguments are judged first; then the write is prepared under the caller
+/// with the instruction evidence attached and [`retry_check`] as its check,
+/// and the next attempt is issued under a fresh lowercase UUID with the
+/// prepared policy and the host catalog read now. A replay goes to the
+/// recording with no order, and the store answers it from its record.
+pub fn serve_retry(arguments: &Value, preparation: &Preparation) -> Value {
+    let judged = match judge_retry_arguments(arguments) {
+        Ok(judged) => judged,
+        Err(refusal) => return refusal,
+    };
+    // Kept for the issue to observe. A replay skips the check.
+    let kept = RefCell::new(None);
+    let check = |store: &SqliteStore, project: &ProjectId| {
+        *kept.borrow_mut() = Some(retry_check(store, project, &judged.work_order)?);
+        Ok(())
+    };
+    let caller = evidenced(&preparation.caller, judged.instruction.as_ref());
+    let (store, command, stepped) =
+        match prepared_write(preparation, &caller, &judged.request, &check) {
+            Ok(prepared) => prepared,
+            Err(answer) => return answer,
+        };
+    let kept = kept.borrow();
+    let (Some(stepped), Some(checked)) = (stepped, kept.as_ref()) else {
+        return issue::answer(issue::record(store, &command, None), store);
+    };
+    let names = match host_names(store, preparation.host) {
+        Ok(names) => names,
+        Err(error) => return store_failed(&error, NOT_RECORDED_BUSY),
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    issue_retry(
+        store,
+        &command,
+        checked,
+        &stepped.policy,
+        preparation.host,
+        &names,
+        &id,
+    )
+}
+
 /// The `invalid-arguments` answer for a shape fault, at slot `arguments`.
 fn shape_fault(error: &serde_json::Error) -> Value {
     Refusal::new("invalid-arguments", bounded(error.to_string()))
@@ -803,6 +1140,7 @@ pub(crate) mod tests {
             inputs: &inputs,
             absences: &absences,
             streams: &[],
+            documents: &[],
             further: &further,
         };
         let command = command_in(project, START_COMMAND, request_id, 1, at);
@@ -956,5 +1294,261 @@ pub(crate) mod tests {
         let judged = judge_fail_arguments(&fail(I0, Some(&at))).expect("accepted");
         assert_eq!(judged.reason, at);
         assert_eq!(judged.work_order, I0);
+    }
+
+    const I3: &str = "8a4f5e6d-7182-4d9e-9fa0-2b3c4d5e6f70";
+
+    /// Escalation on, everything else at the defaults.
+    const ESCALATE: &str = "escalate_on_failure = true\n";
+
+    fn no_names() -> AcceptedNames {
+        AcceptedNames {
+            names: std::collections::BTreeSet::new(),
+            version: 0,
+        }
+    }
+
+    fn head_in(store: &SqliteStore, project: &ProjectId) -> u64 {
+        store.head(project).unwrap().map_or(0, |head| head.seq)
+    }
+
+    fn held(store: &SqliteStore, project: &ProjectId, id: &str) -> Option<Value> {
+        crate::work_order::read::order(store, project, id).unwrap()
+    }
+
+    fn b1_hash() -> Hash {
+        Hash(Sha256::digest(B1.as_bytes()).into())
+    }
+
+    /// Retries `parent` in `project` as order `id` through the retry's check
+    /// and issue, under `request_id` at `at`, with the global file `global`.
+    fn retry_in(
+        store: &SqliteStore,
+        project: &ProjectId,
+        parent: &str,
+        id: &str,
+        request_id: &str,
+        at: &str,
+        global: &str,
+    ) -> Value {
+        let checked = retry_check(store, project, parent).expect("the retry's check passes");
+        let command = crate::scope::fixtures::command_in(project, RETRY_COMMAND, request_id, 5, at);
+        issue_retry(
+            store,
+            &command,
+            &checked,
+            &policy(Some(global), ""),
+            Host::ClaudeCode,
+            &no_names(),
+            id,
+        )
+    }
+
+    fn assert_refused(refusal: &Value, code: &str, slot: &str, details: &Value) {
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], code, "{refusal}");
+        assert_eq!(refusal["slot"], slot, "{refusal}");
+        assert_eq!(&refusal["details"], details, "{refusal}");
+    }
+
+    #[test]
+    fn a_retry_stuck_at_its_attempt_escalated_from_pending_or_counted_twice_is_caught() {
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        issue_start(&store, &project(), I0, R1, T1);
+        fail_order(&store, &project(), I0, R2, T2);
+        let checked = retry_check(&store, &project(), I0).expect("I0 failed");
+        let command = command_in(&project(), RETRY_COMMAND, R3, 5, T3);
+        let escalating = policy(Some(ESCALATE), "");
+        let receipt = issue_retry(
+            &store,
+            &command,
+            &checked,
+            &escalating,
+            Host::ClaudeCode,
+            &no_names(),
+            I2,
+        );
+        assert_eq!(receipt["status"], "ok", "{receipt}");
+        assert_eq!(receipt["work_order"], I2, "{receipt}");
+        assert_eq!(receipt["request"], I0, "{receipt}");
+        assert_eq!(receipt["parent"], I0, "{receipt}");
+        assert_eq!(receipt["attempt"], 2, "{receipt}");
+        assert_eq!(receipt["agent"], "bal-planner-xhigh", "{receipt}");
+        let parent = held(&store, &project(), I0).unwrap();
+        let child = held(&store, &project(), I2).expect("I2 is held");
+        assert_eq!(child["request"], I0);
+        assert_eq!(child["parent"], I0);
+        assert_eq!(child["attempt"], 2);
+        assert_eq!(child["route"]["rung"], "xhigh");
+        assert_eq!(child["route"]["escalated"], true);
+        assert_eq!(child["inputs"], parent["inputs"]);
+
+        let before = head(&store);
+        let refusal = retry_check(&store, &project(), I2).unwrap_err();
+        assert_refused(
+            &refusal,
+            "work-order-not-failed",
+            "work_order",
+            &json!({"state": "pending"}),
+        );
+        assert_eq!(head(&store), before);
+
+        // The same retry again, offered another fresh id, is the recorded one.
+        let again = issue_retry(
+            &store,
+            &command,
+            &checked,
+            &escalating,
+            Host::ClaudeCode,
+            &no_names(),
+            I3,
+        );
+        assert_eq!(again, receipt);
+        let events = history(&store);
+        let children: Vec<_> = of_type(&events, "work_order.issued")
+            .into_iter()
+            .filter(|event| event.payload["parent"] == I0)
+            .collect();
+        assert_eq!(children.len(), 1);
+        assert_eq!(held(&store, &project(), I3), None);
+
+        answer_order(&store, &project(), I2, &m(), R6, T4);
+        issue_start(&store, &project(), I1, R5, T5);
+        let fresh = held(&store, &project(), I1).expect("I1 is held");
+        assert_eq!(fresh["attempt"], 1);
+        assert_eq!(fresh["request"], I1);
+        assert_eq!(fresh["parent"], Value::Null);
+    }
+
+    #[test]
+    fn a_retry_resolved_under_the_parents_policy_or_over_a_purged_input_is_caught() {
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        issue_start(&store, &project(), I0, R1, T1);
+        assert_eq!(
+            held(&store, &project(), I0).unwrap()["route"]["rung"],
+            "high"
+        );
+        fail_order(&store, &project(), I0, R2, T2);
+        let receipt = retry_in(
+            &store,
+            &project(),
+            I0,
+            I2,
+            R3,
+            T3,
+            "escalate_on_failure = false\n[roles.planner]\neffort = \"low\"\n",
+        );
+        assert_eq!(receipt["status"], "ok", "{receipt}");
+        let route = &held(&store, &project(), I2).expect("I2 is held")["route"];
+        assert_eq!(route["starting_rung"], "low", "{route}");
+        assert_eq!(route["rung"], "low", "{route}");
+        assert_eq!(route["escalated"], false, "{route}");
+
+        issue_start(&store, &project_b(), I1, R1, T1);
+        fail_order(&store, &project_b(), I1, R2, T2);
+        purge_in(&store, &project_b(), b1_hash(), "owner purge");
+        let before = head_in(&store, &project_b());
+        let refusal = retry_check(&store, &project_b(), I1).unwrap_err();
+        assert_refused(
+            &refusal,
+            "material-unavailable",
+            "work_order",
+            &json!({"input": "brief"}),
+        );
+        assert_eq!(head_in(&store, &project_b()), before);
+    }
+
+    #[test]
+    fn a_retry_of_an_order_already_retried_is_caught() {
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        issue_start(&store, &project(), I0, R1, T1);
+        fail_order(&store, &project(), I0, R2, T2);
+        let first = retry_in(&store, &project(), I0, I2, R3, T3, ESCALATE);
+        assert_eq!(first["status"], "ok", "{first}");
+        fail_order(&store, &project(), I2, R4, T4);
+        let before = head(&store);
+        let refusal = retry_check(&store, &project(), I0).unwrap_err();
+        assert_refused(
+            &refusal,
+            "work-order-retried",
+            "work_order",
+            &json!({"work_order": I2}),
+        );
+        assert_eq!(head(&store), before);
+
+        issue_start(&store, &project_b(), I1, R1, T1);
+        fail_order(&store, &project_b(), I1, R2, T2);
+        let first = retry_in(&store, &project_b(), I1, I3, R3, T3, ESCALATE);
+        assert_eq!(first["status"], "ok", "{first}");
+        answer_order(&store, &project_b(), I3, &m(), R4, T4);
+        let before = head_in(&store, &project_b());
+        let refusal = retry_check(&store, &project_b(), I1).unwrap_err();
+        assert_refused(
+            &refusal,
+            "work-order-retried",
+            "work_order",
+            &json!({"work_order": I3}),
+        );
+        assert_eq!(head_in(&store, &project_b()), before);
+    }
+
+    #[test]
+    fn a_retry_beside_a_pending_start_order_is_caught() {
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        issue_start(&store, &project_b(), I1, R1, T1);
+        fail_order(&store, &project_b(), I1, R2, T2);
+        issue_start(&store, &project_b(), I2, R5, T3);
+        let before = head_in(&store, &project_b());
+        let refusal = retry_check(&store, &project_b(), I1).unwrap_err();
+        assert_refused(
+            &refusal,
+            "start-order-pending",
+            "operation",
+            &json!({"work_order": I2}),
+        );
+        assert_eq!(head_in(&store, &project_b()), before);
+    }
+
+    #[test]
+    fn a_retry_recorded_over_a_purge_since_its_check_is_caught() {
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        issue_start(&store, &project(), I0, R1, T1);
+        fail_order(&store, &project(), I0, R2, T2);
+        issue_start(&store, &project_b(), I1, R1, T1);
+        let checked = retry_check(&store, &project(), I0).expect("I0 failed");
+        purge_in(&store, &project(), b1_hash(), "owner purge");
+        let command = command_in(&project(), RETRY_COMMAND, R3, 5, T3);
+        let answer = issue_retry(
+            &store,
+            &command,
+            &checked,
+            &policy(Some(ESCALATE), ""),
+            Host::ClaudeCode,
+            &no_names(),
+            I2,
+        );
+        assert_eq!(answer["status"], "failed", "{answer}");
+        assert_eq!(answer["code"], "ledger-busy", "{answer}");
+        assert_eq!(of_type(&history(&store), "work_order.issued").len(), 1);
+        assert_eq!(held(&store, &project(), I2), None);
+        assert_eq!(held(&store, &project(), I0).unwrap()["child"], Value::Null);
+
+        let refusal = retry_check(&store, &project(), I0).unwrap_err();
+        assert_refused(
+            &refusal,
+            "material-unavailable",
+            "work_order",
+            &json!({"input": "brief"}),
+        );
     }
 }

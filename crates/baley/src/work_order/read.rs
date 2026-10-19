@@ -265,6 +265,7 @@ mod tests {
             inputs,
             absences: &absences,
             streams: &[],
+            documents: &[],
             further: &further,
         };
         let command = command_in(project, "project.start", request_id, 1, at);
@@ -317,6 +318,7 @@ mod tests {
             inputs: &inputs,
             absences: &[],
             streams: &[],
+            documents: &[],
             further: &further,
         };
         let command = command_in(project, "project.start", id, 1, T1);

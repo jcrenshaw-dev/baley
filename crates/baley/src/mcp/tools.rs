@@ -382,8 +382,9 @@ mod tests {
         // and document take identity, all four take part, and capture takes
         // request_id, kind, text, phase and instruction, scope-submit and
         // each change operation take request_id and submission,
-        // project-start takes request_id, brief and instruction, and
-        // work-order-fail takes request_id, work_order, reason and instruction.
+        // project-start takes request_id, brief and instruction,
+        // work-order-fail takes request_id, work_order, reason and instruction,
+        // and work-order-retry takes request_id, work_order and instruction.
         let names = |tool| {
             let schema = input_schema(tool);
             let mut names: Vec<String> = schema["properties"]
@@ -462,6 +463,7 @@ mod tests {
             "scope-submit",
             "project-start",
             "work-order-fail",
+            "work-order-retry",
         ] {
             let sentence = format!("Taken by {taker} (required).");
             assert!(

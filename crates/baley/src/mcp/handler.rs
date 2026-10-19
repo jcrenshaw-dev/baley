@@ -8,9 +8,9 @@
 //! the operation with a [`Preparation`]: the caller the gate formed, the
 //! call's host, the session's ledger and the server's time. `capture`,
 //! `scope-submit`, the ten change operations from `project-describe` to
-//! `backlog-reorder`, `project-start`, `work-order-fail` and `document` set
-//! `needs_project`, and in their [`operate`] arms the writes prepare a write
-//! from it and `document` a read.
+//! `backlog-reorder`, `project-start`, `work-order-fail`, `work-order-retry`
+//! and `document` set `needs_project`, and in their [`operate`] arms the
+//! writes prepare a write from it and `document` a read.
 //! rmcp has already validated the request's metadata by the time any
 //! of this runs, so a protocol-required metadata error stays a protocol error
 //! and runs nothing.
@@ -185,6 +185,9 @@ fn operate(called: &Called, arguments: Option<&Value>, project: Option<&Preparat
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "work-order-fail" => {
             work_order::serve_fail(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation)) if spelling == "work-order-retry" => {
+            work_order::serve_retry(arguments_or_null, preparation)
         }
         (Called::Operation(_, spelling), Some(preparation))
             if scope::change_kind(spelling).is_some() =>
@@ -858,5 +861,47 @@ mod tests {
                 .contains(&answer["code"].as_str().unwrap()),
             "{answer}"
         );
+    }
+
+    #[test]
+    fn the_work_order_operations_left_unserved_by_operate_are_caught() {
+        let caller = ServerCaller::new(
+            "/real/r",
+            "/real/r",
+            "claude-code",
+            "0b7e4a52-3c1d-4f6a-8e9b-1a2b3c4d5e6f",
+            &json!(7),
+        )
+        .unwrap();
+        // No ledger, so a call that reached preparation would answer `failed`.
+        let preparation = Preparation {
+            ledger: None,
+            host: Host::ClaudeCode,
+            caller,
+            at: "2026-10-13T09:00:00Z".into(),
+        };
+        let order = "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+        let request_id = "9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f";
+        let fail = operate(
+            &Called::Operation(Tool::Apply, "work-order-fail".into()),
+            Some(
+                &json!({"operation": "work-order-fail", "request_id": request_id,
+                "work_order": order, "reason": " "}),
+            ),
+            Some(&preparation),
+        );
+        let retry = operate(
+            &Called::Operation(Tool::Apply, "work-order-retry".into()),
+            Some(
+                &json!({"operation": "work-order-retry", "request_id": request_id,
+                "work_order": order.to_uppercase()}),
+            ),
+            Some(&preparation),
+        );
+        for (answer, slot) in [(fail, "reason"), (retry, "work_order")] {
+            assert_eq!(answer["status"], "refused", "{answer}");
+            assert_eq!(answer["code"], "invalid-arguments", "{answer}");
+            assert_eq!(answer["slot"], slot, "{answer}");
+        }
     }
 }

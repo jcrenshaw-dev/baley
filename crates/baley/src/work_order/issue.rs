@@ -4,10 +4,10 @@
 //! caller prepared.
 //!
 //! The caller judges everything first and supplies what its judgement read:
-//! the facts that must still be absent and the stream versions it saw. The
-//! decision declares both, so an order recorded, a start approved or a
-//! stream moved since makes the store refuse the command as stale with
-//! nothing recorded.
+//! the facts that must still be absent, the stream versions it saw and the
+//! view documents it read. The decision declares all three, so an order
+//! recorded, a start approved, a stream moved or a read document changed
+//! since makes the store refuse the command as stale with nothing recorded.
 
 use baley_core::policy::Role;
 use baley_core::work_order::{
@@ -16,8 +16,8 @@ use baley_core::work_order::{
 };
 use baley_store::{
     Absence, Command, Decision, InstructionEvidence, KeyValue, Ledger, NewEvent, Observed,
-    OutcomeKind, Payloads, Recorded, Refusal as StoreRefusal, RetentionClass, StoreError,
-    StreamName,
+    ObservedDocument, OutcomeKind, Payloads, Recorded, Refusal as StoreRefusal, RetentionClass,
+    StoreError, StreamName,
 };
 use serde_json::{Map, Value, json};
 
@@ -64,6 +64,10 @@ pub struct Issue<'a> {
     pub absences: &'a [Absence],
     /// The stream versions the caller's judgement read.
     pub streams: &'a [(StreamName, u64)],
+    /// The view documents the caller's judgement read, at the sequence that
+    /// last produced each, so a change to any of them since makes the command
+    /// stale.
+    pub documents: &'a [ObservedDocument],
     /// Members the caller adds to the receipt, such as project start's
     /// `settings` and `existing_code` or a retry's `parent`.
     pub further: &'a Map<String, Value>,
@@ -183,6 +187,7 @@ pub fn record<L: Ledger + ?Sized>(
             sensitive: false,
             observed: Observed {
                 absences: issue.absences.to_vec(),
+                documents: issue.documents.to_vec(),
                 ..Observed::default()
             },
             git: None,
@@ -317,6 +322,7 @@ mod tests {
             inputs: &inputs,
             absences: &absences,
             streams: &[],
+            documents: &[],
             further,
         };
         let command = command_in(project, "project.start", request_id, 1, at);
