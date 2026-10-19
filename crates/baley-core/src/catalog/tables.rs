@@ -1,16 +1,25 @@
-//! The tables compiled into the binary: each host's aliases and the hint
-//! table (design 0003, CFG-R19 and CFG-R20).
+//! The tables compiled into the binary: each host's aliases, each host's rung
+//! map and the hint table (design 0003, CFG-R15, CFG-R19 and CFG-R20).
 
 use super::Provider::{DeepSeek, OpenAi};
 use super::Tier::{Balanced, Cheap, Flagship};
 use super::{Provider, Tier};
-use crate::policy::Host;
+use crate::policy::{Host, Rung, RungMap};
 
 /// The short names a host resolves itself. They live only here, never in the
 /// view, so a later binary's alias change reaches every catalog at once.
 pub fn host_aliases(host: Host) -> &'static [&'static str] {
     match host {
         Host::ClaudeCode => &["opus", "sonnet", "haiku", "fable"],
+    }
+}
+
+/// The host's own effort value for each rung. Claude Code's map is the
+/// identity: each rung runs as the Claude Code effort of the same name, so a
+/// rung's agent stub and its route name the same level.
+pub fn rung_map(host: Host) -> RungMap {
+    match host {
+        Host::ClaudeCode => RungMap::new(Rung::ALL.map(|rung| rung.name().to_owned())),
     }
 }
 

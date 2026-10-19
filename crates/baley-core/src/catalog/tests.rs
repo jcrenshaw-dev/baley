@@ -64,6 +64,17 @@ fn claude_code_has_exactly_its_four_aliases() {
 }
 
 #[test]
+fn a_claude_code_rung_run_as_another_effort_is_caught() {
+    use crate::policy::Rung;
+    let map = rung_map(Host::ClaudeCode);
+    let efforts: Vec<&str> = [Rung::Low, Rung::Medium, Rung::High, Rung::Xhigh, Rung::Max]
+        .into_iter()
+        .map(|rung| map.host_effort(rung))
+        .collect();
+    assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max"]);
+}
+
+#[test]
 fn no_two_exact_hint_rows_give_one_id_two_tiers() {
     let mut seen = BTreeSet::new();
     for row in EXACT_HINTS {
