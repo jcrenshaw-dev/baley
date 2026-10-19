@@ -1,5 +1,7 @@
-//! A checkout's facts read through git: its root commit and its remote URL (design 0001 Project identity and policy, EVD-R17). Git's messages are
-//! translated, so only exit codes classify a result.
+//! A checkout's facts read through git: its root commit and its remote URL
+//! (design 0001 Project identity and policy, EVD-R17), and the file names
+//! HEAD tracks, which project start judges for existing code (D-20). Git's
+//! messages are translated, so only exit codes classify a result.
 
 use std::path::Path;
 
@@ -61,6 +63,61 @@ fn smallest_root(launch: &Launch, ran: Ran) -> Result<String, String> {
         smallest = Some(smallest.map_or(line, |kept| kept.min(line)));
     }
     smallest.map(str::to_string).ok_or_else(unreadable)
+}
+
+/// The bytes kept of HEAD's tree listing: two paths of the longest length a
+/// path takes. One name besides the project file is all the judge needs.
+const LISTING_LIMIT: usize = 8_192;
+
+/// HEAD's tracked file names, as `ls-tree` lists them from the root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listing {
+    /// The names in the output, each relative to the root. A cut output's last
+    /// name may be cut too.
+    pub names: Vec<String>,
+    /// False when the output was longer than the bytes kept.
+    pub whole: bool,
+}
+
+/// Lists the files HEAD's tree tracks, read from the root of the repository at
+/// `root` whatever folder the project file is in. Run only when HEAD has a
+/// root commit. A git that fails or does not finish is a refusal text naming
+/// the command.
+pub fn tracked_files(root: &Path, process: &mut dyn Process) -> Result<Listing, String> {
+    let launch = git(
+        root,
+        &["ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD"],
+    )
+    .limit(LISTING_LIMIT);
+    let output = finished(&launch, git_process::run(&launch, process))?;
+    if !output.success() {
+        return Err(failed(&launch, &output));
+    }
+    // A name that is not UTF-8 still differs from the project file's, which
+    // is all the judge asks of it.
+    let names = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect();
+    Ok(Listing {
+        names,
+        whole: output.stdout_complete,
+    })
+}
+
+/// Whether the checkout holds existing code, so a start order includes the
+/// survey (D-20, PRJ-R1): HEAD has a root commit and its tree tracks a file
+/// besides the project file, whose path relative to the root is
+/// `project_file`. A cut listing counts, since it holds more than one name.
+pub fn holds_existing_code(
+    root_commit: Option<&str>,
+    listing: &Listing,
+    project_file: &str,
+) -> bool {
+    root_commit.is_some()
+        && (!listing.whole || listing.names.iter().any(|name| name != project_file))
 }
 
 /// A lower-case hex object id of either hash length.
@@ -351,5 +408,82 @@ mod tests {
                 .unwrap_err()
                 .contains("incomplete")
         );
+    }
+
+    fn listing(names: &[&str], whole: bool) -> Listing {
+        Listing {
+            names: names.iter().map(|name| (*name).to_string()).collect(),
+            whole,
+        }
+    }
+
+    #[test]
+    fn a_tree_listing_asked_another_way_or_read_past_a_failure_is_caught() {
+        let mut fake = Recorded::new().out("baley.toml\0src/main.rs\0");
+        let listed = tracked_files(Path::new(ROOT), &mut fake).unwrap();
+        assert_eq!(listed, listing(&["baley.toml", "src/main.rs"], true));
+        let [launch] = fake.launches() else {
+            panic!("one launch, got {:?}", fake.launches());
+        };
+        assert_eq!(launch.git_caller(), Some(Caller::CheckoutFacts));
+        assert_eq!(launch.cwd.as_deref(), Some(Path::new(ROOT)));
+        assert_eq!(launch.limit, 8_192);
+        assert_eq!(
+            fake.arguments(),
+            [["ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD"]]
+        );
+
+        let mut fake = Recorded::new().fail(128, "fatal: not a tree object\n");
+        let refusal = tracked_files(Path::new(ROOT), &mut fake).unwrap_err();
+        assert_eq!(
+            refusal,
+            "git ls-tree -r -z --name-only --full-tree HEAD exited with code 128: \
+             fatal: not a tree object"
+        );
+
+        let mut cut = Output::exited(0, "baley.toml\0src/ma", "");
+        cut.stdout_complete = false;
+        let mut fake = Recorded::new().answer(cut);
+        let listed = tracked_files(Path::new(ROOT), &mut fake).unwrap();
+        assert!(!listed.whole, "{listed:?}");
+    }
+
+    #[test]
+    fn a_checkout_read_as_holding_code_with_no_commit_or_only_the_project_file_is_caught() {
+        let cases = [
+            (None, listing(&["src/main.rs"], true), "baley.toml"),
+            (Some(A), listing(&["baley.toml"], true), "baley.toml"),
+            (
+                Some(A),
+                listing(&["app/baley.toml"], true),
+                "app/baley.toml",
+            ),
+            (Some(A), listing(&[], true), "baley.toml"),
+        ];
+        for (root, listed, file) in cases {
+            assert!(
+                !holds_existing_code(root, &listed, file),
+                "{root:?} {listed:?} {file}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_checkout_holding_code_read_as_empty_is_caught() {
+        let cases = [
+            (listing(&["baley.toml", "src/main.rs"], true), "baley.toml"),
+            (listing(&["README.md"], true), "baley.toml"),
+            (listing(&["baley.toml"], false), "baley.toml"),
+            (
+                listing(&["app/baley.toml", "baley.toml"], true),
+                "app/baley.toml",
+            ),
+        ];
+        for (listed, file) in cases {
+            assert!(
+                holds_existing_code(Some(A), &listed, file),
+                "{listed:?} {file}"
+            );
+        }
     }
 }

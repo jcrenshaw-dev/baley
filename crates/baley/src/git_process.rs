@@ -33,7 +33,9 @@ pub enum Caller {
     AnchorForge,
     /// HEAD's copy of the project file.
     ProjectHead,
-    /// A checkout's root commit and remote URL, read for checkout admission.
+    /// A checkout's root commit and remote URL, read for checkout admission,
+    /// and HEAD's tracked file names, read by project start to tell whether
+    /// the checkout holds existing code.
     CheckoutFacts,
     /// The owner's name, `git config --get user.name`, read as the identity
     /// on a provider acknowledgement.

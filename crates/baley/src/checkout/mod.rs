@@ -1,7 +1,8 @@
 //! Checkout admission and the facts it judges (design 0001 Project identity
 //! and policy, EVD-R17, ADR 0004). The module gathers a checkout's root
 //! commit and remote URL through git and runs checkout admission against the
-//! project's `checkout` view.
+//! project's `checkout` view. It also lists the files HEAD tracks, for the
+//! existing-code judgement project start makes.
 
 mod admit;
 mod gather;
@@ -15,7 +16,7 @@ use baley_core::policy::EffectivePolicy;
 use baley_store::{Caller, Ledger, ProjectId, RequestId, StoreError, Views};
 
 pub use admit::{ADMIT_COMMAND, AdmitError, admit};
-pub use gather::{Facts, gather, root_commit};
+pub use gather::{Facts, Listing, gather, holds_existing_code, root_commit, tracked_files};
 pub use strip::{redact_git_text, strip_user_information};
 
 use crate::process::Process;
