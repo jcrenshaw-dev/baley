@@ -460,6 +460,7 @@ fn admit_checkout(store: &SqliteStore, project: &ProjectId, site: &Site<'_>) -> 
         &SystemClock::now(),
         None,
     )
+    .map(drop)
     .map_err(|e| display::entry_error(&e, &project.0))
 }
 

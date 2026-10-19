@@ -77,7 +77,8 @@ pub(crate) struct Site<'a> {
 /// Gathers the facts of `site` and admits it under `project`, for the callers
 /// that do both at once: the ledger commands, `purge`, `config set` and the
 /// session server's write preparation. It prints nothing, and it runs before
-/// the policy step.
+/// the policy step. It returns the facts it admitted, so the server's project
+/// start can classify the checkout from the root commit without a second read.
 ///
 /// `caller` goes to checkout admission unchanged. For the server, `site.policy`
 /// is the policy that names no host, so the remote is the command line's, and
@@ -90,14 +91,15 @@ pub(crate) fn gather_and_admit(
     request_id: RequestId,
     at: &str,
     caller: Option<Caller>,
-) -> Result<(), EntryError> {
+) -> Result<Facts, EntryError> {
     let facts = gather(site.root, site.policy, process).map_err(EntryError::Gather)?;
     let checkout = Checkout {
         path: site.path.into(),
-        root_commit: facts.root_commit,
-        remote_url: facts.remote_url,
+        root_commit: facts.root_commit.clone(),
+        remote_url: facts.remote_url.clone(),
     };
-    admit(store, project, &checkout, request_id, at, caller).map_err(EntryError::Admit)
+    admit(store, project, &checkout, request_id, at, caller).map_err(EntryError::Admit)?;
+    Ok(facts)
 }
 
 #[cfg(test)]
