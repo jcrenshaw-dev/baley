@@ -1,19 +1,25 @@
 //! The work-order operations on `baley_apply` (design 0004 section 4,
 //! design 0012). `project-start` records one `work_order.issued` for the
 //! start planner on the `roadmap` stream, with the brief as a `record`
-//! payload, after the arguments, the start check and preparation pass. A
+//! payload, after the arguments, the start check and preparation pass.
+//! `work-order-fail` records one `work_order.failed` for a pending order a
+//! session reports could not launch or returned without a valid result. A
 //! refusal records nothing.
 
+use std::cell::RefCell;
 use std::num::NonZeroU32;
 use std::path::Path;
 
 use baley_core::capture::is_blank;
 use baley_core::policy::{EffectivePolicy, Layer, Role};
-use baley_core::work_order::{START_ORDER_PENDING, START_SUBJECT};
-use baley_store::{
-    CommandKind, Hash, InstructionEvidence, Ledger, ProjectId, RequestId, ServerCaller, Views,
-    request_digest,
+use baley_core::work_order::{
+    NO_SUCH_WORK_ORDER, PENDING, START_ORDER_PENDING, START_SUBJECT, WORK_ORDER_NOT_PENDING,
 };
+use baley_store::{
+    Command, CommandKind, Hash, InstructionEvidence, Ledger, ProjectId, RequestId, ServerCaller,
+    Views, request_digest,
+};
+use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -31,8 +37,9 @@ use crate::mcp::prepare::{
 };
 use crate::process::Process;
 use crate::scope::submit::{NOT_RECORDED_BUSY, start_once};
+use crate::work_order::fail::{self, Pending};
 use crate::work_order::issue::{self, Input, Issue, start_absences};
-use crate::work_order::read::pending_start;
+use crate::work_order::read::{order_document, pending_start};
 use crate::work_order::route::{compose, host_names};
 
 /// The command kind a project start is recorded under.
@@ -92,27 +99,9 @@ pub struct JudgedStart {
 pub fn judge_start_arguments(arguments: &Value) -> Result<JudgedStart, Value> {
     let shape = match serde_json::from_value::<StartCall>(arguments.clone()) {
         Ok(StartCall::Start(shape)) => shape,
-        Err(error) => {
-            return Err(
-                Refusal::new("invalid-arguments", bounded(error.to_string()))
-                    .slot("arguments")
-                    .value(),
-            );
-        }
+        Err(error) => return Err(shape_fault(&error)),
     };
-    // One spelling per id, so a retry cannot miss its replay by changing
-    // case or wrapping.
-    let canonical = uuid::Uuid::parse_str(&shape.request_id)
-        .map(|parsed| parsed.hyphenated().to_string())
-        .ok();
-    if canonical.as_deref() != Some(shape.request_id.as_str()) {
-        return Err(Refusal::new(
-            "invalid-arguments",
-            "request_id must be a UUID in lowercase hyphenated form, such as 9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f. A retry of the same start sends the same id",
-        )
-        .slot("request_id")
-        .value());
-    }
+    judge_request_id(&shape.request_id, "start")?;
     if is_blank(&shape.brief) {
         return Err(Refusal::new(
             BRIEF_BLANK,
@@ -132,20 +121,7 @@ pub fn judge_start_arguments(arguments: &Value) -> Result<JudgedStart, Value> {
         .slot("brief")
         .value());
     }
-    let instruction = match shape
-        .instruction
-        .as_deref()
-        .map(crate::instruction::evidence)
-    {
-        None => None,
-        Some(Ok(evidence)) => Some(evidence),
-        // The registry's refusal names its read's `identity` argument; here
-        // the session sent the identity as `instruction`.
-        Some(Err(mut refusal)) => {
-            refusal["slot"] = json!("instruction");
-            return Err(refusal);
-        }
-    };
+    let instruction = judge_instruction(shape.instruction.as_deref())?;
     // The brief's hash stands for it, so the same brief under the same id
     // replays and another brief is a reused id.
     let brief = Hash(Sha256::digest(shape.brief.as_bytes()).into());
@@ -360,6 +336,280 @@ fn evidenced(caller: &ServerCaller, instruction: Option<&InstructionEvidence>) -
             .clone()
             .with_instructions(vec![evidence.clone()])
             .expect("one entry is within the caller's instruction limit"),
+    }
+}
+
+/// The command kind a work order's failure is recorded under.
+pub const FAIL_COMMAND: &str = "work_order.fail";
+
+/// The most bytes of UTF-8 a failure's reason may hold.
+pub const MAX_REASON_BYTES: usize = 4_096;
+
+// `schema` serves this same declaration, so its doc comments are wire text.
+/// The arguments `work-order-fail` takes beside its `operation`. Unknown
+/// fields are refused.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FailShape {
+    /// A fresh UUID for this report in lowercase hyphenated form. A retry of
+    /// the same report sends the same id.
+    pub request_id: String,
+    /// The id of the work order whose worker could not launch or returned
+    /// without a valid result, as the order's receipt gave it.
+    pub work_order: String,
+    /// Why the order failed, in plain words. It must not be blank, and it
+    /// holds at most 4096 bytes of UTF-8.
+    pub reason: String,
+    /// The identity of the instruction the session followed, if it followed
+    /// one.
+    pub instruction: Option<String>,
+}
+
+/// The tagged form `work-order-fail`'s arguments arrive in.
+#[derive(Deserialize)]
+#[serde(tag = "operation")]
+enum FailCall {
+    #[serde(rename = "work-order-fail")]
+    Fail(FailShape),
+}
+
+/// A failure report whose arguments passed every check made before
+/// preparation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JudgedFail {
+    /// The write preparation carries into the domain command.
+    pub request: WriteRequest,
+    /// The failed order's id.
+    pub work_order: String,
+    /// Why it failed, as sent.
+    pub reason: String,
+    /// The registry's evidence for the instruction the session named, if any.
+    pub instruction: Option<InstructionEvidence>,
+}
+
+/// Judges `work-order-fail`'s arguments before anything is prepared or
+/// recorded: the shape, then the request id, the order id, the reason and
+/// the instruction, in that order. A fault is the `refused` answer, which
+/// records nothing.
+pub fn judge_fail_arguments(arguments: &Value) -> Result<JudgedFail, Value> {
+    let shape = match serde_json::from_value::<FailCall>(arguments.clone()) {
+        Ok(FailCall::Fail(shape)) => shape,
+        Err(error) => return Err(shape_fault(&error)),
+    };
+    judge_request_id(&shape.request_id, "report")?;
+    judge_order_id(&shape.work_order)?;
+    if is_blank(&shape.reason) {
+        return Err(Refusal::new(
+            "invalid-arguments",
+            "the reason is empty or only whitespace, so nothing was recorded. Say why the worker could not launch or returned without a valid result",
+        )
+        .slot("reason")
+        .value());
+    }
+    let size = shape.reason.len();
+    if size > MAX_REASON_BYTES {
+        return Err(Refusal::new(
+            "invalid-arguments",
+            format!(
+                "the reason is {size} bytes of UTF-8, over the limit of {MAX_REASON_BYTES} bytes, so nothing was recorded. Send a shorter reason"
+            ),
+        )
+        .slot("reason")
+        .value());
+    }
+    let instruction = judge_instruction(shape.instruction.as_deref())?;
+    let digest = request_digest(
+        &json!({"command": FAIL_COMMAND, "work_order": shape.work_order,
+        "reason": shape.reason}),
+    )
+    .expect("text is canonical");
+    Ok(JudgedFail {
+        request: WriteRequest {
+            kind: CommandKind(FAIL_COMMAND.into()),
+            request_id: RequestId(shape.request_id),
+            digest,
+        },
+        work_order: shape.work_order,
+        reason: shape.reason,
+        instruction,
+    })
+}
+
+/// The refusal for an order id this project's `work_order` view does not
+/// hold. It echoes none of the id.
+fn no_such_order() -> Value {
+    Refusal::new(
+        NO_SUCH_WORK_ORDER,
+        "this project holds no work order with that id, so nothing was recorded",
+    )
+    .slot("work_order")
+    .value()
+}
+
+/// A failure's check, run by preparation before admission and recording
+/// nothing: the order by id, none `no-such-work-order`, and one that is not
+/// pending `work-order-not-pending`, naming its state. A pass gives back
+/// what the recording observes.
+pub fn fail_check<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    id: &str,
+) -> Result<Pending, Value> {
+    let document = order_document(store, project, id)
+        .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?
+        .ok_or_else(no_such_order)?;
+    let text = |name: &str| document.body.get(name).and_then(Value::as_str);
+    let (Some(state), Some(subject)) = (text("state"), text("subject")) else {
+        return Err(order_unreadable());
+    };
+    if state != PENDING {
+        return Err(Refusal::new(
+            WORK_ORDER_NOT_PENDING,
+            format!(
+                "work order {id} is {state}, so no failure was recorded. A failed order is retried with `work-order-retry`, and an answered one has already returned"
+            ),
+        )
+        .slot("work_order")
+        .details(json!({"state": state}))
+        .value());
+    }
+    Ok(Pending {
+        id: id.into(),
+        subject: subject.into(),
+        produced_seq: document.produced_seq,
+    })
+}
+
+fn order_unreadable() -> Value {
+    failed(
+        LEDGER_UNAVAILABLE,
+        "the work order is recorded, but its view document cannot be read",
+        PLACE_LEDGER,
+    )
+}
+
+/// Serves one `work-order-fail` call for the session's `preparation`
+/// (decision 2: a session reports a failure, nothing infers one). The
+/// arguments are judged first; then the write is prepared under the caller
+/// with the instruction evidence attached and [`fail_check`] as its check,
+/// and the failure is recorded over the order the check read. A replay goes
+/// to the recording with no read, and the store answers it from its record.
+pub fn serve_fail(arguments: &Value, preparation: &Preparation) -> Value {
+    let judged = match judge_fail_arguments(arguments) {
+        Ok(judged) => judged,
+        Err(refusal) => return refusal,
+    };
+    // Kept for the recording to observe. A replay skips the check.
+    let kept = RefCell::new(None);
+    let check = |store: &SqliteStore, project: &ProjectId| {
+        *kept.borrow_mut() = Some(fail_check(store, project, &judged.work_order)?);
+        Ok(())
+    };
+    let caller = evidenced(&preparation.caller, judged.instruction.as_ref());
+    match prepared_write(preparation, &caller, &judged.request, &check) {
+        Ok((store, command, _)) => issue::answer(
+            fail::record(store, &command, &judged.reason, kept.borrow().as_ref()),
+            store,
+        ),
+        Err(answer) => answer,
+    }
+}
+
+/// Prepares a work-order write for the session under `caller` with `check`
+/// as its own check, asked against the session's ledger. It gives the
+/// ledger, the command to record under and what the write's steps found, or
+/// the answer preparation ended with.
+fn prepared_write<'a>(
+    preparation: &'a Preparation,
+    caller: &ServerCaller,
+    request: &WriteRequest,
+    check: &dyn Fn(&SqliteStore, &ProjectId) -> Result<(), Value>,
+) -> Result<(&'a SqliteStore, Command, Option<Stepped>), Value> {
+    let ledger = preparation.ledger.as_deref();
+    // With no ledger, preparation fails at the project check, before any
+    // settings are read from the config folder or the check is asked.
+    let config = ledger.map_or(Path::new(""), |ledger| ledger.config.as_path());
+    let check = |project: &ProjectId| match ledger {
+        Some(ledger) => check(&ledger.store, project),
+        None => Err(failed(
+            LEDGER_UNAVAILABLE,
+            "the write was checked without a ledger",
+            PLACE_LEDGER,
+        )),
+    };
+    let prepared = prepare_checked(
+        ledger.map(|ledger| &ledger.store),
+        caller,
+        request,
+        config,
+        preparation.host,
+        &preparation.at,
+        &mut crate::process::System,
+        &check,
+    )?;
+    match (ledger, prepared.command) {
+        (Some(ledger), Some(command)) => Ok((&ledger.store, command, prepared.stepped)),
+        _ => Err(failed(
+            LEDGER_UNAVAILABLE,
+            "the write was prepared without a ledger or a command",
+            PLACE_LEDGER,
+        )),
+    }
+}
+
+/// The `invalid-arguments` answer for a shape fault, at slot `arguments`.
+fn shape_fault(error: &serde_json::Error) -> Value {
+    Refusal::new("invalid-arguments", bounded(error.to_string()))
+        .slot("arguments")
+        .value()
+}
+
+/// Whether `text` is a UUID in its one lowercase hyphenated spelling.
+fn lowercase_uuid(text: &str) -> bool {
+    uuid::Uuid::parse_str(text).is_ok_and(|parsed| parsed.hyphenated().to_string() == text)
+}
+
+/// Refuses a request id that is not a lowercase UUID, so a retry of the same
+/// `call` cannot miss its replay by changing case or wrapping.
+fn judge_request_id(request_id: &str, call: &str) -> Result<(), Value> {
+    if lowercase_uuid(request_id) {
+        return Ok(());
+    }
+    Err(Refusal::new(
+        "invalid-arguments",
+        format!(
+            "request_id must be a UUID in lowercase hyphenated form, such as 9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f. A retry of the same {call} sends the same id"
+        ),
+    )
+    .slot("request_id")
+    .value())
+}
+
+/// Refuses an order id that is not a lowercase UUID, the one spelling an
+/// order's receipt gives, so no read can miss the order it names.
+fn judge_order_id(id: &str) -> Result<(), Value> {
+    if lowercase_uuid(id) {
+        return Ok(());
+    }
+    Err(Refusal::new(
+        "invalid-arguments",
+        "work_order must be the order's id as its receipt gives it, a UUID in lowercase hyphenated form",
+    )
+    .slot("work_order")
+    .value())
+}
+
+/// The registry's evidence for the instruction a session named, if any.
+fn judge_instruction(identity: Option<&str>) -> Result<Option<InstructionEvidence>, Value> {
+    match identity.map(crate::instruction::evidence) {
+        None => Ok(None),
+        Some(Ok(evidence)) => Ok(Some(evidence)),
+        // The registry's refusal names its read's `identity` argument; here
+        // the session sent the identity as `instruction`.
+        Some(Err(mut refusal)) => {
+            refusal["slot"] = json!("instruction");
+            Err(refusal)
+        }
     }
 }
 
@@ -601,5 +851,110 @@ pub(crate) mod tests {
             }],
         );
         assert_eq!(start_check(&store, &project()), Ok(()));
+    }
+
+    pub(crate) const I1: &str = "6e2d3c4b-5f60-4b7c-9d8e-0f1a2b3c4d5e";
+    pub(crate) const I2: &str = "7f3e4d5c-6071-4c8d-8e9f-1a2b3c4d5e6f";
+
+    /// Records the failure of `id` in `project` through the failure's check
+    /// and recording, under `request_id` at `at`.
+    pub(crate) fn fail_order(
+        store: &baley_store_sqlite::SqliteStore,
+        project: &ProjectId,
+        id: &str,
+        request_id: &str,
+        at: &str,
+    ) {
+        let kept = fail_check(store, project, id).unwrap();
+        let command = crate::scope::fixtures::command_in(project, FAIL_COMMAND, request_id, 4, at);
+        let answer = issue::answer(
+            fail::record(store, &command, "the worker stopped", Some(&kept)),
+            store,
+        );
+        assert_eq!(answer["status"], "ok", "{answer}");
+    }
+
+    /// Records `value` as a start submission in `project` answering order
+    /// `id`, under `request_id` at `at`.
+    pub(crate) fn answer_order(
+        store: &baley_store_sqlite::SqliteStore,
+        project: &ProjectId,
+        id: &str,
+        value: &Value,
+        request_id: &str,
+        at: &str,
+    ) {
+        use baley_core::scope::judge_submission;
+        use baley_store::Caller;
+
+        use crate::scope::fixtures::{caller, command_in};
+        let mut command = command_in(
+            project,
+            crate::scope::submit::SUBMIT_COMMAND,
+            request_id,
+            2,
+            at,
+        );
+        command.caller = Some(Caller::Server(caller().with_work_order(id).unwrap()));
+        crate::scope::submit::record(store, &command, &judge_submission(value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_failure_recorded_for_an_unknown_or_settled_order_is_caught() {
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        issue_start(&store, &project(), I0, R1, T1);
+        fail_order(&store, &project(), I0, R2, T2);
+        issue_start(&store, &project(), I2, R3, T3);
+        answer_order(&store, &project(), I2, &m(), R4, T4);
+
+        for (id, code, details) in [
+            (I1, "no-such-work-order", Value::Null),
+            (I0, "work-order-not-pending", json!({"state": "failed"})),
+            (I2, "work-order-not-pending", json!({"state": "answered"})),
+        ] {
+            let before = head(&store);
+            let refusal = fail_check(&store, &project(), id).unwrap_err();
+            assert_eq!(refusal["status"], "refused", "{refusal}");
+            assert_eq!(refusal["code"], code, "{refusal}");
+            assert_eq!(refusal["slot"], "work_order", "{refusal}");
+            if !details.is_null() {
+                assert_eq!(refusal["details"], details, "{refusal}");
+            }
+            assert_eq!(head(&store), before);
+        }
+    }
+
+    fn fail(work_order: &str, reason: Option<&str>) -> Value {
+        let mut arguments = json!({"operation": "work-order-fail", "request_id": R1,
+            "work_order": work_order});
+        if let Some(reason) = reason {
+            arguments["reason"] = json!(reason);
+        }
+        arguments
+    }
+
+    #[test]
+    fn a_failure_reason_blank_oversized_or_an_order_id_in_another_form_accepted_is_caught() {
+        let over = "x".repeat(4_097);
+        let at = "x".repeat(4_096);
+        for (arguments, slot) in [
+            (fail(I0, Some("  ")), "reason"),
+            (fail(I0, Some(&over)), "reason"),
+            (
+                fail(&I0.to_uppercase(), Some("the worker stopped")),
+                "work_order",
+            ),
+            (fail(I0, None), "arguments"),
+        ] {
+            let refusal = judge_fail_arguments(&arguments).expect_err("refused");
+            assert_eq!(refusal["status"], "refused", "{arguments}");
+            assert_eq!(refusal["code"], "invalid-arguments", "{refusal}");
+            assert_eq!(refusal["slot"], slot, "{refusal}");
+        }
+        let judged = judge_fail_arguments(&fail(I0, Some(&at))).expect("accepted");
+        assert_eq!(judged.reason, at);
+        assert_eq!(judged.work_order, I0);
     }
 }

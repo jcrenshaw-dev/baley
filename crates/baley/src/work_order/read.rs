@@ -10,7 +10,7 @@ use baley_core::work_order::{
     PENDING, START_SUBJECT, WORK_ORDER_LIVE_INDEX, WORK_ORDER_VIEW, work_order_key,
 };
 use baley_store::{
-    EVENT_PAGE_BOUND, Hash, HistoryFilter, IndexQuery, KeyValue, Ledger, PAYLOAD_PURGED,
+    Document, EVENT_PAGE_BOUND, Hash, HistoryFilter, IndexQuery, KeyValue, Ledger, PAYLOAD_PURGED,
     PageRequest, ProjectId, PurgedEvent, RETENTION_STREAM, StoreError, StreamName, Views,
 };
 use serde_json::{Value, json};
@@ -22,9 +22,17 @@ pub fn order<S: Views + ?Sized>(
     project: &ProjectId,
     id: &str,
 ) -> Result<Option<Value>, StoreError> {
-    store
-        .get(project, WORK_ORDER_VIEW, &work_order_key(id))
-        .map(|found| found.map(|document| document.body))
+    order_document(store, project, id).map(|found| found.map(|document| document.body))
+}
+
+/// The view document of order `id` in `project` with the sequence that last
+/// produced it, so a decision can observe it unchanged, or `None`.
+pub fn order_document<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    id: &str,
+) -> Result<Option<Document>, StoreError> {
+    store.get(project, WORK_ORDER_VIEW, &work_order_key(id))
 }
 
 /// The pending start planner order of `project`, the newest the `live`

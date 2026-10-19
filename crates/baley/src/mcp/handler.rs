@@ -8,9 +8,9 @@
 //! the operation with a [`Preparation`]: the caller the gate formed, the
 //! call's host, the session's ledger and the server's time. `capture`,
 //! `scope-submit`, the ten change operations from `project-describe` to
-//! `backlog-reorder`, `project-start` and `document` set `needs_project`,
-//! and in their [`operate`] arms the writes prepare a write from it and
-//! `document` a read.
+//! `backlog-reorder`, `project-start`, `work-order-fail` and `document` set
+//! `needs_project`, and in their [`operate`] arms the writes prepare a write
+//! from it and `document` a read.
 //! rmcp has already validated the request's metadata by the time any
 //! of this runs, so a protocol-required metadata error stays a protocol error
 //! and runs nothing.
@@ -182,6 +182,9 @@ fn operate(called: &Called, arguments: Option<&Value>, project: Option<&Preparat
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "project-start" => {
             work_order::serve_start(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation)) if spelling == "work-order-fail" => {
+            work_order::serve_fail(arguments_or_null, preparation)
         }
         (Called::Operation(_, spelling), Some(preparation))
             if scope::change_kind(spelling).is_some() =>

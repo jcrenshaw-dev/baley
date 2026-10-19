@@ -207,6 +207,7 @@ pub const APPLY_OPERATIONS: &[Operation] = &[
     with_project("story-drop"),
     with_project("backlog-reorder"),
     with_project("project-start"),
+    with_project("work-order-fail"),
 ];
 
 /// A spelling served only from a project, which its call prepares.
@@ -364,6 +365,9 @@ enum RequestShape {
     // `project-start` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "project-start")]
     ProjectStart(#[allow(dead_code)] crate::mcp::work_order::StartShape),
+    // `work-order-fail` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "work-order-fail")]
+    WorkOrderFail(#[allow(dead_code)] crate::mcp::work_order::FailShape),
 }
 
 fn invalid_arguments(reason: impl Into<String>) -> Value {
@@ -640,6 +644,7 @@ pub(crate) mod expected {
         "story-drop",
         "backlog-reorder",
         "project-start",
+        "work-order-fail",
     ];
 }
 
@@ -704,6 +709,7 @@ mod tests {
                     "story-drop",
                     "backlog-reorder",
                     "project-start",
+                    "work-order-fail",
                 ]
                 .contains(n)
             }) {
@@ -738,6 +744,7 @@ mod tests {
             "story-drop",
             "backlog-reorder",
             "project-start",
+            "work-order-fail",
         ] {
             assert_eq!(
                 lookup(Tool::Apply, Some(name)),
@@ -1237,8 +1244,11 @@ mod tests {
                 needs_project: true
             }
         );
+        let names: Vec<&str> = APPLY_OPERATIONS.iter().map(|op| op.name).collect();
+        let at = names.iter().position(|name| *name == "work-order-fail");
         assert_eq!(
-            APPLY_OPERATIONS.last().map(|op| op.name),
+            at.and_then(|at| at.checked_sub(1))
+                .map(|before| names[before]),
             Some("project-start")
         );
         let served =

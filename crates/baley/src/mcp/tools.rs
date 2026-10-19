@@ -381,8 +381,9 @@ mod tests {
         // Design 0012: help takes name, schema takes tool and for, instruction
         // and document take identity, all four take part, and capture takes
         // request_id, kind, text, phase and instruction, scope-submit and
-        // each change operation take request_id and submission, and
-        // project-start takes request_id, brief and instruction.
+        // each change operation take request_id and submission,
+        // project-start takes request_id, brief and instruction, and
+        // work-order-fail takes request_id, work_order, reason and instruction.
         let names = |tool| {
             let schema = input_schema(tool);
             let mut names: Vec<String> = schema["properties"]
@@ -406,9 +407,11 @@ mod tests {
                 "kind",
                 "operation",
                 "phase",
+                "reason",
                 "request_id",
                 "submission",
-                "text"
+                "text",
+                "work_order"
             ]
         );
     }
@@ -454,7 +457,12 @@ mod tests {
             .iter()
             .map(description)
             .collect();
-        for taker in ["capture", "scope-submit", "project-start"] {
+        for taker in [
+            "capture",
+            "scope-submit",
+            "project-start",
+            "work-order-fail",
+        ] {
             let sentence = format!("Taken by {taker} (required).");
             assert!(
                 request_ids.iter().any(|d| d.ends_with(&sentence)),
