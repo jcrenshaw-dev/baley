@@ -1,10 +1,11 @@
 //! The retry judge: whether a work order may be retried, and what the retry
 //! re-issues (design 0003 section 6, CFG-R16).
 //!
-//! Only a failed order nobody answered and nobody retried may be retried, so
-//! pending work is never escalated, a return ends its chain, and a session
-//! retries only the newest attempt of a chain. The retry keeps the parent's
-//! role, subject and inputs and counts one attempt more.
+//! Only a failed order nobody retried may be retried, and only while no
+//! submission has named it or any earlier attempt of its chain, so pending
+//! work is never escalated, an answer to any attempt of a chain ends it, and a
+//! session retries only the newest attempt of a chain. The retry keeps the
+//! parent's role, subject and inputs and counts one attempt more.
 //!
 //! The judge reads no policy: the binary resolves the route again under the
 //! current policy with the new attempt. It never sees a replay either, since
@@ -24,7 +25,8 @@ pub const NO_SUCH_WORK_ORDER: &str = "no-such-work-order";
 /// The code of a failure recorded for an order that is not pending.
 pub const WORK_ORDER_NOT_PENDING: &str = "work-order-not-pending";
 /// The code of a retry of an order that is pending or answered, or that
-/// failed after a submission named it.
+/// failed after a submission named it or any earlier attempt of its chain,
+/// since an answer to any attempt of a chain ends it.
 pub const WORK_ORDER_NOT_FAILED: &str = "work-order-not-failed";
 /// The code of a retry of an order already retried; it names the retry.
 pub const WORK_ORDER_RETRIED: &str = "work-order-retried";
@@ -62,6 +64,13 @@ pub enum RetryRefusal {
         /// Its state, `answered` for a failed order a submission named.
         state: String,
     },
+    /// `work-order-not-failed`: a submission named an earlier attempt of the
+    /// order's chain. Plan 3 answers it with details
+    /// `{"state": "answered", "work_order": <the earlier attempt's id>}`.
+    EarlierAnswered {
+        /// The earlier attempt's id.
+        work_order: String,
+    },
     /// `work-order-retried`: a retry was already issued from it.
     Retried {
         /// The retry's id.
@@ -82,9 +91,17 @@ pub enum RetryRefusal {
 }
 
 /// Judges a retry of `order`, a document as the `work_order` view holds it,
-/// given the `(seq, hash)` references this project's purges released.
-pub fn judge_retry(order: &Value, released: &[(u64, Hash)]) -> Result<Retry, RetryRefusal> {
-    let order = read(order).map_err(|reason| RetryRefusal::Unreadable { reason })?;
+/// given its earlier attempts, parent first, back to the chain's first order,
+/// as the view holds them, and the `(seq, hash)` references this project's
+/// purges released. An answer to any attempt of the chain ends it, so a
+/// submission naming the order or any earlier attempt refuses the retry.
+pub fn judge_retry(
+    order: &Value,
+    earlier: &[Value],
+    released: &[(u64, Hash)],
+) -> Result<Retry, RetryRefusal> {
+    let unreadable = |reason| RetryRefusal::Unreadable { reason };
+    let order = read(order).map_err(unreadable)?;
     if order.state != FAILED {
         return Err(RetryRefusal::NotFailed { state: order.state });
     }
@@ -97,6 +114,16 @@ pub fn judge_retry(order: &Value, released: &[(u64, Hash)]) -> Result<Retry, Ret
     }
     if let Some(child) = order.child {
         return Err(RetryRefusal::Retried { child });
+    }
+    // A late return lands on the attempt it named, which may be any earlier
+    // one, so the candidate's own drafts are not enough.
+    let earlier = earlier
+        .iter()
+        .map(read_earlier)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(unreadable)?;
+    if let Some((id, _)) = earlier.into_iter().find(|(_, answered)| *answered) {
+        return Err(RetryRefusal::EarlierAnswered { work_order: id });
     }
     if let Some(input) = order
         .inputs
@@ -183,6 +210,17 @@ fn read(order: &Value) -> Result<Order, String> {
     })
 }
 
+/// An earlier attempt's id, and whether a submission named it.
+fn read_earlier(attempt: &Value) -> Result<(String, bool), String> {
+    let Some(id) = attempt.get("id").and_then(Value::as_str) else {
+        return Err("an earlier attempt's id is not text".into());
+    };
+    let Some(Value::Array(drafts)) = attempt.get("drafts") else {
+        return Err(format!("drafts of earlier attempt {id} is not a list"));
+    };
+    Ok((id.to_owned(), !drafts.is_empty()))
+}
+
 fn inputs(fields: &Map<String, Value>) -> Result<Vec<OrderInput>, String> {
     let Some(Value::Array(inputs)) = fields.get("inputs") else {
         return Err("inputs is not a list".into());
@@ -223,6 +261,10 @@ mod tests {
 
     fn d1() -> Hash {
         Hash([0x11; 32])
+    }
+
+    fn d2() -> Hash {
+        Hash([0x22; 32])
     }
 
     fn brief() -> Vec<OrderInput> {
@@ -268,7 +310,7 @@ mod tests {
             (late, "answered"),
         ] {
             assert_eq!(
-                judge_retry(&order, &[]),
+                judge_retry(&order, &[], &[]),
                 Err(RetryRefusal::NotFailed {
                     state: state.into()
                 })
@@ -281,9 +323,45 @@ mod tests {
         let mut order = document("failed", 1);
         order["child"] = json!(I2);
         assert_eq!(
-            judge_retry(&order, &[]),
+            judge_retry(&order, &[], &[]),
             Err(RetryRefusal::Retried { child: I2.into() })
         );
+    }
+
+    #[test]
+    fn a_retry_after_an_earlier_attempt_was_answered_accepted_is_caught() {
+        let mut o3 = document("failed", 3);
+        o3["id"] = json!(I2);
+        o3["parent"] = json!(I1);
+        let mut o2 = document("failed", 2);
+        o2["id"] = json!(I1);
+        o2["parent"] = json!(I0);
+        o2["child"] = json!(I2);
+        let mut o1 = document("failed", 1);
+        o1["child"] = json!(I1);
+
+        let mut o1_answered = o1.clone();
+        o1_answered["drafts"] = json!([d1().to_hex()]);
+        assert_eq!(
+            judge_retry(&o3, &[o2.clone(), o1_answered], &[]),
+            Err(RetryRefusal::EarlierAnswered {
+                work_order: I0.into()
+            })
+        );
+
+        let mut o2_answered = o2.clone();
+        o2_answered["drafts"] = json!([d2().to_hex()]);
+        assert_eq!(
+            judge_retry(&o3, &[o2_answered, o1.clone()], &[]),
+            Err(RetryRefusal::EarlierAnswered {
+                work_order: I1.into()
+            })
+        );
+
+        let retry = judge_retry(&o3, &[o2, o1], &[]).expect("no attempt was answered");
+        assert_eq!(retry.attempt, attempt(4));
+        assert_eq!(retry.parent, I2);
+        assert_eq!(retry.request, I0);
     }
 
     #[test]
@@ -297,31 +375,31 @@ mod tests {
             inputs: brief(),
         };
         assert_eq!(
-            judge_retry(&document("failed", 1), &[]),
+            judge_retry(&document("failed", 1), &[], &[]),
             Ok(expected(I0, 2))
         );
         assert_eq!(
-            judge_retry(&document("failed", 4), &[]),
+            judge_retry(&document("failed", 4), &[], &[]),
             Ok(expected(I0, 5))
         );
         let mut o2 = document("failed", 2);
         o2["id"] = json!(I1);
         o2["parent"] = json!(I0);
         o2["agent"] = json!("bal-planner-xhigh");
-        assert_eq!(judge_retry(&o2, &[]), Ok(expected(I1, 3)));
+        assert_eq!(judge_retry(&o2, &[], &[]), Ok(expected(I1, 3)));
     }
 
     #[test]
     fn a_retry_needing_an_input_this_project_purged_accepted_is_caught() {
         let order = document("failed", 1);
         assert_eq!(
-            judge_retry(&order, &[(5, h())]),
+            judge_retry(&order, &[], &[(5, h())]),
             Err(RetryRefusal::MaterialUnavailable {
                 input: "brief".into()
             })
         );
-        assert!(judge_retry(&order, &[(9, h())]).is_ok());
-        assert!(judge_retry(&order, &[(5, d1())]).is_ok());
+        assert!(judge_retry(&order, &[], &[(9, h())]).is_ok());
+        assert!(judge_retry(&order, &[], &[(5, d1())]).is_ok());
     }
 
     #[test]
@@ -333,7 +411,7 @@ mod tests {
         for order in [stateless, unknown] {
             assert!(
                 matches!(
-                    judge_retry(&order, &[]),
+                    judge_retry(&order, &[], &[]),
                     Err(RetryRefusal::Unreadable { .. })
                 ),
                 "{order}"
@@ -344,6 +422,6 @@ mod tests {
     #[test]
     fn an_attempt_past_the_counter_accepted_is_caught() {
         let order = document("failed", u64::from(u32::MAX));
-        assert_eq!(judge_retry(&order, &[]), Err(RetryRefusal::Exhausted));
+        assert_eq!(judge_retry(&order, &[], &[]), Err(RetryRefusal::Exhausted));
     }
 }
