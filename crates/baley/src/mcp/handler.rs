@@ -8,9 +8,9 @@
 //! the operation with a [`Preparation`]: the caller the gate formed, the
 //! call's host, the session's ledger and the server's time. `capture`,
 //! `scope-submit`, the ten change operations from `project-describe` to
-//! `backlog-reorder`, and `document` set `needs_project`, and in their
-//! [`operate`] arms the writes prepare a write from it and `document` a
-//! read.
+//! `backlog-reorder`, `project-start` and `document` set `needs_project`,
+//! and in their [`operate`] arms the writes prepare a write from it and
+//! `document` a read.
 //! rmcp has already validated the request's metadata by the time any
 //! of this runs, so a protocol-required metadata error stays a protocol error
 //! and runs nothing.
@@ -39,6 +39,7 @@ use super::operations::{help_answer, instruction_answer, schema_answer, unknown_
 use super::scope;
 use super::tools::{info, supported_protocol_versions, tool_list, version_answer};
 use super::transport::RawFrameBytes;
+use super::work_order;
 use super::worker::{Submission, Worker};
 use crate::ledger::clock::SystemClock;
 
@@ -178,6 +179,9 @@ fn operate(called: &Called, arguments: Option<&Value>, project: Option<&Preparat
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "document" => {
             document::serve(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation)) if spelling == "project-start" => {
+            work_order::serve_start(arguments_or_null, preparation)
         }
         (Called::Operation(_, spelling), Some(preparation))
             if scope::change_kind(spelling).is_some() =>
@@ -810,5 +814,46 @@ mod tests {
         );
         assert_eq!(answer["status"], "refused", "{answer}");
         assert_eq!(answer["code"], "invalid-arguments", "{answer}");
+    }
+
+    #[test]
+    fn a_start_prepared_before_its_brief_is_judged_is_caught() {
+        let caller = ServerCaller::new(
+            "/real/r",
+            "/real/r",
+            "claude-code",
+            "0b7e4a52-3c1d-4f6a-8e9b-1a2b3c4d5e6f",
+            &json!(7),
+        )
+        .unwrap();
+        // No ledger and no project at the caller's directory, so a start that
+        // reaches preparation is answered `failed` there.
+        let preparation = Preparation {
+            ledger: None,
+            host: Host::ClaudeCode,
+            caller,
+            at: "2026-10-13T09:00:00Z".into(),
+        };
+        let start = |brief: &str| {
+            operate(
+                &Called::Operation(Tool::Apply, "project-start".into()),
+                Some(&json!({"operation": "project-start",
+                    "request_id": "9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f",
+                    "brief": brief})),
+                Some(&preparation),
+            )
+        };
+        let blank = start("");
+        assert_eq!(blank["status"], "refused", "{blank}");
+        assert_eq!(blank["code"], "brief-blank", "{blank}");
+
+        let answer = start("Build a ledger for agent work");
+        assert_eq!(answer["status"], "failed", "{answer}");
+        assert_eq!(answer["recorded"], false, "{answer}");
+        assert!(
+            ["project-context-invalid", "not-a-project"]
+                .contains(&answer["code"].as_str().unwrap()),
+            "{answer}"
+        );
     }
 }

@@ -4,23 +4,36 @@
 //! payload, after the arguments, the start check and preparation pass. A
 //! refusal records nothing.
 
+use std::num::NonZeroU32;
+use std::path::Path;
+
 use baley_core::capture::is_blank;
-use baley_core::policy::{EffectivePolicy, Layer};
-use baley_core::work_order::START_ORDER_PENDING;
+use baley_core::policy::{EffectivePolicy, Layer, Role};
+use baley_core::work_order::{START_ORDER_PENDING, START_SUBJECT};
 use baley_store::{
-    CommandKind, Hash, InstructionEvidence, Ledger, ProjectId, RequestId, Views, request_digest,
+    CommandKind, Hash, InstructionEvidence, Ledger, ProjectId, RequestId, ServerCaller, Views,
+    request_digest,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::checkout::{holds_existing_code, tracked_files};
+use crate::discovery::PROJECT_FILE;
 use crate::envelope::Refusal;
-use crate::mcp::capture::store_failed;
+use crate::mcp::capture::{PLACE_LEDGER, failed, store_failed};
 use crate::mcp::client::MAX_ECHOED_BYTES;
-use crate::mcp::prepare::WriteRequest;
+use crate::mcp::handler::Preparation;
+use crate::mcp::prepare::{
+    CHECKOUT_FACTS_UNAVAILABLE, LEDGER_UNAVAILABLE, Prepared, Stepped, WriteRequest,
+    prepare_checked,
+};
+use crate::process::Process;
 use crate::scope::submit::{NOT_RECORDED_BUSY, start_once};
+use crate::work_order::issue::{self, Input, Issue, start_absences};
 use crate::work_order::read::pending_start;
+use crate::work_order::route::{compose, host_names};
 
 /// The command kind a project start is recorded under.
 pub const START_COMMAND: &str = "project.start";
@@ -197,6 +210,157 @@ pub fn settings_lines(policy: &EffectivePolicy) -> Vec<String> {
         );
     }
     lines
+}
+
+/// The instruction a start order carries for its planner.
+const START_PLANNER: &str = "bal-start-planner";
+
+/// The instruction a start order adds when the checkout holds code.
+const START_SURVEY: &str = "bal-start-survey";
+
+/// Serves one `project-start` call for the session's `preparation`. The
+/// arguments are judged first, and a refusal is answered before anything is
+/// prepared. Then the write is prepared under the caller with the
+/// instruction evidence attached, with [`start_check`] as its own check, so
+/// a start already approved or a start order still pending ends the call
+/// before checkout admission and the policy step.
+///
+/// For a write that ran its steps, the settings lines come from the
+/// prepared policy, and the checkout is judged for existing code from the
+/// root commit and, when there is one, HEAD's listing. The order carries the
+/// start planner's instruction, then the survey's when the checkout holds
+/// code (D-20, D-24), and runs under the route for `planner` at attempt 1 at
+/// the step's policy version (D-11). A fresh UUID is both its id and its
+/// request, and the brief is its one input. A replay goes to the recording
+/// with no order, and the store answers it from its record. No
+/// acknowledgement is checked (D-12) and no `forge.checked` is recorded
+/// (D-21).
+pub fn serve_start(arguments: &Value, preparation: &Preparation) -> Value {
+    let judged = match judge_start_arguments(arguments) {
+        Ok(judged) => judged,
+        Err(refusal) => return refusal,
+    };
+    let ledger = preparation.ledger.as_deref();
+    // With no ledger, preparation fails at the project check, before any
+    // settings are read from the config folder or the check is asked.
+    let config = ledger.map_or(Path::new(""), |ledger| ledger.config.as_path());
+    let check = |project: &ProjectId| match ledger {
+        Some(ledger) => start_check(&ledger.store, project),
+        None => Err(failed(
+            LEDGER_UNAVAILABLE,
+            "the write was checked without a ledger",
+            PLACE_LEDGER,
+        )),
+    };
+    let caller = evidenced(&preparation.caller, judged.instruction.as_ref());
+    let mut process = crate::process::System;
+    let prepared = match prepare_checked(
+        ledger.map(|ledger| &ledger.store),
+        &caller,
+        &judged.request,
+        config,
+        preparation.host,
+        &preparation.at,
+        &mut process,
+        &check,
+    ) {
+        Ok(prepared) => prepared,
+        Err(answer) => return answer,
+    };
+    let (Some(ledger), Some(command)) = (ledger, prepared.command.as_ref()) else {
+        return failed(
+            LEDGER_UNAVAILABLE,
+            "the write was prepared without a ledger or a command",
+            PLACE_LEDGER,
+        );
+    };
+    let store = &ledger.store;
+    let Some(stepped) = &prepared.stepped else {
+        return issue::answer(issue::record(store, command, None), store);
+    };
+    let existing = match existing_code(&prepared, stepped, &mut process) {
+        Ok(existing) => existing,
+        Err(text) => return failed(CHECKOUT_FACTS_UNAVAILABLE, text, "git"),
+    };
+    let mut instructions = Vec::new();
+    for identity in std::iter::once(START_PLANNER).chain(existing.then_some(START_SURVEY)) {
+        match crate::instruction::evidence(identity) {
+            Ok(evidence) => instructions.push(evidence),
+            Err(refusal) => return refusal,
+        }
+    }
+    let names = match host_names(store, preparation.host) {
+        Ok(names) => names,
+        Err(error) => return store_failed(&error, NOT_RECORDED_BUSY),
+    };
+    let route = match compose(
+        &stepped.policy,
+        command.policy_version,
+        preparation.host,
+        Role::Planner,
+        NonZeroU32::MIN,
+        &names,
+    ) {
+        Ok(route) => route,
+        Err(refusal) => return Refusal::new(refusal.code(), refusal.to_string()).value(),
+    };
+    let lines = settings_lines(&stepped.policy);
+    let mut further = Map::new();
+    if !lines.is_empty() {
+        further.insert("settings".into(), json!(lines));
+    }
+    further.insert("existing_code".into(), json!(existing));
+    let id = uuid::Uuid::new_v4().to_string();
+    let inputs = [Input::Bytes {
+        name: "brief",
+        bytes: judged.brief.as_bytes(),
+    }];
+    let absences = start_absences();
+    let issue = Issue {
+        id: &id,
+        request: &id,
+        parent: None,
+        subject: START_SUBJECT,
+        route: &route,
+        instructions: &instructions,
+        inputs: &inputs,
+        absences: &absences,
+        streams: &[],
+        further: &further,
+    };
+    issue::answer(issue::record(store, command, Some(&issue)), store)
+}
+
+/// Whether the prepared checkout holds existing code. HEAD's files are
+/// listed only when it has a root commit, so an unborn HEAD runs no git.
+fn existing_code(
+    prepared: &Prepared,
+    stepped: &Stepped,
+    process: &mut dyn Process,
+) -> Result<bool, String> {
+    let Some(root_commit) = stepped.root_commit.as_deref() else {
+        return Ok(false);
+    };
+    let listing = tracked_files(&prepared.root, process)?;
+    let file = prepared
+        .project_file
+        .strip_prefix(&prepared.root)
+        .unwrap_or(Path::new(PROJECT_FILE))
+        .to_string_lossy();
+    Ok(holds_existing_code(Some(root_commit), &listing, &file))
+}
+
+/// The caller a start is prepared under: `caller` with `instruction`'s
+/// evidence attached, or as it is when the session named none, as `capture`
+/// attaches it, so every event of the call carries it.
+fn evidenced(caller: &ServerCaller, instruction: Option<&InstructionEvidence>) -> ServerCaller {
+    match instruction {
+        None => caller.clone(),
+        Some(evidence) => caller
+            .clone()
+            .with_instructions(vec![evidence.clone()])
+            .expect("one entry is within the caller's instruction limit"),
+    }
 }
 
 /// Serde's text for a shape fault, cut to the echo limit with a closing

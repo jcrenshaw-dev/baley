@@ -206,6 +206,7 @@ pub const APPLY_OPERATIONS: &[Operation] = &[
     with_project("story-reassign"),
     with_project("story-drop"),
     with_project("backlog-reorder"),
+    with_project("project-start"),
 ];
 
 /// A spelling served only from a project, which its call prepares.
@@ -360,6 +361,9 @@ enum RequestShape {
     StoryDrop(#[allow(dead_code)] crate::mcp::scope::StoryDropShape),
     #[serde(rename = "backlog-reorder")]
     BacklogReorder(#[allow(dead_code)] crate::mcp::scope::BacklogReorderShape),
+    // `project-start` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "project-start")]
+    ProjectStart(#[allow(dead_code)] crate::mcp::work_order::StartShape),
 }
 
 fn invalid_arguments(reason: impl Into<String>) -> Value {
@@ -635,6 +639,7 @@ pub(crate) mod expected {
         "story-reassign",
         "story-drop",
         "backlog-reorder",
+        "project-start",
     ];
 }
 
@@ -698,6 +703,7 @@ mod tests {
                     "story-reassign",
                     "story-drop",
                     "backlog-reorder",
+                    "project-start",
                 ]
                 .contains(n)
             }) {
@@ -731,6 +737,7 @@ mod tests {
             "story-reassign",
             "story-drop",
             "backlog-reorder",
+            "project-start",
         ] {
             assert_eq!(
                 lookup(Tool::Apply, Some(name)),
@@ -1219,5 +1226,27 @@ mod tests {
         let answer = schema_answer(&json!({"operation": "schema", "tool": "other", "for": "help"}));
         assert_eq!(answer["code"], "unknown-tool");
         assert_eq!(answer["slot"], "tool");
+    }
+
+    #[test]
+    fn a_project_start_spelling_left_unserved_or_out_of_the_baseline_order_is_caught() {
+        assert_eq!(
+            lookup(Tool::Apply, Some("project-start")),
+            Lookup::Available {
+                needs_project: true
+            }
+        );
+        assert_eq!(
+            APPLY_OPERATIONS.last().map(|op| op.name),
+            Some("project-start")
+        );
+        let served =
+            schema_answer(&json!({"operation": "schema", "tool": "apply", "for": "project-start"}));
+        assert_eq!(served["status"], "ok", "{served}");
+        let required = served["schema"]["required"].as_array().unwrap();
+        for name in ["request_id", "brief"] {
+            assert!(required.contains(&json!(name)), "{name} in {served}");
+        }
+        assert!(!required.contains(&json!("instruction")), "{served}");
     }
 }
