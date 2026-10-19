@@ -1,11 +1,13 @@
 //! Work orders' pure half (design 0003 section 6, design 0012): the route
-//! record an order carries and the two work-order events.
+//! record an order carries, the two work-order events and the `work_order`
+//! view.
 //!
 //! Nothing here reads a store, a file or a clock: the binary supplies every
 //! value it judges.
 
 mod event;
 mod route;
+mod view;
 
 pub use event::{
     IssuedOrder, OrderInput, START_SUBJECT, WORK_ORDER_FAILED, WORK_ORDER_FAILED_VERSION,
@@ -13,3 +15,7 @@ pub use event::{
     order_stream, register_work_order_events,
 };
 pub use route::route_record;
+pub use view::{
+    ANSWERED, FAILED, PENDING, WORK_ORDER_LIVE_INDEX, WORK_ORDER_VIEW, WorkOrderProjector,
+    work_order_key, work_order_spec,
+};
