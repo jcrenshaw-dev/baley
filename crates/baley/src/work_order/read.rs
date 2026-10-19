@@ -1,12 +1,17 @@
-//! Reads of a project's `work_order` view, recording nothing: an order by
-//! its id, and the pending start planner order a start is checked against
-//! (D-02). A store error comes back unchanged for the caller to answer.
+//! Reads of a project's work orders, recording nothing: an order by its id,
+//! the pending start planner order a start is checked against (D-02), the
+//! input references this project's purges released (D-16) and a start
+//! order's accepted result (D-03). A store error comes back unchanged for
+//! the caller to answer.
 
 use baley_core::policy::Role;
 use baley_core::work_order::{
     PENDING, START_SUBJECT, WORK_ORDER_LIVE_INDEX, WORK_ORDER_VIEW, work_order_key,
 };
-use baley_store::{IndexQuery, KeyValue, PageRequest, ProjectId, StoreError, Views};
+use baley_store::{
+    EVENT_PAGE_BOUND, Hash, IndexQuery, KeyValue, Ledger, PAYLOAD_PURGED, PageRequest, ProjectId,
+    PurgedEvent, RETENTION_STREAM, StoreError, StreamName, Views,
+};
 use serde_json::Value;
 
 /// The document of order `id` in `project`, or `None` when the view holds
@@ -43,6 +48,95 @@ pub fn pending_start<S: Views + ?Sized>(
     };
     let page = store.find(project, WORK_ORDER_VIEW, &query)?;
     Ok(page.items.into_iter().next().map(|document| document.body))
+}
+
+/// One reference a purge of this project released.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Release {
+    /// The sequence of the event that held the reference.
+    pub seq: u64,
+    /// The released body's hash.
+    pub hash: Hash,
+    /// The reason the purge recorded.
+    pub reason: String,
+}
+
+/// The references a project's purges released, and the version of its
+/// `retention` stream they were read up to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Releases {
+    /// Every released reference, in the order the purges recorded them.
+    pub released: Vec<Release>,
+    /// The `retention` stream's version when it was read, 0 when it holds
+    /// nothing.
+    pub version: u64,
+}
+
+impl Releases {
+    /// The `(seq, hash)` pairs, as the retry judge takes them.
+    pub fn pairs(&self) -> Vec<(u64, Hash)> {
+        self.released
+            .iter()
+            .map(|release| (release.seq, release.hash))
+            .collect()
+    }
+
+    /// This project's purge of the reference to `hash` at `seq`, if any.
+    pub fn find(&self, seq: u64, hash: &Hash) -> Option<&Release> {
+        self.released
+            .iter()
+            .find(|release| release.seq == seq && release.hash == *hash)
+    }
+}
+
+/// The references `project`'s own purges released, read from its
+/// `retention` stream outside any transaction. A body's status is shared by
+/// every project holding the bytes, so only this project's releases say its
+/// reference is gone. A transaction cannot page a stream, so a decision that
+/// depends on these `expect`s the version given here.
+pub fn releases<L: Ledger + ?Sized>(
+    store: &L,
+    project: &ProjectId,
+) -> Result<Releases, StoreError> {
+    let stream = StreamName(RETENTION_STREAM.into());
+    let mut read = Releases {
+        released: Vec::new(),
+        version: 0,
+    };
+    let mut after = None;
+    loop {
+        let page = store.stream(
+            project,
+            &stream,
+            1,
+            PageRequest {
+                limit: EVENT_PAGE_BOUND,
+                after,
+            },
+        )?;
+        for event in page.items {
+            read.version = read.version.max(event.stream_version);
+            if event.type_name != PAYLOAD_PURGED {
+                continue;
+            }
+            let Some(purge) = PurgedEvent::from_value(&event.payload) else {
+                return Err(StoreError::Unavailable(format!(
+                    "the purge at seq {} cannot be read",
+                    event.seq
+                )));
+            };
+            read.released
+                .extend(purge.released.into_iter().map(|(seq, hash)| Release {
+                    seq,
+                    hash,
+                    reason: purge.reason.clone(),
+                }));
+        }
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return Ok(read),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +220,136 @@ mod tests {
             name: "brief",
             bytes: B1.as_bytes(),
         }]
+    }
+
+    /// A lowercase UUID numbered `n`, distinct for each `n` and `tag`.
+    fn numbered(tag: u8, n: u32) -> String {
+        format!("{n:08x}-{tag:02x}00-4000-8000-000000000000")
+    }
+
+    /// Records a planner order `id` about `start` in `project` with `brief`
+    /// as its input and no absence declared, so several may be pending.
+    fn issue_brief(store: &SqliteStore, project: &ProjectId, id: &str, brief: &[u8]) {
+        let policy =
+            effective_policy(Schema::standard(), Some(Host::ClaudeCode), None, None).unwrap();
+        let names = AcceptedNames {
+            names: BTreeSet::new(),
+            version: 0,
+        };
+        let route = compose(
+            &policy,
+            1,
+            Host::ClaudeCode,
+            Role::Planner,
+            NonZeroU32::MIN,
+            &names,
+        )
+        .unwrap();
+        let further = serde_json::Map::new();
+        let inputs = [Input::Bytes {
+            name: "brief",
+            bytes: brief,
+        }];
+        let issue = Issue {
+            id,
+            request: id,
+            parent: None,
+            subject: START_SUBJECT,
+            route: &route,
+            instructions: &[],
+            inputs: &inputs,
+            absences: &[],
+            streams: &[],
+            further: &further,
+        };
+        let command = command_in(project, "project.start", id, 1, T1);
+        let answer = issue::answer(issue::record(store, &command, Some(&issue)), store);
+        assert_eq!(answer["status"], "ok", "{answer}");
+    }
+
+    /// Releases `project`'s references to `hash` under purge request
+    /// `request_id`.
+    fn purge_as(
+        store: &SqliteStore,
+        project: &ProjectId,
+        hash: Hash,
+        reason: &str,
+        request_id: &str,
+    ) {
+        use baley_store::{Actor, Command, CommandKind, RequestId};
+        let purge = Command {
+            project: project.clone(),
+            kind: CommandKind("payload.purge".into()),
+            request_id: RequestId(request_id.into()),
+            digest: Hash([9; 32]),
+            scope: Vec::new(),
+            policy_version: 0,
+            recorded_at: T3.into(),
+            actor: Actor::Owner,
+            caller: None,
+        };
+        store.purge(&purge, &[hash], reason).unwrap();
+    }
+
+    fn sha256(bytes: &[u8]) -> Hash {
+        use sha2::{Digest, Sha256};
+        Hash(Sha256::digest(bytes).into())
+    }
+
+    #[test]
+    fn an_input_this_project_purged_read_as_held_or_another_projects_purge_taken_is_caught() {
+        let (_dir, store) = two_projects();
+        issue_in(&store, &project(), I0, I0, None, 1, &brief(), R1, T1);
+        issue_in(&store, &project_b(), I1, I1, None, 1, &brief(), R1, T1);
+        let b1 = Hash::from_hex(B1_SHA256).unwrap();
+        purge_in(&store, &project_b(), b1, "owner purge");
+
+        assert_eq!(
+            releases(&store, &project()).unwrap(),
+            Releases {
+                released: Vec::new(),
+                version: 0
+            }
+        );
+        let i1_seq = order(&store, &project_b(), I1).unwrap().unwrap()["seq"]
+            .as_u64()
+            .unwrap();
+        let first = Release {
+            seq: i1_seq,
+            hash: b1,
+            reason: "owner purge".into(),
+        };
+        assert_eq!(
+            releases(&store, &project_b()).unwrap(),
+            Releases {
+                released: vec![first.clone()],
+                version: 1
+            }
+        );
+
+        let bound = EVENT_PAGE_BOUND;
+        for n in 0..bound {
+            let text = format!("another brief {n}");
+            issue_brief(&store, &project_b(), &numbered(1, n), text.as_bytes());
+            purge_as(
+                &store,
+                &project_b(),
+                sha256(text.as_bytes()),
+                "later purge",
+                &numbered(2, n),
+            );
+        }
+        let read = releases(&store, &project_b()).unwrap();
+        assert_eq!(read.version, u64::from(bound) + 1);
+        assert_eq!(read.released.len(), bound as usize + 1);
+        assert!(read.released.contains(&first), "{read:?}");
+        let last = sha256(format!("another brief {}", bound - 1).as_bytes());
+        assert!(
+            read.released
+                .iter()
+                .any(|release| release.hash == last && release.reason == "later purge"),
+            "{read:?}"
+        );
     }
 
     #[test]
