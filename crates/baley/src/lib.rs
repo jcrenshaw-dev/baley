@@ -91,3 +91,5 @@ pub mod scope;
 pub mod settings;
 /// The update check: staged versions beside the stable path, the daily claim and its records.
 pub mod update;
+/// Work orders over the storage port: the route an order is issued under, its recording and its reads.
+pub mod work_order;
