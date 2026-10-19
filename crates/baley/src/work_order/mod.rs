@@ -8,3 +8,7 @@
 /// The route an order is issued under: the host's accepted model names from
 /// the per-user catalog, and the route record and agent stub composed from them.
 pub mod route;
+
+/// The recording of one issued order: its inputs as `record` payloads and one
+/// `work_order.issued` on its subject's stream.
+pub mod issue;
