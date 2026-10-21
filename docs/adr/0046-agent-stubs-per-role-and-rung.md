@@ -19,7 +19,7 @@ The question is how the route's model and effort reach the subagent, and what th
 
 ## Decision drivers
 
-- The effort a worker runs at is fixed by what Baley installs, not by a choice the session makes on each call.
+- The effort Baley requests for a worker is fixed by what Baley installs, not by a choice the session makes on each call.
 - `baley doctor` can check that what Claude Code reads is what Baley wrote.
 - The owner's per-role model setting reaches the worker without reinstalling.
 - The record never claims a model or effort was observed when it was not.
@@ -34,7 +34,7 @@ The question is how the route's model and effort reach the subagent, and what th
 
 ## Decision
 
-Chosen option: **1**, because it fixes the effort in a file the doctor can compare, lets the model follow the owner's settings and claims nothing that was not observed.
+Chosen option: **1**, because it fixes the effort Baley sends in a file the doctor can compare, lets the model follow the owner's settings and claims nothing that was not observed.
 
 Install places thirty agent stubs, one for each of the six roles (`planner`, `analyzer`, `checker`, `executor`, `verifier`, `reviewer`) at each of the five rungs (`low`, `medium`, `high`, `xhigh`, `max`), named `bal-<role>-<rung>` and placed at `agents/<name>.md` in the Claude folder. Each stub's frontmatter has its `name`, a `description` saying to use it only when a Baley work order names it, `model: inherit`, its rung's `effort` and the session's `baley` server by name, with no inline server and no fixed model. Its body is one line telling the worker to read its order by id through `baley_query` `document` with kind `work_order`. The bytes depend only on compiled role, rung and name tables, so the doctor compares each placed file with what install wrote, and the guard protects each placed file by its own path, never the `agents/` folder, so the owner's own agent files stay editable.
 
@@ -46,7 +46,7 @@ The route record keeps the effective model and effort apart from what was asked 
 
 ### Positive
 
-- The effort a worker runs at is in a file install wrote and the doctor checks, so a session cannot forget it.
+- The effort Baley sends for a worker is held in the stub install wrote and the doctor checks, so no session can forget to send it.
 - Escalation is a change of stub name, which needs no new host mechanism.
 - A role's `model` setting reaches the worker as soon as the next order is issued.
 - No record says a model or effort ran when nothing observed it.
