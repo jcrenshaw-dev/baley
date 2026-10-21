@@ -15,6 +15,7 @@ use crate::folders::Folders;
 use crate::host_artifacts::compose::same_server;
 use crate::host_artifacts::installed::stub_path;
 use crate::host_artifacts::placement::{Artifact, PlacementMap};
+use crate::host_artifacts::stubs::Kind;
 use crate::host_doctor::placed::{ExecutableGap, Fault, FileState};
 use crate::host_doctor::prerequisites::Judged;
 use crate::ledger::display::Render;
@@ -168,7 +169,7 @@ pub(crate) fn retired(
         // A second guard: whatever the identity says, a placed file is
         // never a retired one.
         let own = plain
-            && retired.path == stub_path(claude_folder, &retired.identity)
+            && retired.path == stub_path(claude_folder, Kind::Skill, &retired.identity)
             && placed.iter().all(|file| file.path != retired.path);
         if own {
             found.own.push(retired);

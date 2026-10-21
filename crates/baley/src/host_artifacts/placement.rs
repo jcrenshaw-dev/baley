@@ -728,4 +728,31 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn an_agent_folder_protected_whole_or_an_agent_file_left_open_is_caught() {
+        let env = crate::folders::Environment {
+            home: Some("/home/o".into()),
+            ..crate::folders::Environment::default()
+        };
+        let installed = crate::host_artifacts::installed::resolve(
+            &env,
+            None,
+            &crate::host_artifacts::installed::skill_and_agent(),
+        )
+        .unwrap();
+        let protected = installed.placements.protected_paths();
+        assert!(
+            protected
+                .iter()
+                .any(|path| path.as_os_str() == "/home/o/.claude/agents/bal-planner-high.md"),
+            "{protected:?}"
+        );
+        for folder in ["/home/o/.claude/agents", "/home/o/.claude/agents/"] {
+            assert!(
+                !protected.iter().any(|path| path == Path::new(folder)),
+                "{folder} is protected whole"
+            );
+        }
+    }
 }

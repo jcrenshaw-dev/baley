@@ -43,12 +43,24 @@ pub fn render(identity: &str, description: &str) -> String {
     )
 }
 
+/// Which kind of file Claude Code loads a stub as, which sets where the
+/// stub is placed (D-07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A skill a session invokes by name, as every front door is.
+    Skill,
+    /// A subagent a work order names.
+    Agent,
+}
+
 /// One manifest entry: a stub as the bytes the host loads (D-04).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// The host that loads the stub.
     pub host: Host,
-    /// The front door's registry identity.
+    /// Whether the host loads the stub as a skill or as an agent.
+    pub kind: Kind,
+    /// The stub's name: a front door's registry identity or an agent's name.
     pub identity: String,
     /// The stub's exact bytes.
     pub bytes: Vec<u8>,
@@ -79,6 +91,7 @@ pub fn manifest(front_doors: &[(&str, &str)]) -> Result<Vec<Entry>, DuplicateIde
         let digest = digest(&bytes);
         entries.push(Entry {
             host: Host::ClaudeCode,
+            kind: Kind::Skill,
             identity: (*identity).to_owned(),
             bytes,
             digest,
@@ -156,10 +169,10 @@ mod tests {
 
     #[test]
     fn a_scope_front_door_left_without_a_skill_stub_is_caught() {
-        let identities: Vec<String> = manifest(&front_doors())
-            .unwrap()
-            .into_iter()
-            .map(|entry| entry.identity)
+        let entries = manifest(&front_doors()).unwrap();
+        let identities: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry.identity.as_str())
             .collect();
         assert_eq!(
             identities,
@@ -173,6 +186,9 @@ mod tests {
                 "bal-help",
             ]
         );
+        for entry in &entries {
+            assert_eq!(entry.kind, Kind::Skill, "{}", entry.identity);
+        }
     }
 
     #[test]
