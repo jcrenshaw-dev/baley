@@ -302,16 +302,18 @@ graph LR
 
 ## 8. Work orders
 
-The one contract between Baley and every worker, including the outside reviews the host session makes.
+The one contract between Baley and every worker, including the outside reviews the host session makes. An order is recorded as `work_order.issued` and read back through the `work_order` view ([0001](0001-evidence-ledger.md)). This build issues one kind, the start planner's order, and its retries ([0004](0004-starting-a-project-and-changing-scope.md) section 5); the other roles' orders are issued by the builds that add them, in the same shape.
 
 | Part | Content | Source |
 |---|---|---|
-| Identity | Work order id, project, phase, plan, attempt | Ledger |
-| Role | Planner, analyzer, plan checker, executor, verifier or reviewer | The area that issues it |
-| Model and effort | Resolved from the settings, with the setting that decided it | Policy |
-| Instructions | The role's compiled instructions, by id | Binary (SYS-P9) |
-| Inputs | The records the role needs: truths, plan, checks, review material | Ledger |
-| Expected result | The typed result the worker must return | The issuing area |
+| Identity | The order's id; the logical request, the id of its chain's first order; the failed order it retries, or none; the attempt, from 1 | Ledger |
+| Role and subject | Planner, analyzer, checker, executor, verifier or reviewer, and what the order is about, `start` for the start planner | The area that issues it |
+| Route | The route record: the requested rung and the rung run after any escalation, the model passed or none, the setting and file that decided each, the level Claude Code's dated effort table supports for that model, and the effective model and effort, recorded `unknown` with the reasons, since no run is observed ([0003](0003-configuration-and-routing.md) section 6); and the agent stub for the role at that rung, `bal-<role>-<rung>` | Policy and the model catalog |
+| Instructions | The compiled instructions, each by identity, version and hash, such as `bal-start-planner` and, when the checkout holds code, `bal-start-survey` | Binary (SYS-P9) |
+| Inputs | The records the role needs, each a `record` payload reference, such as the start's brief | Ledger |
+| Expected result | The typed result the worker must return. For the start planner it is a `scope-submit` naming the order in `work_order` | The issuing area |
+
+An order is delivered as its id. The issuing call answers with the id, the agent stub to launch, the model to pass as the Agent tool's `model` parameter or none, so the stub's `model: inherit` applies, and the one-line prompt `Read Baley work order <id> and follow it.` The session starts the subagent with that prompt, and the worker reads its order whole by id through `document`, kind `work_order`, in parts of at most 24,576 bytes ([0012](0012-host-interface.md) section 5, `crates/baley/src/work_order/issue.rs:94-112, 170-182`).
 
 ## 9. Requirements
 
