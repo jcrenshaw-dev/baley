@@ -142,6 +142,11 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "1",
         "4dceb6272fd0d130c5d74c904919128e51a06eab7330fb7bc02b932aa3322351",
     ),
+    (
+        "bal-help",
+        "2",
+        "ab97190b91b54fb647853049e3dbf54e82d736a31ba36996a83bc5d981471733",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {
@@ -210,7 +215,6 @@ fn the_help_text_asks_for_its_identity_on_apply_calls_only() {
     };
     let body = text.body;
     assert!(body.contains("`bal-help`") && body.contains("`instruction`"));
-    assert!(body.contains("on every `baley_apply` call"));
     assert!(body.contains("Never send it on a `baley_query` call"));
 }
 
