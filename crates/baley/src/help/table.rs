@@ -21,6 +21,11 @@ pub const CLUSTERS: &[&str] = &[
 
 pub const COMMANDS: &[Command] = &[
     Command {
+        name: "bal-project",
+        cluster: "Build spine",
+        description: "Start a project from a brief by issuing the start planner's work order, or revise the project description, as drafts the owner approves at the terminal.",
+    },
+    Command {
         name: "bal-context",
         cluster: "Build spine",
         description: "Discuss a phase's scope, decisions and truths with its owner, then publish only the exact approved set through Baley",
@@ -254,6 +259,7 @@ mod tests {
     /// Every help row's availability and owning build, written out from the
     /// design rather than read from the registry under test.
     const EXPECTED: &[(&str, bool, u64)] = &[
+        ("bal-project", true, 4),
         ("bal-help", true, 3),
         ("bal-capture", true, 3),
         ("bal-context", false, 4),
@@ -301,7 +307,7 @@ mod tests {
             .map(|(name, available, build)| ((*name).to_owned(), *available, *build))
             .collect();
         expected.sort();
-        assert_eq!(expected.len(), 21);
+        assert_eq!(expected.len(), 22);
         assert_eq!(shown, expected);
     }
 

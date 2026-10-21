@@ -696,6 +696,15 @@ mod tests {
         }
     }
 
+    /// The shipped stub for `identity`, found by name so a new front door
+    /// does not move it.
+    fn shipped<'a>(manifest: &'a [stubs::Entry], identity: &str) -> &'a stubs::Entry {
+        manifest
+            .iter()
+            .find(|entry| entry.identity == identity)
+            .expect("a shipped stub")
+    }
+
     /// The settings decision over a document the owner's file holds.
     fn decision(document: &Value, latest: Option<&Value>) -> settings::Decision {
         let installed = installed();
@@ -723,12 +732,12 @@ mod tests {
         let capture = event::Stub {
             identity: "bal-capture".into(),
             path: "/home/o/.claude/skills/bal-capture/SKILL.md".into(),
-            sha256: manifest[0].digest.clone(),
+            sha256: shipped(&manifest, "bal-capture").digest.clone(),
         };
         let help = event::Stub {
             identity: "bal-help".into(),
             path: "/home/o/.claude/skills/bal-help/SKILL.md".into(),
-            sha256: manifest[1].digest.clone(),
+            sha256: shipped(&manifest, "bal-help").digest.clone(),
         };
         let old_help = event::Stub {
             sha256: "cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4".into(),
@@ -800,6 +809,10 @@ mod tests {
                 PathBuf::from("/home/o/.claude.json"),
                 seen(FileState::Absent),
             ),
+            (
+                PathBuf::from("/home/o/.claude/skills/bal-project/SKILL.md"),
+                seen(FileState::Absent),
+            ),
             (capture.clone(), seen(FileState::Absent)),
             (help.clone(), seen(FileState::Bytes(b"mine".to_vec()))),
         ]);
@@ -835,6 +848,7 @@ mod tests {
         let installed = installed();
         let outcomes = |stubs: ArtifactOutcome, settings: ArtifactOutcome| {
             vec![
+                (Artifact::Stub("bal-project".into()), stubs.clone()),
                 (Artifact::Stub("bal-capture".into()), stubs.clone()),
                 (Artifact::Stub("bal-help".into()), stubs),
                 (Artifact::Registration, ArtifactOutcome::NotWritten),
@@ -880,7 +894,7 @@ mod tests {
         assert_eq!(facts.hook, None);
         assert_eq!(facts.sandbox, None);
         assert!(!facts.complete);
-        assert_eq!(facts.stubs.len(), 2);
+        assert_eq!(facts.stubs.len(), 3);
 
         // A completed installation left unchanged stays in the record.
         let complete = complete_settings();
@@ -903,8 +917,8 @@ mod tests {
                 "/home/o/.config/crenshawdev/baley"
             ]
         );
-        assert_eq!(sandbox.deny_write.len(), 8);
-        assert_eq!(sandbox.permissions_deny.len(), 10);
+        assert_eq!(sandbox.deny_write.len(), 9);
+        assert_eq!(sandbox.permissions_deny.len(), 11);
 
         // The write failed over Baley's own older entries.
         let old_hook = json!({
@@ -1159,7 +1173,7 @@ mod tests {
 
         assert!(plan.writes.is_empty(), "{:?}", plan.writes);
         assert_eq!(plan.registration, Step::Unchanged);
-        assert_eq!(plan.outcomes.len(), 5);
+        assert_eq!(plan.outcomes.len(), 6);
         for (artifact, outcome) in &plan.outcomes {
             assert_eq!(*outcome, ArtifactOutcome::Unchanged, "{artifact}");
         }
@@ -1172,6 +1186,10 @@ mod tests {
         let settings = decision(&complete_settings(), None);
         let outcomes = |registration: ArtifactOutcome| {
             vec![
+                (
+                    Artifact::Stub("bal-project".into()),
+                    ArtifactOutcome::Written,
+                ),
                 (
                     Artifact::Stub("bal-capture".into()),
                     ArtifactOutcome::Written,
@@ -1274,14 +1292,14 @@ mod tests {
             assert_eq!(document["sandbox"]["enabled"], true);
             assert_eq!(
                 document["permissions"]["deny"].as_array().unwrap().len(),
-                10
+                11
             );
             let stubs = plan
                 .writes
                 .iter()
                 .filter(|write| matches!(write.artifacts[0], Artifact::Stub(_)))
                 .count();
-            assert_eq!(stubs, 2);
+            assert_eq!(stubs, 3);
             assert_eq!(plan.writes[0].artifacts, [Artifact::Settings]);
             let wiring = plan.wiring.as_ref().expect("the wiring is held back");
             assert!(wiring.gap.contains(stable), "{}", wiring.gap);
@@ -1381,6 +1399,7 @@ mod tests {
     }
 
     const OLD: &str = "/home/o/.claude/skills/bal-old/SKILL.md";
+    const PROJECT: &str = "/home/o/.claude/skills/bal-project/SKILL.md";
     const CAPTURE: &str = "/home/o/.claude/skills/bal-capture/SKILL.md";
     const HELP: &str = "/home/o/.claude/skills/bal-help/SKILL.md";
 
@@ -1400,6 +1419,7 @@ mod tests {
         let mut observations = BTreeMap::from([
             (PathBuf::from(SETTINGS), file(None, false)),
             (PathBuf::from("/home/o/.claude.json"), file(None, false)),
+            (PathBuf::from(PROJECT), file(None, false)),
             (PathBuf::from(CAPTURE), file(None, false)),
             (PathBuf::from(HELP), file(None, false)),
         ]);
@@ -1461,8 +1481,7 @@ mod tests {
     #[test]
     fn a_retired_stub_recorded_outside_its_own_stub_path_planned_for_removal_is_caught() {
         let manifest = stubs::manifest(&stubs::front_doors()).unwrap();
-        let capture = &manifest[0];
-        assert_eq!(capture.identity, "bal-capture");
+        let capture = shipped(&manifest, "bal-capture");
         let old: &[u8] = b"old stub";
         for (case, identity, path, bytes) in [
             ("another file", "bal-old", "/home/o/notes.md", old),
@@ -1564,8 +1583,7 @@ mod tests {
         };
         // A retired entry naming a placed path whose bytes it would match.
         let manifest = stubs::manifest(&stubs::front_doors()).unwrap();
-        let capture = &manifest[0];
-        assert_eq!(capture.identity, "bal-capture");
+        let capture = shipped(&manifest, "bal-capture");
         let at_capture = Retired {
             path: CAPTURE.into(),
             sha256: capture.digest.clone(),
@@ -1591,6 +1609,10 @@ mod tests {
         let build = |outcome: RetiredOutcome| {
             let applied = Applied {
                 outcomes: vec![
+                    (
+                        Artifact::Stub("bal-project".into()),
+                        ArtifactOutcome::Unchanged,
+                    ),
                     (
                         Artifact::Stub("bal-capture".into()),
                         ArtifactOutcome::Unchanged,
@@ -1628,13 +1650,19 @@ mod tests {
         };
 
         let removed = build(RetiredOutcome::Removed);
-        assert_eq!(identities(&removed), ["bal-capture", "bal-help"]);
+        assert_eq!(
+            identities(&removed),
+            ["bal-project", "bal-capture", "bal-help"]
+        );
         assert!(removed.complete);
 
         let left = build(RetiredOutcome::Failed("not-removable: denied".into()));
-        assert_eq!(identities(&left), ["bal-capture", "bal-help", "bal-old"]);
         assert_eq!(
-            left.stubs[2],
+            identities(&left),
+            ["bal-project", "bal-capture", "bal-help", "bal-old"]
+        );
+        assert_eq!(
+            left.stubs[3],
             event::Stub {
                 identity: "bal-old".into(),
                 path: OLD.into(),
@@ -1645,7 +1673,10 @@ mod tests {
 
         // Recorded under another Claude folder: kept, and nothing failed.
         let carried = build(RetiredOutcome::Carried);
-        assert_eq!(identities(&carried), ["bal-capture", "bal-help", "bal-old"]);
+        assert_eq!(
+            identities(&carried),
+            ["bal-project", "bal-capture", "bal-help", "bal-old"]
+        );
         assert!(carried.complete);
     }
 

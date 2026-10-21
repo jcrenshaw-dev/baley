@@ -16,6 +16,7 @@ use crate::help::front_door;
 
 pub mod capture;
 pub mod read_contract;
+pub mod scope;
 pub mod start;
 
 /// The served text of one instruction, pinned in source.
@@ -64,6 +65,17 @@ pub enum Lookup {
 /// Every instruction, in the help table's order. A build adds its texts here,
 /// beside the operations it ships, by giving the entry a `text`.
 pub static ENTRIES: &[Entry] = &[
+    // Build 4 serves the project front door beside `project-start`, the
+    // work-order operations and `project-describe`.
+    Entry {
+        identity: scope::PROJECT_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: scope::PROJECT_VERSION,
+            hash: scope::PROJECT_HASH,
+            body: scope::PROJECT_TEXT,
+        }),
+    },
     // Build 4 adds this text beside its operations.
     Entry {
         identity: "bal-context",

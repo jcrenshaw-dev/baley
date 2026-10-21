@@ -153,6 +153,10 @@ mod tests {
                 files,
                 [
                     (
+                        Artifact::Stub("bal-project".into()),
+                        PathBuf::from(format!("{folder}/skills/bal-project/SKILL.md")),
+                    ),
+                    (
                         Artifact::Stub("bal-capture".into()),
                         PathBuf::from(format!("{folder}/skills/bal-capture/SKILL.md")),
                     ),
@@ -242,6 +246,7 @@ mod tests {
             assert_eq!(
                 stubs,
                 [
+                    "/home/o/.claude/skills/bal-project/SKILL.md",
                     "/home/o/.claude/skills/bal-capture/SKILL.md",
                     "/home/o/.claude/skills/bal-help/SKILL.md",
                 ]
@@ -319,6 +324,7 @@ mod tests {
         assert_eq!(
             map.protected_paths(),
             [
+                PathBuf::from("/home/o/.claude/skills/bal-project/SKILL.md"),
                 PathBuf::from("/home/o/.claude/skills/bal-capture/SKILL.md"),
                 PathBuf::from("/home/o/.claude/skills/bal-help/SKILL.md"),
                 PathBuf::from("/home/o/.claude.json"),

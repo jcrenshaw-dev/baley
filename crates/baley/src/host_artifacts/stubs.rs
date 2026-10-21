@@ -133,7 +133,7 @@ mod tests {
             .iter()
             .map(|entry| entry.identity.as_str())
             .collect();
-        assert_eq!(identities, ["bal-capture", "bal-help"]);
+        assert_eq!(identities, ["bal-project", "bal-capture", "bal-help"]);
         assert_eq!(UNAVAILABLE.len(), 19);
         for identity in UNAVAILABLE.iter().chain(&["bal-read-contract"]) {
             assert!(!identities.contains(identity), "{identity} has a stub");
@@ -180,7 +180,7 @@ mod tests {
             judged.push(identity.to_owned());
         }
         judged.sort();
-        assert_eq!(judged, ["bal-capture", "bal-help"]);
+        assert_eq!(judged, ["bal-capture", "bal-help", "bal-project"]);
     }
 
     #[test]

@@ -374,10 +374,14 @@ mod tests {
     }
 
     fn stubs(capture: Placement, help: Placement) -> Vec<(Entry, Placement)> {
-        let entries = manifest(&front_doors()).unwrap();
-        assert_eq!(entries[0].identity, "bal-capture");
-        assert_eq!(entries[1].identity, "bal-help");
-        entries.into_iter().zip([capture, help]).collect()
+        let entry = |identity: &str| {
+            manifest(&front_doors())
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.identity == identity)
+                .unwrap()
+        };
+        vec![(entry("bal-capture"), capture), (entry("bal-help"), help)]
     }
 
     fn build(

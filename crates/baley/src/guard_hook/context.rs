@@ -223,6 +223,7 @@ mod tests {
             installed::resolve(&env, None, &stubs::manifest(&stubs::front_doors()).unwrap())
                 .unwrap();
         let placed = [
+            "/u/.claude/skills/bal-project/SKILL.md",
             "/u/.claude/skills/bal-capture/SKILL.md",
             "/u/.claude/skills/bal-help/SKILL.md",
             "/u/.claude.json",

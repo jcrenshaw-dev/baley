@@ -192,7 +192,7 @@ mod tests {
         }
     }
 
-    fn expected(capture_hash: &str, help_hash: &str) -> Value {
+    fn expected(project_hash: &str, capture_hash: &str, help_hash: &str) -> Value {
         json!({
             "host": "claude-code",
             "binary_version": env!("CARGO_PKG_VERSION"),
@@ -212,6 +212,7 @@ mod tests {
                 },
             },
             "stubs": [
+                {"identity": "bal-project", "path": "/home/o/.claude/skills/bal-project/SKILL.md", "sha256": project_hash},
                 {"identity": "bal-capture", "path": "/home/o/.claude/skills/bal-capture/SKILL.md", "sha256": capture_hash},
                 {"identity": "bal-help", "path": "/home/o/.claude/skills/bal-help/SKILL.md", "sha256": help_hash},
             ],
@@ -267,7 +268,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let facts = facts();
-        let expected = expected(&facts.stubs[0].sha256, &facts.stubs[1].sha256);
+        let expected = expected(
+            &facts.stubs[0].sha256,
+            &facts.stubs[1].sha256,
+            &facts.stubs[2].sha256,
+        );
 
         assert_eq!(write_from_latest(&store, &facts, request(1), AT), Ok(true));
 
@@ -294,7 +299,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let mut facts = facts();
-        let mut expected = expected(&facts.stubs[0].sha256, &facts.stubs[1].sha256);
+        let mut expected = expected(
+            &facts.stubs[0].sha256,
+            &facts.stubs[1].sha256,
+            &facts.stubs[2].sha256,
+        );
         assert_eq!(write_from_latest(&store, &facts, request(1), AT), Ok(true));
         let head = store.head(&ProjectId("user".into())).unwrap();
 
@@ -385,7 +394,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let mut facts = facts();
-        let mut expected = expected(&facts.stubs[0].sha256, &facts.stubs[1].sha256);
+        let mut expected = expected(
+            &facts.stubs[0].sha256,
+            &facts.stubs[1].sha256,
+            &facts.stubs[2].sha256,
+        );
         facts.complete = false;
         facts.registration = None;
         facts.hook = None;
@@ -407,7 +420,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let facts = facts();
-        let expected = expected(&facts.stubs[0].sha256, &facts.stubs[1].sha256);
+        let expected = expected(
+            &facts.stubs[0].sha256,
+            &facts.stubs[1].sha256,
+            &facts.stubs[2].sha256,
+        );
 
         assert_eq!(read(&store, "claude-code"), Ok(None));
         assert_eq!(write_from_latest(&store, &facts, request(1), AT), Ok(true));

@@ -117,6 +117,11 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "1",
         "ef390f27faddc98daf28a40e86a917589caf0ae1fd8185a9ebcce06592986955",
     ),
+    (
+        "bal-project",
+        "1",
+        "7153c55fcb0acaf2712762b305b9d96cfd6a48ae4e44aa354b3685820411d3d1",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {
@@ -336,4 +341,28 @@ fn a_start_instruction_given_a_help_row_or_a_skill_stub_is_caught() {
             "{identity} is a front door"
         );
     }
+}
+
+#[test]
+fn a_project_front_door_missing_an_operation_it_drives_or_the_terminal_approval_is_caught() {
+    let body = served_text("bal-project");
+    for needle in [
+        "project-start",
+        "brief",
+        r#""instruction":"bal-project""#,
+        "settings",
+        "start-order-pending",
+        "launch",
+        "prompt",
+        "work-order-fail",
+        "work-order-retry",
+        "project-describe",
+        "baley scope approve",
+    ] {
+        assert!(
+            body.contains(needle),
+            "the project front door lacks {needle}"
+        );
+    }
+    assert!(!body.contains("scope-approve"));
 }

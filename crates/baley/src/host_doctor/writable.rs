@@ -157,6 +157,7 @@ mod tests {
             [
                 "/home/o/.local/bin",
                 "/home/o/.local/lib/crenshawdev/baley/versions",
+                "/home/o/.claude/skills/bal-project",
                 "/home/o/.claude/skills/bal-capture",
                 "/home/o/.claude/skills/bal-help",
                 "/home/o/.claude",
@@ -181,6 +182,7 @@ mod tests {
             [
                 "/home/o/.local/bin",
                 "/home/o/.local/lib/crenshawdev/baley/versions",
+                "/srv/claude/skills/bal-project",
                 "/srv/claude/skills/bal-capture",
                 "/srv/claude/skills/bal-help",
                 "/srv/claude",

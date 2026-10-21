@@ -289,7 +289,7 @@ mod tests {
             judged.push(entry.identity);
         }
         judged.sort();
-        assert_eq!(judged, ["bal-capture", "bal-help"]);
+        assert_eq!(judged, ["bal-capture", "bal-help", "bal-project"]);
     }
 
     #[test]

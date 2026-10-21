@@ -842,7 +842,7 @@ pub(crate) mod fixtures {
                 let placement = match entry.identity.as_str() {
                     "bal-capture" => place(capture),
                     "bal-help" => place(help),
-                    other => panic!("an unexpected front door {other}"),
+                    _ => Placement::Unknown,
                 };
                 (entry, placement)
             })
@@ -1299,12 +1299,21 @@ mod tests {
 
     #[test]
     fn an_installed_artifact_reported_not_installed_by_the_doctor_is_caught() {
-        let record = record_for(&["bal-capture", "bal-help"], true, true, true);
+        let record = record_for(
+            &["bal-project", "bal-capture", "bal-help"],
+            true,
+            true,
+            true,
+        );
         let map = installed_placements(derived(), Ok(Some(record))).unwrap();
         assert_eq!(map.not_installed(), []);
         assert_eq!(
             files(&map),
             [
+                (
+                    Artifact::Stub("bal-project".into()),
+                    "/home/o/.claude/skills/bal-project/SKILL.md".to_owned()
+                ),
                 (
                     Artifact::Stub("bal-capture".into()),
                     "/home/o/.claude/skills/bal-capture/SKILL.md".to_owned()
@@ -1336,6 +1345,7 @@ mod tests {
         assert_eq!(
             map.not_installed(),
             [
+                Artifact::Stub("bal-project".into()),
                 Artifact::Stub("bal-capture".into()),
                 Artifact::Stub("bal-help".into()),
                 Artifact::Registration,
@@ -1374,7 +1384,11 @@ mod tests {
         );
         assert_eq!(
             map.not_installed(),
-            [Artifact::Stub("bal-help".into()), Artifact::Registration]
+            [
+                Artifact::Stub("bal-project".into()),
+                Artifact::Stub("bal-help".into()),
+                Artifact::Registration,
+            ]
         );
 
         let help_only = record_for(&["bal-help"], true, false, false);
@@ -1392,6 +1406,7 @@ mod tests {
         assert_eq!(
             map.not_installed(),
             [
+                Artifact::Stub("bal-project".into()),
                 Artifact::Stub("bal-capture".into()),
                 Artifact::Hook,
                 Artifact::Settings,
