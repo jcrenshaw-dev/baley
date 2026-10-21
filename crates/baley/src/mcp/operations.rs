@@ -106,7 +106,7 @@ pub const QUERY_OPERATIONS: &[Operation] = &[
     retired("evidence-read", 5),
     retired("plan-read", 4),
     retired("context-intake", 4),
-    retired("route", 4),
+    with_project("route"),
     retired("config-entry", 2),
     retired("config-facts", 2),
     retired("config-interview", 2),
@@ -372,6 +372,9 @@ enum RequestShape {
     // `work-order-retry` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "work-order-retry")]
     WorkOrderRetry(#[allow(dead_code)] crate::mcp::work_order::RetryShape),
+    // `route` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "route")]
+    Route(#[allow(dead_code)] crate::mcp::work_order::RouteShape),
 }
 
 fn invalid_arguments(reason: impl Into<String>) -> Value {
@@ -716,6 +719,7 @@ mod tests {
                     "project-start",
                     "work-order-fail",
                     "work-order-retry",
+                    "route",
                 ]
                 .contains(n)
             }) {
@@ -731,12 +735,15 @@ mod tests {
                 needs_project: true
             }
         );
-        assert_eq!(
-            lookup(Tool::Query, Some("document")),
-            Lookup::Available {
-                needs_project: true
-            }
-        );
+        for name in ["document", "route"] {
+            assert_eq!(
+                lookup(Tool::Query, Some(name)),
+                Lookup::Available {
+                    needs_project: true
+                },
+                "{name}"
+            );
+        }
         for name in [
             "scope-submit",
             "project-describe",
@@ -774,7 +781,7 @@ mod tests {
         assert_eq!(build(Tool::Query, "plan-read"), 4);
         assert_eq!(build(Tool::Apply, "review-admit"), 4);
         assert_eq!(build(Tool::Apply, "risk-fire"), 4);
-        assert_eq!(build(Tool::Query, "route"), 4);
+        assert_eq!(build(Tool::Query, "context-intake"), 4);
         assert_eq!(build(Tool::Query, "detect-surfaces"), 4);
         assert_eq!(build(Tool::Apply, "execution-run"), 5);
         assert_eq!(build(Tool::Query, "verify-next"), 5);
@@ -1298,5 +1305,23 @@ mod tests {
             }
             assert!(!listed.contains(&json!("instruction")), "{answer}");
         }
+    }
+
+    #[test]
+    fn a_route_query_left_retired_or_moved_in_the_baseline_is_caught() {
+        assert_eq!(
+            lookup(Tool::Query, Some("route")),
+            Lookup::Available {
+                needs_project: true
+            }
+        );
+        let names: Vec<&str> = QUERY_OPERATIONS.iter().map(|op| op.name).collect();
+        let at = names.iter().position(|name| *name == "route").unwrap();
+        assert_eq!(names[at - 1], "context-intake");
+        assert_eq!(names[at + 1], "config-entry");
+        assert_eq!(
+            expected::QUERY.iter().position(|name| *name == "route"),
+            Some(at)
+        );
     }
 }

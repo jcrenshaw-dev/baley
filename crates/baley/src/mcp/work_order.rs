@@ -6,14 +6,18 @@
 //! session reports could not launch or returned without a valid result.
 //! `work-order-retry` records the next attempt of a failed order as a new
 //! `work_order.issued`, its route resolved again under the current policy. A
-//! refusal records nothing.
+//! refusal records nothing. The `route` query on `baley_query` explains the
+//! route a role or an order runs under, and records nothing at all.
 
 use std::cell::RefCell;
 use std::num::NonZeroU32;
 use std::path::Path;
 
 use baley_core::capture::is_blank;
-use baley_core::policy::{AcceptedNames, EffectivePolicy, Host, Layer, Role};
+use baley_core::policy::recorded::{
+    POLICY_VIEW, PolicyJudgement, effective_payload, judge_policy, policy_key, recorded_policy,
+};
+use baley_core::policy::{AcceptedNames, CONFIG_UNAVAILABLE, EffectivePolicy, Host, Layer, Role};
 use baley_core::work_order::{
     ANSWERED, MATERIAL_UNAVAILABLE, NO_SUCH_WORK_ORDER, PENDING, Retry, RetryRefusal,
     START_ORDER_PENDING, START_SUBJECT, WORK_ORDER_NOT_FAILED, WORK_ORDER_NOT_PENDING,
@@ -37,7 +41,7 @@ use crate::mcp::client::MAX_ECHOED_BYTES;
 use crate::mcp::handler::Preparation;
 use crate::mcp::prepare::{
     CHECKOUT_FACTS_UNAVAILABLE, LEDGER_UNAVAILABLE, Prepared, Stepped, WriteRequest,
-    prepare_checked,
+    prepare_checked, prepare_settings_read,
 };
 use crate::process::Process;
 use crate::scope::submit::{NOT_RECORDED_BUSY, start_once};
@@ -894,6 +898,179 @@ pub fn serve_retry(arguments: &Value, preparation: &Preparation) -> Value {
     )
 }
 
+// `schema` serves this same declaration, so its doc comments are wire text.
+/// The arguments the `route` query takes beside its `operation`: exactly one
+/// of `role` and `work_order`. Unknown fields are refused.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteShape {
+    /// The role whose first attempt's route to explain, such as `planner`.
+    /// Send this or `work_order`, not both.
+    pub role: Option<String>,
+    /// The id of a work order, as its receipt gave it, whose route to explain
+    /// at the attempt the order records. Send this or `role`, not both.
+    pub work_order: Option<String>,
+}
+
+/// The tagged form the `route` query's arguments arrive in.
+#[derive(Deserialize)]
+#[serde(tag = "operation")]
+enum RouteCall {
+    #[serde(rename = "route")]
+    Route(RouteShape),
+}
+
+/// What a `route` query asks to explain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteQuery {
+    /// This role at attempt 1.
+    Role(Role),
+    /// The role and recorded attempt of the order with this id.
+    WorkOrder(String),
+}
+
+/// Judges the `route` query's arguments: the shape, then exactly one of
+/// `role` and `work_order`, then that one's form. A fault is the `refused`
+/// answer.
+pub fn judge_route_arguments(arguments: &Value) -> Result<RouteQuery, Value> {
+    let shape = match serde_json::from_value::<RouteCall>(arguments.clone()) {
+        Ok(RouteCall::Route(shape)) => shape,
+        Err(error) => return Err(shape_fault(&error)),
+    };
+    match (shape.role, shape.work_order) {
+        (Some(role), None) => Role::parse(&role).map(RouteQuery::Role).ok_or_else(|| {
+            Refusal::new(
+                "invalid-arguments",
+                "role must be one of planner, analyzer, checker, executor, verifier and reviewer",
+            )
+            .slot("role")
+            .value()
+        }),
+        (None, Some(id)) => {
+            judge_order_id(&id)?;
+            Ok(RouteQuery::WorkOrder(id))
+        }
+        _ => Err(Refusal::new(
+            "invalid-arguments",
+            "route takes exactly one of role and work_order",
+        )
+        .slot("arguments")
+        .value()),
+    }
+}
+
+/// The note on a route explained at no recorded policy version.
+const ROUTE_UNRECORDED: &str = "No policy recorded for this checkout matches the settings now, so this route is explained at policy version 0 and the next write records a new version";
+
+/// A busy ledger's reason when a route was not explained.
+const ROUTE_NOT_READ_BUSY: &str = "the ledger is busy, so the route was not read. Try it again";
+
+/// Explains the route `query` names in `project` under `policy`, the host's
+/// effective policy for the checkout at `root`, with the catalog `names`,
+/// and records nothing (D-11). A role is explained at attempt 1 and an order
+/// at the attempt it records, an unknown order `no-such-work-order`. The
+/// policy version is the one this checkout and host's `policy` record holds
+/// when the settings still match it at the catalog's version, and none
+/// otherwise, with a note; the route is composed at that version, 0 when
+/// none.
+pub fn route_answer<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    root: &Path,
+    policy: &EffectivePolicy,
+    host: Host,
+    names: &AcceptedNames,
+    query: &RouteQuery,
+) -> Value {
+    let (role, attempt) = match query {
+        RouteQuery::Role(role) => (*role, NonZeroU32::MIN),
+        RouteQuery::WorkOrder(id) => match order_document(store, project, id) {
+            Ok(Some(document)) => match recorded_attempt(&document.body) {
+                Some(found) => found,
+                None => return order_unreadable(),
+            },
+            Ok(None) => return no_such_order(),
+            Err(error) => return store_failed(&error, ROUTE_NOT_READ_BUSY),
+        },
+    };
+    let recorded = match recorded_policy(root, policy) {
+        Ok(recorded) => recorded,
+        Err(error) => return failed(CONFIG_UNAVAILABLE, error.to_string(), "settings"),
+    };
+    let payload = effective_payload(&recorded, &project.0, names.version);
+    let key = policy_key(&recorded.checkout, recorded.host);
+    let version = match store.get(project, POLICY_VIEW, &key) {
+        Ok(stored) => match judge_policy(&payload, stored.as_ref().map(|found| &found.body)) {
+            PolicyJudgement::Unchanged { version } => Some(version),
+            PolicyJudgement::Record => None,
+        },
+        Err(error) => return store_failed(&error, ROUTE_NOT_READ_BUSY),
+    };
+    let route = match compose(policy, version.unwrap_or(0), host, role, attempt, names) {
+        Ok(route) => route,
+        Err(refusal) => return Refusal::new(refusal.code(), refusal.to_string()).value(),
+    };
+    let mut answer = json!({"status": "ok", "route": route.record, "agent": route.agent,
+        "policy_version": version});
+    if version.is_none() {
+        answer["note"] = json!(ROUTE_UNRECORDED);
+    }
+    answer
+}
+
+/// The role and attempt an order document records.
+fn recorded_attempt(body: &Value) -> Option<(Role, NonZeroU32)> {
+    let role = Role::parse(body.get("role")?.as_str()?)?;
+    let attempt = u32::try_from(body.get("attempt")?.as_u64()?).ok()?;
+    Some((role, NonZeroU32::new(attempt)?))
+}
+
+/// Serves one `route` query for the session's `preparation`. The arguments
+/// are judged first; then the read is prepared with the settings read and
+/// judged and nothing recorded, the host catalog is read and the route
+/// explained.
+pub fn serve_route(arguments: &Value, preparation: &Preparation) -> Value {
+    let query = match judge_route_arguments(arguments) {
+        Ok(query) => query,
+        Err(refusal) => return refusal,
+    };
+    let ledger = preparation.ledger.as_deref();
+    // With no ledger, preparation fails at the project check, before any
+    // settings are read from the config folder.
+    let config = ledger.map_or(Path::new(""), |ledger| ledger.config.as_path());
+    let prepared = match prepare_settings_read(
+        ledger.map(|ledger| &ledger.store),
+        &preparation.caller,
+        config,
+        preparation.host,
+        &preparation.at,
+        &mut crate::process::System,
+    ) {
+        Ok(prepared) => prepared,
+        Err(answer) => return answer,
+    };
+    let (Some(ledger), Some(policy)) = (ledger, prepared.policy.as_ref()) else {
+        return failed(
+            LEDGER_UNAVAILABLE,
+            "the read was prepared without a ledger or a policy",
+            PLACE_LEDGER,
+        );
+    };
+    let names = match host_names(&ledger.store, preparation.host) {
+        Ok(names) => names,
+        Err(error) => return store_failed(&error, ROUTE_NOT_READ_BUSY),
+    };
+    route_answer(
+        &ledger.store,
+        &prepared.project,
+        &prepared.root,
+        policy,
+        preparation.host,
+        &names,
+        &query,
+    )
+}
+
 /// The `invalid-arguments` answer for a shape fault, at slot `arguments`.
 fn shape_fault(error: &serde_json::Error) -> Value {
     Refusal::new("invalid-arguments", bounded(error.to_string()))
@@ -1091,13 +1268,25 @@ pub(crate) mod tests {
     }
 
     /// Records a pending start planner order `id` in `project` under
-    /// `request_id` at `at`, as project start records one.
+    /// `request_id` at `at`, as project start records one, with brief B1.
     pub(crate) fn issue_start(
         store: &baley_store_sqlite::SqliteStore,
         project: &ProjectId,
         id: &str,
         request_id: &str,
         at: &str,
+    ) {
+        issue_start_with(store, project, id, request_id, at, B1);
+    }
+
+    /// [`issue_start`] with `brief` as the order's brief.
+    pub(crate) fn issue_start_with(
+        store: &baley_store_sqlite::SqliteStore,
+        project: &ProjectId,
+        id: &str,
+        request_id: &str,
+        at: &str,
+        brief: &str,
     ) {
         use std::collections::BTreeSet;
         use std::num::NonZeroU32;
@@ -1128,7 +1317,7 @@ pub(crate) mod tests {
         let further = serde_json::Map::new();
         let inputs = [Input::Bytes {
             name: "brief",
-            bytes: B1.as_bytes(),
+            bytes: brief.as_bytes(),
         }];
         let issue = Issue {
             id,
@@ -1549,6 +1738,166 @@ pub(crate) mod tests {
             "material-unavailable",
             "work_order",
             &json!({"input": "brief"}),
+        );
+    }
+
+    /// The `route` query judged from `arguments` beside its operation.
+    fn route_query(arguments: Value) -> Result<RouteQuery, Value> {
+        let mut call = json!({"operation": "route"});
+        call.as_object_mut()
+            .unwrap()
+            .extend(arguments.as_object().unwrap().clone());
+        judge_route_arguments(&call)
+    }
+
+    #[test]
+    fn a_work_order_read_whole_past_the_bound_or_a_route_query_that_records_or_advances_is_caught()
+    {
+        use baley_core::policy::{Schema, effective_policy};
+
+        use crate::mcp::document::{judge_arguments, read};
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        let brief = "b".repeat(30_000);
+        issue_start_with(&store, &project(), I0, R1, T1, &brief);
+        let before = head(&store);
+
+        let part = |n: u64| {
+            let shape = judge_arguments(&json!({"operation": "document",
+                "identity": {"kind": "work_order", "id": I0}, "part": n}))
+            .expect("a work-order read is judged");
+            read(&store, &project(), &shape)
+        };
+        let first = part(1);
+        assert_eq!(first["status"], "ok", "{first}");
+        assert_eq!(first["bound"], 24_576, "{first}");
+        assert_eq!(first["part"], 1, "{first}");
+        assert_eq!(first["next"], 2, "{first}");
+        let mut joined = String::new();
+        let mut at = first;
+        loop {
+            let body = at["body"].as_str().expect("each part has a body");
+            assert!(
+                body.len() <= 24_576,
+                "{} bytes in {}",
+                body.len(),
+                at["part"]
+            );
+            joined.push_str(body);
+            match at["next"].as_u64() {
+                Some(next) => {
+                    assert_eq!(Some(next), at["part"].as_u64().map(|n| n + 1));
+                    at = part(next);
+                }
+                None => {
+                    assert_eq!(at["next"], Value::Null, "{at}");
+                    break;
+                }
+            }
+        }
+        let whole: Value = serde_json::from_str(&joined).expect("the parts join to JSON");
+        assert_eq!(whole["status"], "ok");
+        assert_eq!(whole["order"]["id"], I0);
+        assert_eq!(whole["inputs"][0]["name"], "brief");
+        assert_eq!(whole["inputs"][0]["text"], brief);
+
+        let issued_under =
+            effective_policy(Schema::standard(), Some(Host::ClaudeCode), None, None).unwrap();
+        let query = route_query(json!({"work_order": I0})).expect("an order id is judged");
+        let answer = route_answer(
+            &store,
+            &project(),
+            Path::new("/w/r"),
+            &issued_under,
+            Host::ClaudeCode,
+            &no_names(),
+            &query,
+        );
+        assert_eq!(answer["status"], "ok", "{answer}");
+        assert_eq!(answer["route"]["role"], "planner", "{answer}");
+        assert_eq!(answer["route"]["attempt"], 1, "{answer}");
+        assert_eq!(answer["route"]["rung"], "high", "{answer}");
+
+        assert_eq!(head(&store), before);
+        assert_eq!(of_type(&history(&store), "work_order.issued").len(), 1);
+        assert_eq!(held(&store, &project(), I0).unwrap()["attempt"], 1);
+    }
+
+    #[test]
+    fn a_route_query_version_taken_from_a_record_the_settings_no_longer_match_is_caught() {
+        use baley_core::policy::recorded::recorded_policy;
+
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        let root = Path::new("/w/r");
+        let recorded_with = policy(Some(EFFORT_MAX), "");
+        let recorded = recorded_policy(root, &recorded_with).unwrap();
+        let version = crate::policy_step::record(
+            &store,
+            &project(),
+            &recorded,
+            0,
+            RequestId(R1.into()),
+            T1,
+            None,
+        )
+        .unwrap();
+        let before = head(&store);
+        let query = route_query(json!({"role": "planner"})).expect("a role is judged");
+        let explain = |policy: &EffectivePolicy| {
+            route_answer(
+                &store,
+                &project(),
+                root,
+                policy,
+                Host::ClaudeCode,
+                &no_names(),
+                &query,
+            )
+        };
+
+        let matching = explain(&recorded_with);
+        assert_eq!(matching["status"], "ok", "{matching}");
+        assert_eq!(matching["policy_version"], version, "{matching}");
+        assert_eq!(matching["route"]["rung"], "max", "{matching}");
+        assert_eq!(matching["route"]["policy_version"], version, "{matching}");
+        assert_eq!(matching.get("note"), None, "{matching}");
+
+        let moved = explain(&policy(Some("[roles.planner]\neffort = \"low\"\n"), ""));
+        assert_eq!(moved["status"], "ok", "{moved}");
+        assert_eq!(moved["policy_version"], Value::Null, "{moved}");
+        assert!(moved["note"].is_string(), "{moved}");
+        assert_eq!(moved["route"]["rung"], "low", "{moved}");
+        assert_eq!(moved["route"]["policy_version"], 0, "{moved}");
+
+        assert_eq!(head(&store), before);
+    }
+
+    #[test]
+    fn a_route_query_in_another_form_accepted_is_caught() {
+        for (arguments, slot) in [
+            (json!({}), "arguments"),
+            (json!({"role": "planner", "work_order": I0}), "arguments"),
+            (json!({"role": "boss"}), "role"),
+            (json!({"work_order": I0.to_uppercase()}), "work_order"),
+        ] {
+            let refusal = route_query(arguments.clone()).expect_err("refused");
+            assert_eq!(refusal["status"], "refused", "{arguments}: {refusal}");
+            assert_eq!(
+                refusal["code"], "invalid-arguments",
+                "{arguments}: {refusal}"
+            );
+            assert_eq!(refusal["slot"], slot, "{arguments}: {refusal}");
+        }
+        assert_eq!(
+            route_query(json!({"role": "planner"})),
+            Ok(RouteQuery::Role(Role::Planner))
+        );
+        assert_eq!(
+            route_query(json!({"work_order": I0})),
+            Ok(RouteQuery::WorkOrder(I0.into()))
         );
     }
 }

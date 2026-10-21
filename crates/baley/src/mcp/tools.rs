@@ -384,7 +384,8 @@ mod tests {
         // each change operation take request_id and submission,
         // project-start takes request_id, brief and instruction,
         // work-order-fail takes request_id, work_order, reason and instruction,
-        // and work-order-retry takes request_id, work_order and instruction.
+        // work-order-retry takes request_id, work_order and instruction,
+        // and route takes role or work_order.
         let names = |tool| {
             let schema = input_schema(tool);
             let mut names: Vec<String> = schema["properties"]
@@ -398,7 +399,16 @@ mod tests {
         };
         assert_eq!(
             names(Tool::Query),
-            ["for", "identity", "name", "operation", "part", "tool"]
+            [
+                "for",
+                "identity",
+                "name",
+                "operation",
+                "part",
+                "role",
+                "tool",
+                "work_order"
+            ]
         );
         assert_eq!(
             names(Tool::Apply),

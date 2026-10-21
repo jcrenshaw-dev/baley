@@ -15,7 +15,9 @@
 //! rather than refused. Checkout admission and the policy step
 //! are separate transactions, as on the command line, so a store failure at
 //! the step can follow a checkout admission that already recorded
-//! `checkout.seen`. That record stands. Preparation creates no project, no
+//! `checkout.seen`. That record stands. A read may also read and judge the
+//! settings as a write does, for the `route` query, and stops there with the
+//! host's policy, so it too records nothing. Preparation creates no project, no
 //! `project.initialized` event, no catalog seed and runs no detection: the
 //! owner sets those up with `baley init` and `baley config`.
 
@@ -67,7 +69,8 @@ const PLACE_CHECKOUT: &str = "checkout";
 /// Project start is the reader of the project file and of what the write's
 /// steps found: it resolves its route from the host's policy at the step's
 /// version (D-11) and classifies the checkout from the root commit and the
-/// project file (D-20).
+/// project file (D-20). The `route` query is the reader of the policy a
+/// settings-reading read judged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prepared {
     /// The project the working tree's `baley.toml` names, known to the ledger.
@@ -83,6 +86,10 @@ pub struct Prepared {
     /// What the write's own steps found. `Some` exactly on a write that is not
     /// a replay: a read gathers nothing, and a replay runs no step.
     pub stepped: Option<Stepped>,
+    /// The host's effective policy a settings-reading read judged. `Some`
+    /// exactly on that read, which records nothing, so no version comes with
+    /// it (D-11).
+    pub policy: Option<EffectivePolicy>,
 }
 
 /// What a write's checkout admission and policy step found.
@@ -218,6 +225,8 @@ struct Call<'a> {
     host: Host,
     at: &'a str,
     write: Option<&'a WriteRequest>,
+    /// Whether a read also reads and judges the settings.
+    reads_settings: bool,
     check: Option<&'a Check<'a>>,
 }
 
@@ -316,7 +325,8 @@ fn fault_failed(fault: &LedgerFault) -> Next {
 
 /// The next step for the call, or its answer. Discovery starts from the
 /// project directory the caller holds and from nothing else. A read stops at
-/// the known-project check. A write goes on, in the command line's order, to
+/// the known-project check, and a settings-reading read after the settings
+/// are judged. A write goes on, in the command line's order, to
 /// the replay lookup, its own check when it has one, then the settings,
 /// checkout admission and the policy step.
 fn next(call: &Call, seen: &Seen) -> Next {
@@ -376,15 +386,16 @@ fn next(call: &Call, seen: &Seen) -> Next {
         }
         Ok(_) => {}
     }
-    let Some(request) = call.write else {
+    if call.write.is_none() && !call.reads_settings {
         return Next::Ready(Box::new(Prepared {
             project,
             root,
             project_file: file,
             command: None,
             stepped: None,
+            policy: None,
         }));
-    };
+    }
     let Some(working) = working.as_ref().ok().and_then(Option::as_ref) else {
         return unavailable_file(&file);
     };
@@ -393,7 +404,39 @@ fn next(call: &Call, seen: &Seen) -> Next {
         root,
         file,
     };
+    let Some(request) = call.write else {
+        return match judged_settings(call, seen, &found, working) {
+            Ok(policies) => Next::Ready(Box::new(Prepared {
+                project: found.project,
+                root: found.root,
+                project_file: found.file,
+                command: None,
+                stepped: None,
+                policy: Some(policies.host),
+            })),
+            Err(next) => *next,
+        };
+    };
     write_next(call, request, seen, found, working)
+}
+
+/// The settings step a write and a settings-reading read share: the read of
+/// both files, then their judgement for the call's host. `Err` is the step to
+/// perform or the `config-unavailable` answer, boxed since a step is large.
+fn judged_settings(
+    call: &Call,
+    seen: &Seen,
+    found: &Found,
+    working: &SettingsFile,
+) -> Result<WritePolicies, Box<Next>> {
+    let Some(reads) = &seen.reads else {
+        return Err(Box::new(Next::Do(Step::ReadSettings {
+            root: found.root.clone(),
+            working: working.clone(),
+        })));
+    };
+    judge_settings(reads, call.host, &found.root)
+        .map_err(|fault| Box::new(failed(CONFIG_UNAVAILABLE, fault, PLACE_SETTINGS)))
 }
 
 /// Where discovery found the project a write is prepared for.
@@ -414,6 +457,7 @@ impl Found {
             project_file: self.file,
             command: Some(command),
             stepped,
+            policy: None,
         }))
     }
 }
@@ -473,15 +517,9 @@ fn write_next(
             Some(Ok(())) => {}
         }
     }
-    let Some(reads) = &seen.reads else {
-        return Next::Do(Step::ReadSettings {
-            root: found.root,
-            working: working.clone(),
-        });
-    };
-    let policies = match judge_settings(reads, call.host, &found.root) {
+    let policies = match judged_settings(call, seen, &found, working) {
         Ok(policies) => policies,
-        Err(fault) => return failed(CONFIG_UNAVAILABLE, fault, PLACE_SETTINGS),
+        Err(next) => return *next,
     };
     let root_commit = match &seen.admitted {
         None => {
@@ -581,6 +619,7 @@ pub fn prepare<S: Admin + Views + Ledger>(
         at,
         write,
         check: None,
+        reads_settings: false,
     };
     match drive(store, &call, config, process) {
         Ok(prepared) => Ok(prepared),
@@ -619,9 +658,39 @@ pub fn prepare_checked<S: Admin + Views + Ledger>(
         at,
         write: Some(write),
         check: Some(check),
+        reads_settings: false,
     };
     drive(store, &call, config, process).map_err(|ended| match ended {
         Ended::Failed(answer) => serde_json::to_value(*answer).expect("a failed answer serializes"),
+        Ended::Checked(answer) => answer,
+    })
+}
+
+/// Prepares a project read that also reads and judges the settings, by the
+/// same settings read and judgement a write runs, and is ready with the
+/// host's effective policy in [`Prepared::policy`]. It never looks up a
+/// request, runs a check, admits the checkout or runs the policy step, so it
+/// records nothing and carries no command (D-11). Any end is preparation's
+/// own `failed` answer as a JSON value.
+pub fn prepare_settings_read<S: Admin + Views + Ledger>(
+    store: Option<&S>,
+    caller: &ServerCaller,
+    config: &Path,
+    host: Host,
+    at: &str,
+    process: &mut dyn Process,
+) -> Result<Prepared, Value> {
+    let call = Call {
+        caller,
+        host,
+        at,
+        write: None,
+        reads_settings: true,
+        check: None,
+    };
+    drive(store, &call, config, process).map_err(|ended| match ended {
+        Ended::Failed(answer) => serde_json::to_value(*answer).expect("a failed answer serializes"),
+        // A read has no check step to end the call.
         Ended::Checked(answer) => answer,
     })
 }
@@ -1121,6 +1190,7 @@ mod tests {
             at: AT,
             write: None,
             check: None,
+            reads_settings: false,
         }
     }
 
@@ -1486,6 +1556,57 @@ mod tests {
         assert_eq!(effort.source.layer, Layer::Global);
         assert_eq!(stepped.root_commit.as_deref(), Some(ROOT_COMMIT));
         assert_eq!(prepared.project_file, Path::new("/real/r/baley.toml"));
+    }
+
+    #[test]
+    fn a_route_read_that_admits_the_checkout_or_runs_the_policy_step_is_caught() {
+        use baley_core::policy::{Rung, Value as Setting};
+        let caller = caller("/real/r/p", "/w");
+        let call = Call {
+            reads_settings: true,
+            ..read_call(&caller)
+        };
+        let step = |seen: &Seen| match next(&call, seen) {
+            Next::Do(step) => step,
+            other => panic!("expected a step, got {other:?}"),
+        };
+        assert_eq!(step(&Seen::default()), Step::Discover("/real/r/p".into()));
+        assert_eq!(
+            step(&walked()),
+            Step::ReadProjectFile("/real/r/baley.toml".into())
+        );
+        assert_eq!(step(&with_file(walked())), Step::ListProjects);
+        let Step::ReadSettings { root, .. } = step(&known_project()) else {
+            panic!("a known project's settings are read next");
+        };
+        assert_eq!(root, Path::new("/real/r"));
+
+        let with_global = |text: &str| {
+            let mut seen = with_reads(known_project(), "[project]\n");
+            let global = settings::file(Path::new("/c/config.toml"), text.as_bytes().to_vec());
+            seen.reads.as_mut().unwrap().global = Ok(Some(global));
+            seen
+        };
+        let Next::Ready(prepared) =
+            next(&call, &with_global("[roles.planner]\neffort = \"max\"\n"))
+        else {
+            panic!("the settings are read, so the read is ready");
+        };
+        assert_eq!(prepared.command, None);
+        assert_eq!(prepared.stepped, None);
+        let policy = prepared.policy.expect("the host's policy");
+        assert_eq!(policy.host, Some(Host::ClaudeCode));
+        assert_eq!(
+            policy.settings["roles.planner.effort"].value,
+            Some(Setting::Rung(Rung::Max))
+        );
+
+        assert_failed(
+            next(&call, &with_global("[roles.planner\n")),
+            "config-unavailable",
+            "settings",
+            false,
+        );
     }
 
     #[test]
