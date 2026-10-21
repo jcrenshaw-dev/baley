@@ -34,7 +34,7 @@ workspace "Baley" "The C4 model behind Baley's design documents. Every structure
         host -> binary "Asks before each tool call runs" "Pre-tool hook, one process per tool call"
         # The only relation from a component to the host, so the context and
         # container views show it as an implied edge with this text.
-        hostInterface -> host "Writes the wiring with baley install: MCP registration, pre-tool hook, sandbox and deny settings, skill stubs. Adds the chosen providers' API hosts to the sandbox allow list with baley config interview" "claude mcp add-json, files under the Claude folder"
+        hostInterface -> host "Writes the wiring with baley install: MCP registration, pre-tool hook, sandbox and deny settings, skill and agent stubs. Adds the chosen providers' API hosts to the sandbox allow list with baley config interview" "claude mcp add-json, files under the Claude folder"
         host -> repo "Workers edit source and commit"
         host -> reviewers "Review and model-list API calls with the owner's environment keys"
         hostInterface -> hardin "Asks what may happen next"

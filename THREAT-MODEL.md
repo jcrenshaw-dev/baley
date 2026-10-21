@@ -43,10 +43,10 @@ An empty or relative XDG value is ignored.
 
 - `<config>/config.toml`, the owner's global settings. It is read whole and follows symlinks with no size cap (`crates/baley/src/settings.rs:72-109`). The guard caps it at 1 MiB (`settings.rs:44-57`).
 - The ledger: `<home>/baley.db` with its `-wal`, `-shm`, `.writer` and `.maintenance` files (`crates/baley-store-sqlite/src/checks.rs:8-14`).
-- The project's `baley.toml`, in two copies. The working-tree copy gives the project id (`crates/baley/src/mcp/prepare.rs:331-339`), and policy comes from HEAD's committed copy, read through git (`crates/baley/src/committed.rs`, `crates/baley/src/policy_step/read.rs:39-62`).
+- The project's `baley.toml`, in two copies. The working-tree copy gives the project id (`crates/baley/src/mcp/prepare.rs:363-371`), and policy comes from HEAD's committed copy, read through git (`crates/baley/src/committed.rs`, `crates/baley/src/policy_step/read.rs:39-62`).
 - Each ancestor of the working directory or `CLAUDE_PROJECT_DIR`, lstat'ed for `baley.toml` and `.git` up to the repository root (`crates/baley/src/discovery.rs:44-97`).
 - `.git`, a gitdir file and `HEAD`, read directly by the guard as a fallback when git gives no branch. These reads use `O_NOFOLLOW` and are capped at 4 KiB (`crates/baley/src/guard_hook/branch.rs:77-138`).
-- Claude Code's files, under `$CLAUDE_CONFIG_DIR` or `~/.claude`: `settings.json`, `skills/<id>/SKILL.md`, and `.claude.json` (in that folder when `CLAUDE_CONFIG_DIR` is set, otherwise in `HOME`) (`crates/baley/src/host_artifacts/installed.rs:65-110`). Install, the doctor and the interview read them whole, following symlinks, with no size cap (`crates/baley/src/host_doctor/placed.rs:64-95`). The guard only derives these paths and reads none of them.
+- Claude Code's files, under `$CLAUDE_CONFIG_DIR` or `~/.claude`: `settings.json`, `skills/<id>/SKILL.md`, `agents/<name>.md`, and `.claude.json` (in that folder when `CLAUDE_CONFIG_DIR` is set, otherwise in `HOME`) (`crates/baley/src/host_artifacts/installed.rs:65-114`). Install, the doctor and the interview read them whole, following symlinks, with no size cap (`crates/baley/src/host_doctor/placed.rs:64-95`). The guard only derives these paths and reads none of them.
 
 **Git.** Every git read runs the `git` found on `PATH`:
 
@@ -102,7 +102,7 @@ No clap argument reads the environment.
   - `permissions.deny` `Read` and `Edit` rules on the same folders and files (`crates/baley/src/host_artifacts/security.rs:146-222`);
   - the providers' API hosts in `sandbox.network.allowedDomains`, which the interview adds (`crates/baley/src/install/hosts.rs:58-82`).
 - **The MCP registration.** Install runs `claude mcp add-json --scope user baley <json>`, and sometimes `claude mcp remove --scope user baley` first. Claude Code writes `.claude.json`, and Baley never writes it directly (`crates/baley/src/install/registration.rs:40-57`).
-- **Skill stubs.** Install writes `skills/<id>/SKILL.md` under the Claude Code folder, whose folders it creates with the default mode (`crates/baley/src/install/apply.rs:60-81`).
+- **Skill and agent stubs.** Install writes the seven skill stubs as `skills/<id>/SKILL.md` and the thirty agent stubs as `agents/<name>.md` under the Claude Code folder, whose folders it creates with the default mode (`crates/baley/src/install/apply.rs:60-81`, `crates/baley/src/host_artifacts/installed.rs:106-114`).
 - **The forge.** `baley anchor` pushes `refs/tags/baley-anchor/<project>/<seq>`.
 - **Nothing else.** Nothing reachable writes shell rc files, systemd, launchd or cron units, git config or local refs.
 
@@ -114,7 +114,7 @@ Install changes only what it can prove it wrote:
 - the registration, only when it equals the recorded entry;
 - older Baley settings entries, only on an exact match.
 
-Any conflict refuses the whole plan (`crates/baley/src/install/plan.rs:312`). The update refuses an existing occupant unless it holds identical bytes. One write path is weaker: `create_folder` in `update/deliver.rs:518` accepts an existing path whose `is_dir()` follows a link.
+Any conflict refuses the whole plan (`crates/baley/src/install/plan.rs:317`). The update refuses an existing occupant unless it holds identical bytes. One write path is weaker: `create_folder` in `update/deliver.rs:518` accepts an existing path whose `is_dir()` follows a link.
 
 **Standard output and error.**
 
@@ -165,8 +165,8 @@ The guard launches no program except git (design 0010 GRD-R14). MCP tool calls (
 - **Baley's home and config folders.** An agent must never read or write them. The sandbox, the `Read` and `Edit` deny rules, and the guard's refusal of `Read`, `Grep`, `Glob`, `Write`, `Edit` and `NotebookEdit` calls into them carry this (design 0010 GRD-R11, GRD-R13).
 - **Placed artifacts.** An agent must never write the placed stubs, the Claude Code settings and registration files, the installed executable or the versions folder.
 - **Owner acts.** An agent must never get an act recorded as the owner's.
-  - Approvals are served on the command line only, never over MCP, and `baley_apply` refuses `scope-approve` (`crates/baley/src/mcp/handler.rs:535-547`; ADR 0044).
-  - Over MCP, only `capture` and `scope-submit` write to the ledger.
+  - Approvals are served on the command line only, never over MCP, and `baley_apply` refuses `scope-approve` (`crates/baley/src/mcp/handler.rs:556-582`; ADR 0044).
+  - Over MCP, only the `baley_apply` operations listed under MCP over stdio write to the ledger.
 - **Data leaving the machine.** Data must never leave except in two ways:
   - anchor tags pushed to the push URL of `git.remote` when the owner runs `baley anchor`;
   - downloads from `updates.source`.
@@ -236,19 +236,19 @@ What the owner would not notice:
 - **Queue.** One call running and four waiting, with 16 MiB of frame bytes in total (`crates/baley/src/mcp/queue.rs:16-20`).
 - **Client.** Its identity is self-reported, and only the `claude-code` host is accepted (`crates/baley/src/mcp/client.rs:1-5`, `gate.rs:79-87`). The identity is not authorization.
 - **Tools.** Three tools: `baley_version`, `baley_query` and `baley_apply` (`crates/baley/src/mcp/tools.rs:97-119`).
-  - Query serves `help`, `schema`, `instruction` and `document`.
-  - Apply serves `capture` and `scope-submit`.
-  - Every other operation name answers retired (`crates/baley/src/mcp/operations.rs:88-199`).
-- **Arguments.** Each operation parses with serde and refuses unknown fields. `request_id` must be a lowercase hyphenated UUID, and capture text must not be blank. Error echoes are capped at 128 bytes.
-  - Capture text and scope-submit fields have no length or count limit beyond the frame. Capture text over 4,096 bytes is stored as a payload.
+  - Query serves `help`, `schema`, `instruction`, `document` and `route`.
+  - Apply serves `capture`, `scope-submit`, the ten change operations (`project-describe`, `phase-declare`, `phase-edit`, `phase-reorder`, `phase-withdraw`, `story-declare`, `story-edit`, `story-reassign`, `story-drop` and `backlog-reorder`), and `project-start`, `work-order-fail` and `work-order-retry`.
+  - Every other operation name answers retired (`crates/baley/src/mcp/operations.rs:88-212`).
+- **Arguments.** Each operation parses with serde and refuses unknown fields. `request_id` must be a lowercase hyphenated UUID, and so must a `work_order` id (`crates/baley/src/mcp/work_order.rs:1130-1142`). Capture text, a project brief and a failure reason must not be blank. Error echoes are capped at 128 bytes.
+  - A brief holds at most 65,536 bytes and a failure reason at most 4,096 (`crates/baley/src/mcp/work_order.rs:63, 381`). Capture text, scope-submit fields and the change operations' fields have no length or count limit beyond the frame. Capture text over 4,096 bytes is stored as a payload.
   - No argument supplies a path or a working directory.
-- **Writes.** `capture` and `scope-submit` first record `checkout.seen` and `policy.effective`, and need the project already in the ledger (`crates/baley/src/mcp/prepare.rs:340-356, 639-679`). Write preparation runs git in the project with no output cap (`process.rs:109`).
+- **Writes.** Every apply operation first records `checkout.seen` and `policy.effective`, and needs the project already in the ledger (`crates/baley/src/mcp/prepare.rs:372-388, 761-804`). Write preparation runs git in the project with no output cap (`process.rs:109`).
 
 ### 2. The guard hook's standard input
 
 - **Input.** Read up to 64 KiB plus one byte. The guard reads `tool_name`, `cwd`, `session_id`, `tool_use_id` and `hook_event_name`, plus `command`, `file_path`, `notebook_path`, `path`, `glob` and `pattern` from `tool_input` (`crates/baley/src/hook_input/mod.rs:281-318`). It never reads `transcript_path`.
 - **Fields.** `tool_name` is taken as given. A missing `hook_event_name` is accepted. `cwd` must be absolute and is the base for commit targets and path checks.
-- **Project.** The project comes from `CLAUDE_PROJECT_DIR` and a `baley.toml` above it, never from `cwd` (`crates/baley/src/guard_hook/context.rs:65-174`).
+- **Project.** The project comes from `CLAUDE_PROJECT_DIR` and a `baley.toml` above it, never from `cwd` (`crates/baley/src/guard_hook/context.rs:70-178`).
 - **Commands.** The scan of a `Bash` or `Monitor` command is `crates/baley-core/src/guard/scan.rs`. Its stated limits are listed below.
 - **Path tools.** Their targets are canonicalized, following links, compared by component and by (device, inode) identity, and denied when they cannot be resolved (`crates/baley/src/protected_paths/`).
 

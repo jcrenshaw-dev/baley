@@ -50,7 +50,7 @@ graph LR
         style 10 fill:#85bbf0,stroke:#5d82a8,color:#000000
         4["<div style='font-weight: bold'>Host interface</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>MCP server (stdio), command<br />line and guard hook: the only<br />ways in. The guard hook<br />records its answers in the<br />per-user ledger.</div>"]
         style 4 fill:#85bbf0,stroke:#5d82a8,color:#000000
-        7["<div style='font-weight: bold'>Work order composer</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>Builds every dispatch: role,<br />model and effort from policy,<br />instructions from the binary,<br />inputs from the record.</div>"]
+        7["<div style='font-weight: bold'>Work order composer</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>Builds every work order: the<br />route from policy and the<br />model catalog, instructions<br />by identity from the binary,<br />inputs as references into the<br />record. In this build it<br />issues the start planner's<br />order and its retries.</div>"]
         style 7 fill:#85bbf0,stroke:#5d82a8,color:#000000
         8["<div style='font-weight: bold'>Policy</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>Reads the global and project<br />settings, resolves the values<br />in effect and records which<br />applied.</div>"]
         style 8 fill:#85bbf0,stroke:#5d82a8,color:#000000
@@ -68,9 +68,10 @@ graph LR
     1-. "<div>Uses the command line</div><div style='font-size: 70%'></div>" .->4
     14-. "<div>Work orders, results,<br />questions</div><div style='font-size: 70%'>[MCP over stdio]</div>" .->4
     14-. "<div>Asks before each tool call<br />runs</div><div style='font-size: 70%'>[Pre-tool hook, one process per tool call]</div>" .->4
-    4-. "<div>Writes the wiring with baley<br />install: MCP registration,<br />pre-tool hook, sandbox and<br />deny settings, skill stubs.<br />Adds the chosen providers'<br />API hosts to the sandbox<br />allow list with baley config<br />interview</div><div style='font-size: 70%'>[claude mcp add-json, files under the Claude folder]</div>" .->14
+    4-. "<div>Writes the wiring with baley<br />install: MCP registration,<br />pre-tool hook, sandbox and<br />deny settings, skill and<br />agent stubs. Adds the chosen<br />providers' API hosts to the<br />sandbox allow list with baley<br />config interview</div><div style='font-size: 70%'>[claude mcp add-json, files under the Claude folder]</div>" .->14
     14-. "<div>Review and model-list API<br />calls with the owner's<br />environment keys</div><div style='font-size: 70%'></div>" .->18
     7-. "<div>Resolves role, model and<br />effort</div><div style='font-size: 70%'></div>" .->8
+    7-. "<div>Reads the host's accepted<br />model names</div><div style='font-size: 70%'></div>" .->9
     8-. "<div>Reads</div><div style='font-size: 70%'></div>" .->13
     4-. "<div>Writes a settings file whole,<br />for config set and for the<br />interview's reviewer list</div><div style='font-size: 70%'></div>" .->13
     8-. "<div>Checks model names</div><div style='font-size: 70%'></div>" .->9
