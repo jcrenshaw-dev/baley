@@ -399,7 +399,7 @@ fn work_order_answer<S: Ledger + Views + Payloads + ?Sized>(
         Ok(read) => read,
         Err(error) => return store_failed(&error, ORDER_NOT_READ_BUSY),
     };
-    let inputs = match order_inputs(store, &order, &releases) {
+    let inputs = match order_inputs(store, project, &order, &releases) {
         Ok(inputs) => inputs,
         Err(answer) => return answer,
     };
@@ -410,11 +410,13 @@ fn work_order_answer<S: Ledger + Views + Payloads + ?Sized>(
     )
 }
 
-/// Each input of `order` with its name, hash and size, and its text, this
-/// project's purge tombstone, or the store's status when the body is gone
-/// otherwise. Nothing is rebuilt from current input.
-fn order_inputs<S: Payloads + ?Sized>(
+/// Each input of `order` with its name, hash and size, and its text, the
+/// tombstone of a purge `project` released it in, or the store's status when
+/// the body is gone otherwise. A purge reason only ever comes from this
+/// project's `releases`. Nothing is rebuilt from current input.
+fn order_inputs<S: Ledger + Payloads + ?Sized>(
     store: &S,
+    project: &ProjectId,
     order: &Value,
     releases: &work_order::Releases,
 ) -> Result<Vec<Value>, Value> {
@@ -450,6 +452,19 @@ fn order_inputs<S: Payloads + ?Sized>(
         }
         match store.open(&body.hash) {
             Err(error) => return Err(store_failed(&error, ORDER_NOT_READ_BUSY)),
+            Ok(PayloadBody::Gone(PayloadStatus::Purged { .. })) => {
+                // The store's reason is the last purge of the shared bytes,
+                // perhaps another project's, so this project's releases are
+                // read again for a purge of its own since the first read.
+                let current = work_order::releases(store, project)
+                    .map_err(|error| store_failed(&error, ORDER_NOT_READ_BUSY))?;
+                match current.find(seq, &body.hash) {
+                    Some(release) => {
+                        answer["tombstone"] = json!({"state": "purged", "reason": release.reason});
+                    }
+                    None => answer["unavailable"] = json!({"state": "purged"}),
+                }
+            }
             Ok(PayloadBody::Gone(status)) => answer["unavailable"] = gone_status(&status),
             Ok(PayloadBody::Present(mut reader)) => {
                 let mut bytes = Vec::new();
@@ -473,12 +488,13 @@ fn order_inputs<S: Payloads + ?Sized>(
     Ok(inputs)
 }
 
-/// The store's status for a body that is not held whole.
+/// The store's status for a body that is not held whole, without the store's
+/// purge reason, which may be another project's.
 fn gone_status(status: &PayloadStatus) -> Value {
     match status {
         PayloadStatus::Present { .. } => json!({"state": "present"}),
         PayloadStatus::Reduced { .. } => json!({"state": "reduced"}),
-        PayloadStatus::Purged { reason } => json!({"state": "purged", "reason": reason}),
+        PayloadStatus::Purged { .. } => json!({"state": "purged"}),
     }
 }
 
@@ -1281,6 +1297,33 @@ mod tests {
             );
             let other = read_order(&store, &project_b(), I1);
             assert_eq!(other["inputs"][0]["text"], B1, "{other}");
+        }
+
+        #[test]
+        fn a_work_order_read_answering_another_projects_purge_reason_is_caught() {
+            const OTHER: &str = "the other project's purge";
+            let (_dir, store) = two_projects();
+            issue_start(&store, &project(), I0, R1, T1);
+            issue_start(&store, &project_b(), I1, R1, T1);
+            let order = work_order::order(&store, &project(), I0).unwrap().unwrap();
+            // Read before either purge, as a read racing them would.
+            let before = work_order::releases(&store, &project()).unwrap();
+
+            let b1 = Hash::from_hex(B1_SHA256).unwrap();
+            purge_in(&store, &project(), b1, "owner purge");
+            purge_in(&store, &project_b(), b1, OTHER);
+            let gone = matches!(
+                store.open(&b1),
+                Ok(PayloadBody::Gone(PayloadStatus::Purged { ref reason })) if reason == OTHER
+            );
+            assert!(gone, "the store answers the other project's reason");
+
+            let inputs = order_inputs(&store, &project(), &order, &before).unwrap();
+            assert_eq!(
+                Value::Array(inputs),
+                json!([{"name": "brief", "hash": B1_SHA256, "bytes": 29,
+                    "tombstone": {"state": "purged", "reason": "owner purge"}}])
+            );
         }
 
         #[test]
