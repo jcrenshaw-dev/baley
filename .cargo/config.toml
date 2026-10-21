@@ -1,3 +1,0 @@
-[build]
-# Six jobs, the same limit as .config/nextest.toml's test threads (design 0015, UPK-R11).
-jobs = 6
