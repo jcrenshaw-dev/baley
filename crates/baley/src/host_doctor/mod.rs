@@ -290,6 +290,11 @@ pub struct Process<'a> {
     pub os: &'a str,
 }
 
+/// The stubs the doctor places and compares.
+pub(crate) fn manifest() -> Vec<stubs::Entry> {
+    stubs::installed_manifest()
+}
+
 /// Gathers the observation the doctor judges for `host`: derives the
 /// installed paths from `process`, reads the host's latest install record,
 /// builds the placement map from both and gathers as [`gather`] does, with
@@ -303,8 +308,7 @@ pub fn observe<S: Ledger + Admin + Views>(
     host: Host,
     stored: Stored<'_, S>,
 ) -> Observation {
-    let manifest = stubs::manifest(&stubs::front_doors()).expect("unique compiled front doors");
-    let derived = installed::resolve(process.env, process.claude_config_dir, &manifest);
+    let derived = installed::resolve(process.env, process.claude_config_dir, &manifest());
     let record = install::record::read(stored.store, host.name());
     let latest = record.as_ref().ok().cloned().flatten();
     let placements = derived

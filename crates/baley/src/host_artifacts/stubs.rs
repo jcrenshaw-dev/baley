@@ -100,6 +100,15 @@ pub fn manifest(front_doors: &[(&str, &str)]) -> Result<Vec<Entry>, DuplicateIde
     Ok(entries)
 }
 
+/// The manifest Claude Code's install holds: the front doors' skill stubs,
+/// then every agent stub (D-07). Install, the guard and the doctor read it;
+/// `baley artifact` prints the skill stubs only.
+pub fn installed_manifest() -> Vec<Entry> {
+    let mut entries = manifest(&front_doors()).expect("unique compiled front doors");
+    entries.extend(super::agents::manifest());
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

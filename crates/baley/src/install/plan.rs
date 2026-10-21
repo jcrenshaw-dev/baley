@@ -1867,4 +1867,95 @@ mod tests {
         .expect("plans");
         assert_eq!(plan.removals, [old_agent]);
     }
+
+    #[test]
+    fn an_install_placing_fewer_than_thirty_agents_or_a_doctor_blind_to_a_changed_one_is_caught() {
+        // The role and rung names, written out from design 0003.
+        const ROLES: [&str; 6] = [
+            "planner", "analyzer", "checker", "executor", "verifier", "reviewer",
+        ];
+        const RUNGS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+        let manifest = stubs::installed_manifest();
+        let env = crate::folders::Environment {
+            home: Some("/home/o".into()),
+            ..crate::folders::Environment::default()
+        };
+        let derive = || crate::host_artifacts::installed::resolve(&env, None, &manifest);
+        let installed = derive().unwrap();
+        let observations = all_absent(&installed);
+        let (folders, prerequisites) = (folders(), linux());
+
+        let plan = judge(&gathered_for(
+            &installed,
+            None,
+            &observations,
+            &prerequisites,
+            &folders,
+        ))
+        .expect("a fresh Claude folder plans");
+
+        let agents: Vec<&Write> = plan
+            .writes
+            .iter()
+            .filter(|write| write.path.starts_with("/home/o/.claude/agents"))
+            .collect();
+        assert_eq!(agents.len(), 30);
+        for role in ROLES {
+            for rung in RUNGS {
+                let name = format!("bal-{role}-{rung}");
+                let path = PathBuf::from(format!("/home/o/.claude/agents/{name}.md"));
+                let write = agents
+                    .iter()
+                    .find(|write| write.path == path)
+                    .unwrap_or_else(|| panic!("{name} is not written at {path:?}"));
+                assert_eq!(write.artifacts, [Artifact::Stub(name.clone())]);
+                assert_eq!(write.bytes, shipped(&manifest, &name).bytes, "{name}");
+                let lines: Vec<&str> = std::str::from_utf8(&write.bytes).unwrap().lines().collect();
+                assert!(lines.contains(&"model: inherit"), "{name}");
+                assert!(
+                    lines.contains(&format!("effort: {rung}").as_str()),
+                    "{name}"
+                );
+                let servers = lines
+                    .iter()
+                    .position(|line| *line == "mcpServers:")
+                    .unwrap_or_else(|| panic!("{name} names no server"));
+                assert_eq!(lines[servers + 1], "  - baley", "{name}");
+                for line in &lines {
+                    let key = line.trim_start();
+                    for refused in ["command:", "type:", "args:"] {
+                        assert!(!key.starts_with(refused), "{name}: {line}");
+                    }
+                    if key.starts_with("model:") {
+                        assert_eq!(*line, "model: inherit", "{name}");
+                    }
+                }
+            }
+        }
+
+        let entry = shipped(&manifest, "bal-planner-high");
+        let record = json!({"stubs": [{
+            "identity": "bal-planner-high",
+            "path": "/home/o/.claude/agents/bal-planner-high.md",
+            "sha256": entry.digest,
+        }]});
+        let map = crate::host_doctor::installed_placements(derive(), Ok(Some(record))).unwrap();
+        let placed = map
+            .expected_files()
+            .into_iter()
+            .find(|file| file.artifact == Artifact::Stub("bal-planner-high".into()))
+            .expect("the doctor places bal-planner-high");
+        assert_eq!(
+            placed.path,
+            Path::new("/home/o/.claude/agents/bal-planner-high.md")
+        );
+        let placed_entry = placed.stub.expect("with its manifest entry");
+        assert_eq!(placed_entry, entry);
+        let mut changed = placed_entry.bytes.clone();
+        changed[0] ^= 1;
+        assert_ne!(
+            crate::host_doctor::placed::stub(placed_entry, &changed),
+            crate::host_doctor::placed::StubJudgement::Matches
+        );
+    }
 }
