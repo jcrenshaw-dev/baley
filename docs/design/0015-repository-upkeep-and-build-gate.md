@@ -46,7 +46,7 @@ This area uses the existing [glossary](../../CONTEXT.md) terms without changing 
 | UPK-R8 | Issues use the jcrenshaw-dev issue types and labels in the [org label standard](https://github.com/jcrenshaw-dev/.github/blob/main/LABELS.md). Dependabot's `dependencies` and `rust` labels stay as Dependabot applies them. A label is deleted only after every issue carrying it has the type that replaces it. | Removing a used label erases classification. | | Active |
 | UPK-R9 | The bug form sets the Bug type and `needs-triage`, and requires one of section 9's three impact choices. The question form sets `needs-triage`. Impact is the reporter's, and severity is set at triage. | Only the reporter knows what the problem costs them. | | Active |
 | UPK-R10 | Suite cost is measured at the implementation commit without a competing build, with six build jobs and six test threads, full per-file executed counts, the twenty slowest cases plus ties, and an assessment of every represented file. | Elapsed time and source counts do not establish test value. | UPK-R11 | Active |
-| UPK-R11 | The repository build default is six jobs, nextest commands explicitly set six build jobs and six test threads, and clippy explicitly uses `-j 6`. | Compilation and test execution have separate concurrency limits. | | Active |
+| UPK-R11 | Each build and test run uses its share of the machine's threads: the thread count divided by the number of streams building at the same time, rounded down. The repository sets no cargo job count and nextest's default profile uses every thread, so a run that builds alone uses all of them. Nextest commands explicitly set the share as build jobs and test threads, and clippy explicitly sets it with `-j`. CI runs one stream and sets six. | Compilation and test execution have separate concurrency limits, and a fixed count leaves threads idle when one stream builds alone. | | Active |
 | UPK-Q1 | Every old-name match is classified, and no active Baley interface uses an old name. | A zero-match rule would erase intentional history. | UPK-R1, UPK-R4 | Active |
 | UPK-Q2 | The format gate rejects a formatting defect and accepts its correction without modifying source, and the applied branch rules require its exact context. | A local formatter or an optional job alone does not enforce the gate. | UPK-R5, UPK-R6 | Active |
 | UPK-Q3 | The suite report reconciles discovered, executed, passed, failed, ignored and filtered cases with its retained output and source mapping; no unit test asserts on timing. | Measurement must be reproducible without making tests depend on machine speed. | UPK-R10 | Active |
@@ -69,15 +69,15 @@ This area uses the existing [glossary](../../CONTEXT.md) terms without changing 
 **Inputs:** the workspace and the toolchain pinned in [rust-toolchain.toml](../../rust-toolchain.toml).
 
 ```text
-cargo nextest run --locked --workspace --no-fail-fast --build-jobs 6 --test-threads 6
-cargo clippy --workspace --all-targets --locked -j 6 -- -D warnings
+cargo nextest run --locked --workspace --no-fail-fast --build-jobs $JOBS --test-threads $JOBS
+cargo clippy --workspace --all-targets --locked -j $JOBS -- -D warnings
 cargo fmt --all --check
 cargo deny --locked check
 ```
 
 **Outputs:** the four check results. A nonzero exit fails its check. Formatting reports differences without rewriting files. The existing dependency check that prevents `baley-core` from reaching SQLite remains part of clippy's job ([test.yml:91-104](../../.github/workflows/test.yml#L91)).
 
-The build default is `[build] jobs = 6` in `.cargo/config.toml`. Nextest's default profile has `test-threads = 6`. Explicit command limits keep the intended compilation and execution limits visible even when configuration differs. Cargo documents the build setting in its [configuration reference](https://doc.rust-lang.org/cargo/reference/config.html#buildjobs), and nextest distinguishes build jobs from simultaneous tests in [Running tests](https://nexte.st/docs/running/).
+`JOBS` is the run's share of the machine's threads: the thread count divided by the number of streams building at the same time, rounded down, so a run that builds alone uses every thread. The repository sets no cargo job count, so cargo's default of every logical CPU applies, and nextest's default profile has `test-threads = "num-cpus"`. CI runs one stream on its own runner, and its workflow passes six for both. Explicit command limits keep the intended compilation and execution limits visible even when configuration differs. Cargo documents the build setting in its [configuration reference](https://doc.rust-lang.org/cargo/reference/config.html#buildjobs), and nextest distinguishes build jobs from simultaneous tests in [Running tests](https://nexte.st/docs/running/).
 
 The `fmt` job belongs in [test.yml](../../.github/workflows/test.yml). It uses the workflow's pinned checkout action and toolchain-channel extraction, installs that exact channel with the minimal profile, selects it, explicitly adds its `rustfmt` component, and runs the format command above. It needs no compilation or dependency cache. The job runs on the existing pull-request and main-push events, without a path filter, conditional skip or allowed failure. The [rustfmt documentation](https://github.com/rust-lang/rustfmt/blob/main/README.md) describes component installation and check-only operation.
 
@@ -95,7 +95,7 @@ The `fmt` job belongs in [test.yml](../../.github/workflows/test.yml). It uses t
 
 ### Measure the suite
 
-**Inputs:** a clean checkout at the implementation commit, no competing build, the pinned compiler and nextest version, and the nextest command above with `--status-level pass` to retain passing-case timings.
+**Inputs:** a clean checkout at the implementation commit, no competing build, the pinned compiler and nextest version, and the nextest command above with `JOBS=6` and `--status-level pass` to retain passing-case timings.
 
 **Outputs:** uncondensed stdout and stderr, exit code, compilation time, suite wall time, full per-file executed counts, and the twenty longest individual test executions including all ties at the cutoff. Each case has its binary identity, full test name, source file and line, result and duration. The report records platform, target, tool versions, profile, target directory, warm or cold build state, and relevant environment overrides.
 
@@ -238,7 +238,7 @@ Not applicable as a new instruction surface: repository upkeep serves no model i
 | UPK-R8 | Built | The repository has the org standard's 14 labels plus `dependencies` and `rust`, and its issues carry 18 Bug, 54 Enhancement and 15 Task types, with `needs-triage` on the 39 open issues that have no type, as read on 2026-10-18 |
 | UPK-R9 | Built | [bug.yml:3-4](../../.github/ISSUE_TEMPLATE/bug.yml#L3) sets the Bug type and `needs-triage`; [bug.yml:13-22](../../.github/ISSUE_TEMPLATE/bug.yml#L13) requires one of section 9's three impact choices with no preselected answer; the required `what`, `repro` and `version` fields remain at [6-12](../../.github/ISSUE_TEMPLATE/bug.yml#L6) and [23-36](../../.github/ISSUE_TEMPLATE/bug.yml#L23); [question.yml:3](../../.github/ISSUE_TEMPLATE/question.yml#L3) sets `needs-triage` |
 | UPK-R10, UPK-Q3 | Not built | Static counts below supply no executed counts or durations; [#54](https://github.com/jcrenshaw-dev/baley/issues/54) owns the measurement and assessment |
-| UPK-R11 | Built | [.cargo/config.toml:3](../../.cargo/config.toml#L3) sets six build jobs; [.config/nextest.toml:3](../../.config/nextest.toml#L3) keeps six test threads; nextest at [test.yml:60](../../.github/workflows/test.yml#L60) explicitly sets `--build-jobs 6 --test-threads 6`, and clippy at [test.yml:89](../../.github/workflows/test.yml#L89) sets `-j 6` |
+| UPK-R11 | Built | The repository sets no cargo job count, so cargo uses every logical CPU; [.config/nextest.toml:3](../../.config/nextest.toml#L3) sets `test-threads = "num-cpus"`; nextest at [test.yml:60](../../.github/workflows/test.yml#L60) explicitly sets `--build-jobs 6 --test-threads 6`, and clippy at [test.yml:89](../../.github/workflows/test.yml#L89) sets `-j 6` |
 | UPK-Q1 | Built | Section 6 classifies every retained match; no active source uses an old name |
 | UPK-Q2 | Built | The check-only command at [test.yml:140](../../.github/workflows/test.yml#L140) failed on a disposable misformatted commit and passed on its correction ([#210](https://github.com/jcrenshaw-dev/baley/pull/210), closed unmerged), a documentation-only pull request produces it, and the applied rules require its exact context |
 
