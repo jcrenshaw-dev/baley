@@ -1101,7 +1101,7 @@ fn judge_request_id(request_id: &str, call: &str) -> Result<(), Value> {
 
 /// Refuses an order id that is not a lowercase UUID, the one spelling an
 /// order's receipt gives, so no read can miss the order it names.
-fn judge_order_id(id: &str) -> Result<(), Value> {
+pub(crate) fn judge_order_id(id: &str) -> Result<(), Value> {
     if lowercase_uuid(id) {
         return Ok(());
     }
@@ -1268,7 +1268,8 @@ pub(crate) mod tests {
     }
 
     /// Records a pending start planner order `id` in `project` under
-    /// `request_id` at `at`, as project start records one, with brief B1.
+    /// `request_id` at `at`, as project start records one for a checkout with
+    /// no code, with brief B1.
     pub(crate) fn issue_start(
         store: &baley_store_sqlite::SqliteStore,
         project: &ProjectId,
@@ -1313,6 +1314,7 @@ pub(crate) mod tests {
             &names,
         )
         .unwrap();
+        let instructions = [crate::instruction::evidence(START_PLANNER).unwrap()];
         let absences = start_absences();
         let further = serde_json::Map::new();
         let inputs = [Input::Bytes {
@@ -1325,7 +1327,7 @@ pub(crate) mod tests {
             parent: None,
             subject: START_SUBJECT,
             route: &route,
-            instructions: &[],
+            instructions: &instructions,
             inputs: &inputs,
             absences: &absences,
             streams: &[],

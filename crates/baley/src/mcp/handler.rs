@@ -539,6 +539,7 @@ mod tests {
                 &Called::Operation(Tool::Apply, "scope-submit".into()),
                 Some(
                     &json!({"operation": "scope-submit", "request_id": request_id,
+                    "work_order": "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
                     "submission": submission}),
                 ),
                 Some(&preparation),
@@ -647,6 +648,7 @@ mod tests {
             &Called::Operation(Tool::Apply, "scope-submit".into()),
             Some(&json!({"operation": "scope-submit",
                 "request_id": "9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f",
+                "work_order": "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
                 "submission": crate::scope::fixtures::m()})),
             Some(&preparation),
         );

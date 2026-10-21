@@ -380,8 +380,9 @@ mod tests {
     fn a_served_operations_argument_left_out_of_the_tool_schema_is_caught() {
         // Design 0012: help takes name, schema takes tool and for, instruction
         // and document take identity, all four take part, and capture takes
-        // request_id, kind, text, phase and instruction, scope-submit and
-        // each change operation take request_id and submission,
+        // request_id, kind, text, phase and instruction, scope-submit takes
+        // request_id, work_order and submission, each change operation takes
+        // request_id and submission,
         // project-start takes request_id, brief and instruction,
         // work-order-fail takes request_id, work_order, reason and instruction,
         // work-order-retry takes request_id, work_order and instruction,
