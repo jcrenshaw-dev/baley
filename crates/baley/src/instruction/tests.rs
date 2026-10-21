@@ -122,6 +122,26 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "1",
         "7153c55fcb0acaf2712762b305b9d96cfd6a48ae4e44aa354b3685820411d3d1",
     ),
+    (
+        "bal-scope",
+        "1",
+        "8ca51542feb46f946b787f5609c6a896ee5cd7954655c9ba7397a709390e74c8",
+    ),
+    (
+        "bal-phase",
+        "1",
+        "8232b5d90eea73bef1d92f09919ce23ec8dae6dec60bd76b75dca6c65c09ba3b",
+    ),
+    (
+        "bal-story",
+        "1",
+        "7688ddacbf34f6c93a4eb82b8eb60d69089eb2fee0ab5176097a4dc560877693",
+    ),
+    (
+        "bal-backlog",
+        "1",
+        "4dceb6272fd0d130c5d74c904919128e51a06eab7330fb7bc02b932aa3322351",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {
@@ -365,4 +385,50 @@ fn a_project_front_door_missing_an_operation_it_drives_or_the_terminal_approval_
         );
     }
     assert!(!body.contains("scope-approve"));
+}
+
+/// The four scope change front doors, each with the operations it drives,
+/// written out from design 0004 rather than read from the texts under test.
+const CHANGE_DOORS: &[(&str, &[&str])] = &[
+    ("bal-scope", &[r#""kind":"draft""#]),
+    (
+        "bal-phase",
+        &[
+            "phase-declare",
+            "phase-edit",
+            "phase-reorder",
+            "phase-withdraw",
+        ],
+    ),
+    (
+        "bal-story",
+        &[
+            "story-declare",
+            "story-edit",
+            "story-reassign",
+            "story-drop",
+        ],
+    ),
+    ("bal-backlog", &["backlog-reorder"]),
+];
+
+#[test]
+fn a_change_front_door_missing_an_operation_it_drives_or_the_terminal_approval_is_caught() {
+    for (identity, operations) in CHANGE_DOORS {
+        let body = served_text(identity);
+        for needle in operations.iter().chain(&["baley scope approve"]) {
+            assert!(body.contains(needle), "{identity} lacks {needle}");
+        }
+        assert!(!body.contains("scope-approve"), "{identity}");
+    }
+}
+
+#[test]
+fn a_change_front_door_asking_for_an_argument_its_operations_refuse_is_caught() {
+    for (identity, _) in CHANGE_DOORS {
+        assert!(
+            !served_text(identity).contains(r#""instruction":"#),
+            "{identity} asks for instruction"
+        );
+    }
 }

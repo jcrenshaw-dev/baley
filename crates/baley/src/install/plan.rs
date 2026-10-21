@@ -813,6 +813,22 @@ mod tests {
                 PathBuf::from("/home/o/.claude/skills/bal-project/SKILL.md"),
                 seen(FileState::Absent),
             ),
+            (
+                PathBuf::from("/home/o/.claude/skills/bal-scope/SKILL.md"),
+                seen(FileState::Absent),
+            ),
+            (
+                PathBuf::from("/home/o/.claude/skills/bal-phase/SKILL.md"),
+                seen(FileState::Absent),
+            ),
+            (
+                PathBuf::from("/home/o/.claude/skills/bal-story/SKILL.md"),
+                seen(FileState::Absent),
+            ),
+            (
+                PathBuf::from("/home/o/.claude/skills/bal-backlog/SKILL.md"),
+                seen(FileState::Absent),
+            ),
             (capture.clone(), seen(FileState::Absent)),
             (help.clone(), seen(FileState::Bytes(b"mine".to_vec()))),
         ]);
@@ -849,6 +865,10 @@ mod tests {
         let outcomes = |stubs: ArtifactOutcome, settings: ArtifactOutcome| {
             vec![
                 (Artifact::Stub("bal-project".into()), stubs.clone()),
+                (Artifact::Stub("bal-scope".into()), stubs.clone()),
+                (Artifact::Stub("bal-phase".into()), stubs.clone()),
+                (Artifact::Stub("bal-story".into()), stubs.clone()),
+                (Artifact::Stub("bal-backlog".into()), stubs.clone()),
                 (Artifact::Stub("bal-capture".into()), stubs.clone()),
                 (Artifact::Stub("bal-help".into()), stubs),
                 (Artifact::Registration, ArtifactOutcome::NotWritten),
@@ -894,7 +914,7 @@ mod tests {
         assert_eq!(facts.hook, None);
         assert_eq!(facts.sandbox, None);
         assert!(!facts.complete);
-        assert_eq!(facts.stubs.len(), 3);
+        assert_eq!(facts.stubs.len(), 7);
 
         // A completed installation left unchanged stays in the record.
         let complete = complete_settings();
@@ -917,8 +937,8 @@ mod tests {
                 "/home/o/.config/crenshawdev/baley"
             ]
         );
-        assert_eq!(sandbox.deny_write.len(), 9);
-        assert_eq!(sandbox.permissions_deny.len(), 11);
+        assert_eq!(sandbox.deny_write.len(), 13);
+        assert_eq!(sandbox.permissions_deny.len(), 15);
 
         // The write failed over Baley's own older entries.
         let old_hook = json!({
@@ -1173,7 +1193,7 @@ mod tests {
 
         assert!(plan.writes.is_empty(), "{:?}", plan.writes);
         assert_eq!(plan.registration, Step::Unchanged);
-        assert_eq!(plan.outcomes.len(), 6);
+        assert_eq!(plan.outcomes.len(), 10);
         for (artifact, outcome) in &plan.outcomes {
             assert_eq!(*outcome, ArtifactOutcome::Unchanged, "{artifact}");
         }
@@ -1188,6 +1208,13 @@ mod tests {
             vec![
                 (
                     Artifact::Stub("bal-project".into()),
+                    ArtifactOutcome::Written,
+                ),
+                (Artifact::Stub("bal-scope".into()), ArtifactOutcome::Written),
+                (Artifact::Stub("bal-phase".into()), ArtifactOutcome::Written),
+                (Artifact::Stub("bal-story".into()), ArtifactOutcome::Written),
+                (
+                    Artifact::Stub("bal-backlog".into()),
                     ArtifactOutcome::Written,
                 ),
                 (
@@ -1292,14 +1319,14 @@ mod tests {
             assert_eq!(document["sandbox"]["enabled"], true);
             assert_eq!(
                 document["permissions"]["deny"].as_array().unwrap().len(),
-                11
+                15
             );
             let stubs = plan
                 .writes
                 .iter()
                 .filter(|write| matches!(write.artifacts[0], Artifact::Stub(_)))
                 .count();
-            assert_eq!(stubs, 3);
+            assert_eq!(stubs, 7);
             assert_eq!(plan.writes[0].artifacts, [Artifact::Settings]);
             let wiring = plan.wiring.as_ref().expect("the wiring is held back");
             assert!(wiring.gap.contains(stable), "{}", wiring.gap);
@@ -1399,7 +1426,6 @@ mod tests {
     }
 
     const OLD: &str = "/home/o/.claude/skills/bal-old/SKILL.md";
-    const PROJECT: &str = "/home/o/.claude/skills/bal-project/SKILL.md";
     const CAPTURE: &str = "/home/o/.claude/skills/bal-capture/SKILL.md";
     const HELP: &str = "/home/o/.claude/skills/bal-help/SKILL.md";
 
@@ -1416,13 +1442,7 @@ mod tests {
     /// `stubs`, with `extra` observed beside the placed paths.
     fn plan_with(stubs: Value, extra: &[(&str, Observation)]) -> Plan {
         let installed = installed();
-        let mut observations = BTreeMap::from([
-            (PathBuf::from(SETTINGS), file(None, false)),
-            (PathBuf::from("/home/o/.claude.json"), file(None, false)),
-            (PathBuf::from(PROJECT), file(None, false)),
-            (PathBuf::from(CAPTURE), file(None, false)),
-            (PathBuf::from(HELP), file(None, false)),
-        ]);
+        let mut observations = all_absent(&installed);
         for (path, seen) in extra {
             observations.insert(PathBuf::from(path), seen.clone());
         }
@@ -1614,6 +1634,22 @@ mod tests {
                         ArtifactOutcome::Unchanged,
                     ),
                     (
+                        Artifact::Stub("bal-scope".into()),
+                        ArtifactOutcome::Unchanged,
+                    ),
+                    (
+                        Artifact::Stub("bal-phase".into()),
+                        ArtifactOutcome::Unchanged,
+                    ),
+                    (
+                        Artifact::Stub("bal-story".into()),
+                        ArtifactOutcome::Unchanged,
+                    ),
+                    (
+                        Artifact::Stub("bal-backlog".into()),
+                        ArtifactOutcome::Unchanged,
+                    ),
+                    (
                         Artifact::Stub("bal-capture".into()),
                         ArtifactOutcome::Unchanged,
                     ),
@@ -1652,17 +1688,34 @@ mod tests {
         let removed = build(RetiredOutcome::Removed);
         assert_eq!(
             identities(&removed),
-            ["bal-project", "bal-capture", "bal-help"]
+            [
+                "bal-project",
+                "bal-scope",
+                "bal-phase",
+                "bal-story",
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+            ]
         );
         assert!(removed.complete);
 
         let left = build(RetiredOutcome::Failed("not-removable: denied".into()));
         assert_eq!(
             identities(&left),
-            ["bal-project", "bal-capture", "bal-help", "bal-old"]
+            [
+                "bal-project",
+                "bal-scope",
+                "bal-phase",
+                "bal-story",
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+                "bal-old",
+            ]
         );
         assert_eq!(
-            left.stubs[3],
+            left.stubs[7],
             event::Stub {
                 identity: "bal-old".into(),
                 path: OLD.into(),
@@ -1675,7 +1728,16 @@ mod tests {
         let carried = build(RetiredOutcome::Carried);
         assert_eq!(
             identities(&carried),
-            ["bal-project", "bal-capture", "bal-help", "bal-old"]
+            [
+                "bal-project",
+                "bal-scope",
+                "bal-phase",
+                "bal-story",
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+                "bal-old",
+            ]
         );
         assert!(carried.complete);
     }

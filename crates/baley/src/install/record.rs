@@ -192,7 +192,32 @@ mod tests {
         }
     }
 
-    fn expected(project_hash: &str, capture_hash: &str, help_hash: &str) -> Value {
+    /// The shipped front doors in manifest order, written out by hand.
+    const STUBS: [&str; 7] = [
+        "bal-project",
+        "bal-scope",
+        "bal-phase",
+        "bal-story",
+        "bal-backlog",
+        "bal-capture",
+        "bal-help",
+    ];
+
+    /// The payload for `facts`, each stub in `STUBS` holding its hash from
+    /// `facts`.
+    fn expected(facts: &Facts) -> Value {
+        assert_eq!(facts.stubs.len(), STUBS.len());
+        let stubs: Vec<Value> = STUBS
+            .iter()
+            .zip(&facts.stubs)
+            .map(|(identity, stub)| {
+                json!({
+                    "identity": identity,
+                    "path": format!("/home/o/.claude/skills/{identity}/SKILL.md"),
+                    "sha256": stub.sha256,
+                })
+            })
+            .collect();
         json!({
             "host": "claude-code",
             "binary_version": env!("CARGO_PKG_VERSION"),
@@ -211,11 +236,7 @@ mod tests {
                     },
                 },
             },
-            "stubs": [
-                {"identity": "bal-project", "path": "/home/o/.claude/skills/bal-project/SKILL.md", "sha256": project_hash},
-                {"identity": "bal-capture", "path": "/home/o/.claude/skills/bal-capture/SKILL.md", "sha256": capture_hash},
-                {"identity": "bal-help", "path": "/home/o/.claude/skills/bal-help/SKILL.md", "sha256": help_hash},
-            ],
+            "stubs": stubs,
             "sandbox": {
                 "settings_path": "/home/o/.claude/settings.json",
                 "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -268,11 +289,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let facts = facts();
-        let expected = expected(
-            &facts.stubs[0].sha256,
-            &facts.stubs[1].sha256,
-            &facts.stubs[2].sha256,
-        );
+        let expected = expected(&facts);
 
         assert_eq!(write_from_latest(&store, &facts, request(1), AT), Ok(true));
 
@@ -299,11 +316,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let mut facts = facts();
-        let mut expected = expected(
-            &facts.stubs[0].sha256,
-            &facts.stubs[1].sha256,
-            &facts.stubs[2].sha256,
-        );
+        let mut expected = expected(&facts);
         assert_eq!(write_from_latest(&store, &facts, request(1), AT), Ok(true));
         let head = store.head(&ProjectId("user".into())).unwrap();
 
@@ -394,11 +407,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let mut facts = facts();
-        let mut expected = expected(
-            &facts.stubs[0].sha256,
-            &facts.stubs[1].sha256,
-            &facts.stubs[2].sha256,
-        );
+        let mut expected = expected(&facts);
         facts.complete = false;
         facts.registration = None;
         facts.hook = None;
@@ -420,11 +429,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let facts = facts();
-        let expected = expected(
-            &facts.stubs[0].sha256,
-            &facts.stubs[1].sha256,
-            &facts.stubs[2].sha256,
-        );
+        let expected = expected(&facts);
 
         assert_eq!(read(&store, "claude-code"), Ok(None));
         assert_eq!(write_from_latest(&store, &facts, request(1), AT), Ok(true));

@@ -1300,7 +1300,15 @@ mod tests {
     #[test]
     fn an_installed_artifact_reported_not_installed_by_the_doctor_is_caught() {
         let record = record_for(
-            &["bal-project", "bal-capture", "bal-help"],
+            &[
+                "bal-project",
+                "bal-scope",
+                "bal-phase",
+                "bal-story",
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+            ],
             true,
             true,
             true,
@@ -1313,6 +1321,22 @@ mod tests {
                 (
                     Artifact::Stub("bal-project".into()),
                     "/home/o/.claude/skills/bal-project/SKILL.md".to_owned()
+                ),
+                (
+                    Artifact::Stub("bal-scope".into()),
+                    "/home/o/.claude/skills/bal-scope/SKILL.md".to_owned()
+                ),
+                (
+                    Artifact::Stub("bal-phase".into()),
+                    "/home/o/.claude/skills/bal-phase/SKILL.md".to_owned()
+                ),
+                (
+                    Artifact::Stub("bal-story".into()),
+                    "/home/o/.claude/skills/bal-story/SKILL.md".to_owned()
+                ),
+                (
+                    Artifact::Stub("bal-backlog".into()),
+                    "/home/o/.claude/skills/bal-backlog/SKILL.md".to_owned()
                 ),
                 (
                     Artifact::Stub("bal-capture".into()),
@@ -1346,6 +1370,10 @@ mod tests {
             map.not_installed(),
             [
                 Artifact::Stub("bal-project".into()),
+                Artifact::Stub("bal-scope".into()),
+                Artifact::Stub("bal-phase".into()),
+                Artifact::Stub("bal-story".into()),
+                Artifact::Stub("bal-backlog".into()),
                 Artifact::Stub("bal-capture".into()),
                 Artifact::Stub("bal-help".into()),
                 Artifact::Registration,
@@ -1386,6 +1414,10 @@ mod tests {
             map.not_installed(),
             [
                 Artifact::Stub("bal-project".into()),
+                Artifact::Stub("bal-scope".into()),
+                Artifact::Stub("bal-phase".into()),
+                Artifact::Stub("bal-story".into()),
+                Artifact::Stub("bal-backlog".into()),
                 Artifact::Stub("bal-help".into()),
                 Artifact::Registration,
             ]
@@ -1407,6 +1439,10 @@ mod tests {
             map.not_installed(),
             [
                 Artifact::Stub("bal-project".into()),
+                Artifact::Stub("bal-scope".into()),
+                Artifact::Stub("bal-phase".into()),
+                Artifact::Stub("bal-story".into()),
+                Artifact::Stub("bal-backlog".into()),
                 Artifact::Stub("bal-capture".into()),
                 Artifact::Hook,
                 Artifact::Settings,

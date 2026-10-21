@@ -76,6 +76,44 @@ pub static ENTRIES: &[Entry] = &[
             body: scope::PROJECT_TEXT,
         }),
     },
+    // Build 4 serves the four scope change front doors beside `document`'s
+    // scope reads and the ten change operations.
+    Entry {
+        identity: scope::SCOPE_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: scope::SCOPE_VERSION,
+            hash: scope::SCOPE_HASH,
+            body: scope::SCOPE_TEXT,
+        }),
+    },
+    Entry {
+        identity: scope::PHASE_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: scope::PHASE_VERSION,
+            hash: scope::PHASE_HASH,
+            body: scope::PHASE_TEXT,
+        }),
+    },
+    Entry {
+        identity: scope::STORY_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: scope::STORY_VERSION,
+            hash: scope::STORY_HASH,
+            body: scope::STORY_TEXT,
+        }),
+    },
+    Entry {
+        identity: scope::BACKLOG_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: scope::BACKLOG_VERSION,
+            hash: scope::BACKLOG_HASH,
+            body: scope::BACKLOG_TEXT,
+        }),
+    },
     // Build 4 adds this text beside its operations.
     Entry {
         identity: "bal-context",

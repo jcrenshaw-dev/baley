@@ -133,7 +133,18 @@ mod tests {
             .iter()
             .map(|entry| entry.identity.as_str())
             .collect();
-        assert_eq!(identities, ["bal-project", "bal-capture", "bal-help"]);
+        assert_eq!(
+            identities,
+            [
+                "bal-project",
+                "bal-scope",
+                "bal-phase",
+                "bal-story",
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+            ]
+        );
         assert_eq!(UNAVAILABLE.len(), 19);
         for identity in UNAVAILABLE.iter().chain(&["bal-read-contract"]) {
             assert!(!identities.contains(identity), "{identity} has a stub");
@@ -141,6 +152,27 @@ mod tests {
         for entry in &entries {
             assert_eq!(entry.host, Host::ClaudeCode);
         }
+    }
+
+    #[test]
+    fn a_scope_front_door_left_without_a_skill_stub_is_caught() {
+        let identities: Vec<String> = manifest(&front_doors())
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.identity)
+            .collect();
+        assert_eq!(
+            identities,
+            [
+                "bal-project",
+                "bal-scope",
+                "bal-phase",
+                "bal-story",
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+            ]
+        );
     }
 
     #[test]
@@ -180,7 +212,18 @@ mod tests {
             judged.push(identity.to_owned());
         }
         judged.sort();
-        assert_eq!(judged, ["bal-capture", "bal-help", "bal-project"]);
+        assert_eq!(
+            judged,
+            [
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+                "bal-phase",
+                "bal-project",
+                "bal-scope",
+                "bal-story",
+            ]
+        );
     }
 
     #[test]

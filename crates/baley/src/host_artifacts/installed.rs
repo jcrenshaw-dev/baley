@@ -157,6 +157,22 @@ mod tests {
                         PathBuf::from(format!("{folder}/skills/bal-project/SKILL.md")),
                     ),
                     (
+                        Artifact::Stub("bal-scope".into()),
+                        PathBuf::from(format!("{folder}/skills/bal-scope/SKILL.md")),
+                    ),
+                    (
+                        Artifact::Stub("bal-phase".into()),
+                        PathBuf::from(format!("{folder}/skills/bal-phase/SKILL.md")),
+                    ),
+                    (
+                        Artifact::Stub("bal-story".into()),
+                        PathBuf::from(format!("{folder}/skills/bal-story/SKILL.md")),
+                    ),
+                    (
+                        Artifact::Stub("bal-backlog".into()),
+                        PathBuf::from(format!("{folder}/skills/bal-backlog/SKILL.md")),
+                    ),
+                    (
                         Artifact::Stub("bal-capture".into()),
                         PathBuf::from(format!("{folder}/skills/bal-capture/SKILL.md")),
                     ),
@@ -247,6 +263,10 @@ mod tests {
                 stubs,
                 [
                     "/home/o/.claude/skills/bal-project/SKILL.md",
+                    "/home/o/.claude/skills/bal-scope/SKILL.md",
+                    "/home/o/.claude/skills/bal-phase/SKILL.md",
+                    "/home/o/.claude/skills/bal-story/SKILL.md",
+                    "/home/o/.claude/skills/bal-backlog/SKILL.md",
                     "/home/o/.claude/skills/bal-capture/SKILL.md",
                     "/home/o/.claude/skills/bal-help/SKILL.md",
                 ]
@@ -325,6 +345,10 @@ mod tests {
             map.protected_paths(),
             [
                 PathBuf::from("/home/o/.claude/skills/bal-project/SKILL.md"),
+                PathBuf::from("/home/o/.claude/skills/bal-scope/SKILL.md"),
+                PathBuf::from("/home/o/.claude/skills/bal-phase/SKILL.md"),
+                PathBuf::from("/home/o/.claude/skills/bal-story/SKILL.md"),
+                PathBuf::from("/home/o/.claude/skills/bal-backlog/SKILL.md"),
                 PathBuf::from("/home/o/.claude/skills/bal-capture/SKILL.md"),
                 PathBuf::from("/home/o/.claude/skills/bal-help/SKILL.md"),
                 PathBuf::from("/home/o/.claude.json"),

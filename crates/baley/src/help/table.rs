@@ -26,6 +26,26 @@ pub const COMMANDS: &[Command] = &[
         description: "Start a project from a brief by issuing the start planner's work order, or revise the project description, as drafts the owner approves at the terminal.",
     },
     Command {
+        name: "bal-scope",
+        cluster: "Build spine",
+        description: "Read a scope draft by its digest and show the owner how to approve it at the terminal.",
+    },
+    Command {
+        name: "bal-phase",
+        cluster: "Build spine",
+        description: "Declare, edit, reorder or withdraw a phase as a draft the owner approves at the terminal.",
+    },
+    Command {
+        name: "bal-story",
+        cluster: "Build spine",
+        description: "Declare, edit, reassign or drop a story as a draft the owner approves at the terminal.",
+    },
+    Command {
+        name: "bal-backlog",
+        cluster: "Build spine",
+        description: "Reorder the backlog as a draft the owner approves at the terminal.",
+    },
+    Command {
         name: "bal-context",
         cluster: "Build spine",
         description: "Discuss a phase's scope, decisions and truths with its owner, then publish only the exact approved set through Baley",
@@ -260,6 +280,10 @@ mod tests {
     /// design rather than read from the registry under test.
     const EXPECTED: &[(&str, bool, u64)] = &[
         ("bal-project", true, 4),
+        ("bal-scope", true, 4),
+        ("bal-phase", true, 4),
+        ("bal-story", true, 4),
+        ("bal-backlog", true, 4),
         ("bal-help", true, 3),
         ("bal-capture", true, 3),
         ("bal-context", false, 4),
@@ -307,7 +331,7 @@ mod tests {
             .map(|(name, available, build)| ((*name).to_owned(), *available, *build))
             .collect();
         expected.sort();
-        assert_eq!(expected.len(), 22);
+        assert_eq!(expected.len(), 26);
         assert_eq!(shown, expected);
     }
 

@@ -224,6 +224,10 @@ mod tests {
                 .unwrap();
         let placed = [
             "/u/.claude/skills/bal-project/SKILL.md",
+            "/u/.claude/skills/bal-scope/SKILL.md",
+            "/u/.claude/skills/bal-phase/SKILL.md",
+            "/u/.claude/skills/bal-story/SKILL.md",
+            "/u/.claude/skills/bal-backlog/SKILL.md",
             "/u/.claude/skills/bal-capture/SKILL.md",
             "/u/.claude/skills/bal-help/SKILL.md",
             "/u/.claude.json",
