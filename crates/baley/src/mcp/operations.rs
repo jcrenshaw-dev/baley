@@ -938,7 +938,7 @@ mod tests {
             .filter(|name| *name != "operation")
             .collect();
         properties.sort_unstable();
-        assert_eq!(properties, ["request_id", "submission"]);
+        assert_eq!(properties, ["request_id", "submission", "work_order"]);
     }
 
     #[test]
