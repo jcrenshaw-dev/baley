@@ -117,9 +117,9 @@ pub struct Retired {
 /// The stubs the latest record lists that this binary does not place.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RetiredStubs {
-    /// Recorded at exactly the path a stub of its identity takes under the
-    /// current Claude folder, which is no placed file's path: judged, and
-    /// removed when it is still Baley's.
+    /// Recorded at exactly the path a skill or agent stub of its identity
+    /// takes under the current Claude folder, which is no placed file's
+    /// path: judged, and removed when it is still Baley's.
     pub own: Vec<Retired>,
     /// Recorded anywhere else. Never read or touched, so a record cannot
     /// point a removal outside a stub's own file, and kept in the record.
@@ -127,9 +127,10 @@ pub(crate) struct RetiredStubs {
 }
 
 /// Sorts the stubs the latest record lists that this binary does not place
-/// by whether they sit at their own stub path under `claude_folder`. The
-/// identity must be one path name spelled exactly, so `bal-capture/` cannot
-/// stand for `bal-capture`.
+/// by whether they sit at their own stub path under `claude_folder`, the
+/// skill path or the agent path for their identity (D-07). The identity must
+/// be one path name spelled exactly, so `bal-capture/` cannot stand for
+/// `bal-capture`.
 pub(crate) fn retired(
     latest: Option<&Value>,
     placements: &PlacementMap,
@@ -166,10 +167,13 @@ pub(crate) fn retired(
             (parts.next(), parts.next()),
             (Some(Component::Normal(name)), None) if name == OsStr::new(&retired.identity)
         );
-        // A second guard: whatever the identity says, a placed file is
-        // never a retired one.
+        // The record holds no kind, so either kind's path for the identity
+        // is its own. A second guard: whatever the identity says, a placed
+        // file is never a retired one.
         let own = plain
-            && retired.path == stub_path(claude_folder, Kind::Skill, &retired.identity)
+            && [Kind::Skill, Kind::Agent]
+                .into_iter()
+                .any(|kind| retired.path == stub_path(claude_folder, kind, &retired.identity))
             && placed.iter().all(|file| file.path != retired.path);
         if own {
             found.own.push(retired);
@@ -1804,5 +1808,63 @@ mod tests {
             ),
             "{cause}"
         );
+    }
+
+    #[test]
+    fn a_retired_agent_stub_left_on_disk_or_a_record_reaching_outside_its_own_file_is_caught() {
+        let mut manifest = stubs::manifest(&stubs::front_doors()).unwrap();
+        manifest.extend(crate::host_artifacts::agents::manifest());
+        let env = crate::folders::Environment {
+            home: Some("/home/o".into()),
+            ..crate::folders::Environment::default()
+        };
+        let installed = crate::host_artifacts::installed::resolve(&env, None, &manifest).unwrap();
+        let shipped = shipped(&manifest, "bal-planner-high");
+        let stub = |identity: &str, path: &str, bytes: &[u8]| Retired {
+            identity: identity.into(),
+            path: path.into(),
+            sha256: digest(bytes),
+        };
+        let old_agent = stub(
+            "bal-old-agent",
+            "/home/o/.claude/agents/bal-old-agent.md",
+            b"old agent",
+        );
+        let old_skill = stub("bal-old", OLD, b"old stub");
+        let elsewhere = stub(
+            "bal-elsewhere",
+            "/home/o/.claude/agents/sub/bal-elsewhere.md",
+            b"elsewhere",
+        );
+        let latest = json!({"stubs": [
+            recorded(&old_agent),
+            recorded(&old_skill),
+            recorded(&elsewhere),
+            {"identity": "bal-planner-high",
+             "path": "/home/o/.claude/agents/bal-planner-high.md",
+             "sha256": shipped.digest},
+        ]});
+
+        let found = retired(
+            Some(&latest),
+            &installed.placements,
+            Path::new("/home/o/.claude"),
+        );
+        assert_eq!(found.own, [old_agent.clone(), old_skill]);
+        assert_eq!(found.elsewhere, [elsewhere]);
+
+        let mut observations = all_absent(&installed);
+        observations.insert(old_agent.path.clone(), file(Some(b"old agent"), false));
+        let plan = judge(&Gathered {
+            placements: &installed.placements,
+            claude_folder: &installed.claude_folder,
+            folders: &folders(),
+            latest: Some(&latest),
+            observations: &observations,
+            prerequisites: &linux(),
+            executable: None,
+        })
+        .expect("plans");
+        assert_eq!(plan.removals, [old_agent]);
     }
 }
