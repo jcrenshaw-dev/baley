@@ -202,6 +202,69 @@ const START_PLANNER: &str = "bal-start-planner";
 /// The instruction a start order adds when the checkout holds code.
 const START_SURVEY: &str = "bal-start-survey";
 
+/// Issues the start planner's first order as `id` under `command`. It
+/// carries the start planner's instruction, then the survey's when the
+/// checkout holds `existing` code (D-20, D-24), and runs under the route for
+/// `planner` at attempt 1 under `policy` at the command's policy version
+/// (D-11) with the catalog `names`. The id is also its request, it has no
+/// parent, and `brief` is its one input. The receipt adds the settings lines
+/// `policy` gives and whether code exists.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_start_order(
+    store: &SqliteStore,
+    command: &Command,
+    policy: &EffectivePolicy,
+    host: Host,
+    names: &AcceptedNames,
+    existing: bool,
+    brief: &str,
+    id: &str,
+) -> Value {
+    let mut instructions = Vec::new();
+    for identity in std::iter::once(START_PLANNER).chain(existing.then_some(START_SURVEY)) {
+        match crate::instruction::evidence(identity) {
+            Ok(evidence) => instructions.push(evidence),
+            Err(refusal) => return refusal,
+        }
+    }
+    let route = match compose(
+        policy,
+        command.policy_version,
+        host,
+        Role::Planner,
+        NonZeroU32::MIN,
+        names,
+    ) {
+        Ok(route) => route,
+        Err(refusal) => return Refusal::new(refusal.code(), refusal.to_string()).value(),
+    };
+    let lines = settings_lines(policy);
+    let mut further = Map::new();
+    if !lines.is_empty() {
+        further.insert("settings".into(), json!(lines));
+    }
+    further.insert("existing_code".into(), json!(existing));
+    let inputs = [Input::Bytes {
+        name: "brief",
+        bytes: brief.as_bytes(),
+    }];
+    let absences = start_absences();
+    let issue = Issue {
+        id,
+        request: id,
+        parent: None,
+        subject: START_SUBJECT,
+        route: &route,
+        instructions: &instructions,
+        inputs: &inputs,
+        absences: &absences,
+        streams: &[],
+        documents: &[],
+        further: &further,
+    };
+    issue::answer(issue::record(store, command, Some(&issue)), store)
+}
+
 /// Serves one `project-start` call for the session's `preparation`. The
 /// arguments are judged first, and a refusal is answered before anything is
 /// prepared. Then the write is prepared under the caller with the
@@ -209,14 +272,11 @@ const START_SURVEY: &str = "bal-start-survey";
 /// a start already approved or a start order still pending ends the call
 /// before checkout admission and the policy step.
 ///
-/// For a write that ran its steps, the settings lines come from the
-/// prepared policy, and the checkout is judged for existing code from the
-/// root commit and, when there is one, HEAD's listing. The order carries the
-/// start planner's instruction, then the survey's when the checkout holds
-/// code (D-20, D-24), and runs under the route for `planner` at attempt 1 at
-/// the step's policy version (D-11). A fresh UUID is both its id and its
-/// request, and the brief is its one input. A replay goes to the recording
-/// with no order, and the store answers it from its record. No
+/// For a write that ran its steps, the checkout is judged for existing code
+/// from the root commit and, when there is one, HEAD's listing, and
+/// [`issue_start_order`] issues the order under a fresh UUID with the
+/// prepared policy and the host catalog read now. A replay goes to the
+/// recording with no order, and the store answers it from its record. No
 /// acknowledgement is checked (D-12) and no `forge.checked` is recorded
 /// (D-21).
 pub fn serve_start(arguments: &Value, preparation: &Preparation) -> Value {
@@ -266,54 +326,20 @@ pub fn serve_start(arguments: &Value, preparation: &Preparation) -> Value {
         Ok(existing) => existing,
         Err(text) => return failed(CHECKOUT_FACTS_UNAVAILABLE, text, "git"),
     };
-    let mut instructions = Vec::new();
-    for identity in std::iter::once(START_PLANNER).chain(existing.then_some(START_SURVEY)) {
-        match crate::instruction::evidence(identity) {
-            Ok(evidence) => instructions.push(evidence),
-            Err(refusal) => return refusal,
-        }
-    }
     let names = match host_names(store, preparation.host) {
         Ok(names) => names,
         Err(error) => return store_failed(&error, NOT_RECORDED_BUSY),
     };
-    let route = match compose(
+    issue_start_order(
+        store,
+        command,
         &stepped.policy,
-        command.policy_version,
         preparation.host,
-        Role::Planner,
-        NonZeroU32::MIN,
         &names,
-    ) {
-        Ok(route) => route,
-        Err(refusal) => return Refusal::new(refusal.code(), refusal.to_string()).value(),
-    };
-    let lines = settings_lines(&stepped.policy);
-    let mut further = Map::new();
-    if !lines.is_empty() {
-        further.insert("settings".into(), json!(lines));
-    }
-    further.insert("existing_code".into(), json!(existing));
-    let id = uuid::Uuid::new_v4().to_string();
-    let inputs = [Input::Bytes {
-        name: "brief",
-        bytes: judged.brief.as_bytes(),
-    }];
-    let absences = start_absences();
-    let issue = Issue {
-        id: &id,
-        request: &id,
-        parent: None,
-        subject: START_SUBJECT,
-        route: &route,
-        instructions: &instructions,
-        inputs: &inputs,
-        absences: &absences,
-        streams: &[],
-        documents: &[],
-        further: &further,
-    };
-    issue::answer(issue::record(store, command, Some(&issue)), store)
+        existing,
+        &judged.brief,
+        &uuid::Uuid::new_v4().to_string(),
+    )
 }
 
 /// Whether the prepared checkout holds existing code. HEAD's files are
@@ -1314,13 +1340,10 @@ pub(crate) mod tests {
         brief: &str,
     ) {
         use std::collections::BTreeSet;
-        use std::num::NonZeroU32;
 
-        use baley_core::policy::{AcceptedNames, Host, Role, Schema, effective_policy};
-        use baley_core::work_order::START_SUBJECT;
+        use baley_core::policy::{AcceptedNames, Schema, effective_policy};
 
         use crate::scope::fixtures::command_in;
-        use crate::work_order::issue::{self, Input, Issue, start_absences};
 
         let policy =
             effective_policy(Schema::standard(), Some(Host::ClaudeCode), None, None).unwrap();
@@ -1328,38 +1351,17 @@ pub(crate) mod tests {
             names: BTreeSet::new(),
             version: 0,
         };
-        let attempt = NonZeroU32::new(1).unwrap();
-        let route = crate::work_order::route::compose(
-            &policy,
-            1,
-            Host::ClaudeCode,
-            Role::Planner,
-            attempt,
-            &names,
-        )
-        .unwrap();
-        let instructions = [crate::instruction::evidence(START_PLANNER).unwrap()];
-        let absences = start_absences();
-        let further = serde_json::Map::new();
-        let inputs = [Input::Bytes {
-            name: "brief",
-            bytes: brief.as_bytes(),
-        }];
-        let issue = Issue {
-            id,
-            request: id,
-            parent: None,
-            subject: START_SUBJECT,
-            route: &route,
-            instructions: &instructions,
-            inputs: &inputs,
-            absences: &absences,
-            streams: &[],
-            documents: &[],
-            further: &further,
-        };
         let command = command_in(project, START_COMMAND, request_id, 1, at);
-        let answer = issue::answer(issue::record(store, &command, Some(&issue)), store);
+        let answer = super::issue_start_order(
+            store,
+            &command,
+            &policy,
+            Host::ClaudeCode,
+            &names,
+            false,
+            brief,
+            id,
+        );
         assert_eq!(answer["status"], "ok", "{answer}");
     }
 
