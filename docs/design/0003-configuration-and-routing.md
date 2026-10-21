@@ -172,16 +172,16 @@ Which policy each command runs under (CFG-R8, CFG-R9). Policy version 0 means th
 
 | Actor | Receives | Returns | Model and effort from |
 |---|---|---|---|
-| Owner | Settings questions, provider warnings and refusals | Settings values, typed risk acknowledgement and catalog additions; keeps keys in the environment outside Baley | Not applicable |
+| Owner | Settings questions, provider warnings and refusals | Settings values, typed risk acknowledgement, catalog additions and removals, and imported model lists; keeps keys in the environment outside Baley | Not applicable |
 | Baley command line | `baley config` and `baley models` commands | Receipts, fetch commands containing variable names, imported-list results and refusals | Not applicable |
-| Policy (component) | A project, a host name, a role, an attempt | The effective policy; a route | Not applicable |
-| Model catalog (component) | A host or provider name and a model name | Whether the name is accepted; the catalog version | Not applicable |
-| Work order composer ([0002](0002-system-design.md) section 8) | A route | A work order carrying it | The route |
+| Policy (component) | The settings files and the host; for a route, the host's effective policy with its policy version, a role, an attempt, the host's accepted model names and the host's rung map | The effective policy, or `config-unavailable`; a route, or `unknown-model` | Not applicable |
+| Model catalog (component) | Seeds, imported lists and owner changes, as events of the per-user project `user`; for a lookup, a host or provider name | The `model_catalog` view; for a lookup, the names that catalog accepts, a host's compiled aliases among them, and the catalog version | Not applicable |
+| Work order composer ([0002](0002-system-design.md) section 8) | One order's role, subject, attempt, instructions and inputs, and the host's effective policy with the policy version the write's policy step returned. It reads the host's accepted model names from `user` itself | The route, from `resolve_route` with the host's rung map, its route record and the agent stub `bal-<role>-<rung>` for the rung run, recorded in one `work_order.issued`; a receipt with the order's id, the stub, the one-line prompt and the launch sentence; or `unknown-model` with no order recorded | Not applicable |
 | Guard hook ([0010](0010-guard.md)) | The hook's `CLAUDE_PROJECT_DIR`, and its working directory as the base for tool paths and the commit target where the branch is read | The session project and its guard settings, built with Claude Code's host sections and HEAD's copy of the session project's `baley.toml`, or torn settings naming the file, or no project | Not applicable |
-| Host adapter ([0012](0012-host-interface.md)) | A rung and a model name | The model's effort level, or none for a model without effort, and the model parameter | Not applicable |
-| Dispatched workers (the six roles) | A work order | A typed result | `roles.<role>.model`, `roles.<role>.effort`, `escalate_on_failure` |
+| Host adapter ([0012](0012-host-interface.md)) | A host, and for the effort table an exact model id and a rung | Claude Code's compiled tables in the catalog module: its aliases; its rung map, the identity, so rung `high` runs as Claude Code's effort `high`; and the effort table's answer for the model at the rung, a level, `not-applicable` or `unknown`. The model is passed to the host as the route gives it, or not at all | Not applicable |
+| Dispatched workers (the six roles) | The one-line prompt naming its order's id, run as the agent stub the order names; it reads the order through `document` ([0012](0012-host-interface.md) section 5) | A typed result through `apply`: the start planner's is a `scope-submit` naming its order | The route, decided by `roles.<role>.model`, `roles.<role>.effort` and `escalate_on_failure`: the stub's `effort` is the rung run, and the model is the route's, passed as the Agent tool's `model` parameter, or the session's through the stub's `model: inherit` when the route has none |
 
-No worker is dispatched by this area; it supplies the route others dispatch with.
+This area dispatches no worker. It supplies the route, the route record and the agent stub, which the composer records in a work order. `project-start` issues the start planner's order and `work-order-retry` the next attempt of a failed one ([0004](0004-starting-a-project-and-changing-scope.md) section 5, [0012](0012-host-interface.md) section 5), and the session starts the worker. The start planner's order is the only kind issued so far; the other roles' orders are later builds'.
 
 ## 5. Commands and operations
 
@@ -551,11 +551,11 @@ The binary records the shipped seed at install and every upgrade (CFG-R19). `bal
 stateDiagram-v2
   [*] --> Unacknowledged
   Unacknowledged --> Acknowledged: owner selects this provider and types confirmation, ledger records it
-  Acknowledged --> Unacknowledged: that provider's warning version changes
-  Acknowledged --> Acknowledged: fetch command or work order checks provider and warning version
+  Acknowledged --> Unacknowledged: the compiled warning's version or wording changes
+  Acknowledged --> Acknowledged: fetch command or work order checks provider, warning version and digest
 ```
 
-*Figure 2. Provider risk acknowledgement, one state machine per provider. The interview records the transition to Acknowledged, and a stored acknowledgement of another warning version or digest covers nothing, which is the return to Unacknowledged. The loop on Acknowledged is the check at work-order and fetch-command issuance. `baley models update` makes the fetch-command check, and Build 4 adds the work-order check along with the work orders. Selecting another provider leaves this provider's state unchanged. Install takes defaults and never supplies confirmation. Baley tracks acknowledgement, not credential state.*
+*Figure 2. Provider risk acknowledgement, one state machine per provider. The interview records the transition to Acknowledged, and a stored acknowledgement of another warning version or digest covers nothing, which is the return to Unacknowledged. The loop on Acknowledged is the check at fetch-command and work-order issuance. Only the fetch-command check is built, in `baley models update`. The start planner's work order, the only kind issued so far, goes to no outside provider and checks no acknowledgement. The check at the issuance of review and list-fetch work orders is Build 4's, with those orders. Selecting another provider leaves this provider's state unchanged. Install takes defaults and never supplies confirmation. Baley tracks acknowledgement, not credential state.*
 
 ```mermaid
 stateDiagram-v2
@@ -571,7 +571,7 @@ stateDiagram-v2
   Suspect --> Suspect: detection failed (previous list kept)
 ```
 
-*Figure 3. Provider catalog entries from seeds and imported lists. A model error makes an entry suspect until the session returns a successful refresh. A failed fetch leaves the previous list intact. Owner additions and removals take precedence in every state. The pure catalog logic and the import of an owner's fetch are built, and the session's fetch return and the refresh after a model error are Build 4's (section 11).*
+*Figure 3. Provider catalog entries from seeds and imported lists. A model error makes an entry suspect until the session returns a successful refresh. A failed fetch leaves the previous list intact. Owner additions and removals take precedence in every state. Seeding, the import of an owner's fetch and the owner's additions and removals are built. Nothing marks an entry suspect yet: the reaction to a model error, the session's fetch work order after it and the return of the list it fetched are Build 4's (section 11).*
 
 ## 8. Workflows
 
