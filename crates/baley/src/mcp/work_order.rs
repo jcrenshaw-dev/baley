@@ -175,13 +175,13 @@ pub fn start_check<S: Ledger + Views + ?Sized>(
 
 /// The lines a start's answer carries when settings are missing (D-18):
 /// one when `policy`, the host's effective policy, has no global file, and
-/// one when no setting comes from the project file. Each says the defaults
-/// apply and names `baley config interview`; neither runs it.
+/// one when no setting comes from the project file. Each says the other
+/// file's settings and the defaults apply and names `baley config interview`.
 pub fn settings_lines(policy: &EffectivePolicy) -> Vec<String> {
     let mut lines = Vec::new();
     if policy.global.is_none() {
         lines.push(
-            "There is no global settings file, so Baley's defaults apply. The owner can run `baley config interview` to choose settings".to_string(),
+            "There is no global settings file, so the project file's settings and Baley's defaults apply. The owner can run `baley config interview` to choose settings".to_string(),
         );
     }
     let from_project = policy
@@ -190,7 +190,7 @@ pub fn settings_lines(policy: &EffectivePolicy) -> Vec<String> {
         .any(|setting| matches!(setting.source.layer, Layer::Project | Layer::ProjectHost));
     if !from_project {
         lines.push(
-            "The project file sets nothing beyond [project], so Baley's defaults apply to this project. The owner can run `baley config interview` to choose settings".to_string(),
+            "The project file sets nothing beyond [project], so the global settings file's settings and Baley's defaults apply to this project. The owner can run `baley config interview` to choose settings".to_string(),
         );
     }
     lines
@@ -1235,9 +1235,9 @@ pub(crate) mod tests {
             .iter()
             .map(|line| {
                 assert!(line.contains("baley config interview"), "{line}");
-                if line.contains("global settings file") {
+                if line.starts_with("There is no global settings file") {
                     "global"
-                } else if line.contains("project file") {
+                } else if line.starts_with("The project file") {
                     "project"
                 } else {
                     panic!("a line about neither file: {line}")
@@ -1266,6 +1266,28 @@ pub(crate) mod tests {
         for (global, project, expected) in cases {
             let lines = settings_lines(&policy(global, project));
             assert_eq!(about(&lines), expected, "{global:?} {project:?}: {lines:?}");
+        }
+    }
+
+    #[test]
+    fn a_settings_line_claiming_only_the_defaults_while_the_other_file_holds_settings_is_caught() {
+        // Each missing file's line names the file still in force beside the defaults.
+        let cases = [
+            (Some(EFFORT_MAX), "", "the global settings file's settings"),
+            (
+                None,
+                "[roles.planner]\neffort = \"low\"\n",
+                "the project file's settings",
+            ),
+        ];
+        for (global, project, other) in cases {
+            let lines = settings_lines(&policy(global, project));
+            let [line] = lines.as_slice() else {
+                panic!("one line for the one missing file: {lines:?}");
+            };
+            assert!(line.contains(other), "{line}");
+            assert!(line.contains("Baley's defaults apply"), "{line}");
+            assert!(line.contains("`baley config interview`"), "{line}");
         }
     }
 
