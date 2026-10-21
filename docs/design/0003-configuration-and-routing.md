@@ -372,7 +372,7 @@ Called by the work order composer, never by a host. Two operations issue a work 
   | Code | When | Requirement |
   |---|---|---|
   | `config-unavailable` | The effective policy cannot be built. Preparation answers it `failed` before the route is resolved, with nothing recorded | CFG-R9 |
-  | `unknown-model` | A stored model name is not in the host's accepted names (the owner removed it, or a file names one no catalog holds). Answered `refused`, naming the setting, its layer and file and every accepted name, with nothing recorded | CFG-R14 |
+  | `unknown-model` | A stored model name is not in the host's accepted names (the owner removed it, or a file names one no catalog holds). Answered `refused`, naming the setting, its layer and file and every accepted name. On `project-start` and `work-order-retry` the route is composed after preparation's checkout admission and policy step, each its own transaction, so the refusal records no work order, while a `checkout.seen` the checkout admission recorded or a `policy.effective` the policy step recorded stays. The `route` query records nothing | CFG-R14 |
   | `routing-inputs-changed` | At the run, the policy version differs from the one at admission. This is Build 5's execution admission check: no work order issued so far is admitted to a run | CFG-R10 |
 
 ### route (query)
@@ -654,7 +654,7 @@ sequenceDiagram
   alt roles.R.model is not accepted
     P-->>W: unknown-model
     W-->>O: refusal
-    O-->>S: refused, nothing recorded
+    O-->>S: refused, no work order recorded, a checkout.seen or policy.effective the steps recorded stays
   else accepted
     P->>P: rung = stored effort, one up if escalate_on_failure and attempt > 1, held at max
     P-->>W: route with host_effort, sources, reasons, policy and catalog versions
@@ -666,7 +666,7 @@ sequenceDiagram
   end
 ```
 
-*Figure 5. Resolving a route for a work order. `project-start` resolves the start planner's route at attempt 1. `work-order-retry` takes its attempt from the ledger in its own check, the failed order's attempt plus one, and resolves the failed order's role again under the policy and catalog in force now. Each operation's check runs before the settings are read, so a refused check leaves no checkout admission or policy step behind it. The policy is the host's effective policy the write's policy step recorded, at that step's version. The accepted names are read from the per-user project `user` outside any transaction, and are the host's aliases alone at version 0 when `user` is absent or answers read-only. With no model, or an alias, the composer asks the effort table nothing and records `unknown`. Not drawn: a request the ledger already holds, which is answered from its record with no route resolved; the `route` query, which resolves a route the same way from settings it reads and judges, with no checkout admission or policy step, and records nothing; the instructions and inputs an order carries ([0012](0012-host-interface.md) section 8); and the check at a run that the routing inputs did not change since admission, `routing-inputs-changed`, which is Build 5's (CFG-R10).*
+*Figure 5. Resolving a route for a work order. `project-start` resolves the start planner's route at attempt 1. `work-order-retry` takes its attempt from the ledger in its own check, the failed order's attempt plus one, and resolves the failed order's role again under the policy and catalog in force now. Each operation's check runs before the settings are read, so a refused check leaves no checkout admission or policy step behind it. The route is composed after checkout admission and the policy step, each its own transaction, so an `unknown-model` refusal records no work order, while a `checkout.seen` or `policy.effective` those steps recorded stays. The policy is the host's effective policy the write's policy step recorded, at that step's version. The accepted names are read from the per-user project `user` outside any transaction, and are the host's aliases alone at version 0 when `user` is absent or answers read-only. With no model, or an alias, the composer asks the effort table nothing and records `unknown`. Not drawn: a request the ledger already holds, which is answered from its record with no route resolved; the `route` query, which resolves a route the same way from settings it reads and judges, with no checkout admission or policy step, and records nothing; the instructions and inputs an order carries ([0012](0012-host-interface.md) section 8); and the check at a run that the routing inputs did not change since admission, `routing-inputs-changed`, which is Build 5's (CFG-R10).*
 
 ```mermaid
 sequenceDiagram
