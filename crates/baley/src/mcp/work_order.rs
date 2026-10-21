@@ -653,8 +653,10 @@ pub struct CheckedRetry {
 /// one whose chain an earlier attempt's return ended, `work-order-not-failed`
 /// (decision 2), one already retried `work-order-retried`, naming the retry,
 /// and one whose input this project purged `material-unavailable` (decision
-/// 1). A start order is then refused `start-order-pending` while another
-/// start order is pending, so a project keeps one live start order (D-02).
+/// 1). A start order is then refused `project-already-started` once a start
+/// is approved, as project start is (D-19), and `start-order-pending` while
+/// another start order is pending, so a project keeps one live start order
+/// (D-02).
 pub fn retry_check<S: Ledger + Views + ?Sized>(
     store: &S,
     project: &ProjectId,
@@ -680,6 +682,7 @@ pub fn retry_check<S: Ledger + Views + ?Sized>(
     let retry = judge_retry(&parent.body, &earlier, &releases.pairs())
         .map_err(|refusal| retry_refused(id, refusal))?;
     if is_start(&retry) {
+        start_once(store, project)?;
         let pending = pending_start(store, project)
             .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?;
         if let Some(order) = pending {
@@ -794,8 +797,10 @@ fn retry_refused(id: &str, refusal: RetryRefusal) -> Value {
 /// instruction the parent listed; and the parent's inputs as they are held.
 /// The decision observes every document the check read and expects the
 /// `retention` stream where the check read it, so a retry, a submission or a
-/// purge landing since makes the call `ledger-busy` with nothing recorded; a
-/// retried start order also declares that no start order is pending.
+/// purge landing since makes the call `ledger-busy` with nothing recorded. A
+/// retried start order also declares a start order's two absences, no
+/// pending start order and no start approval, so a start approved since the
+/// check makes it `ledger-busy` too.
 pub fn issue_retry(
     store: &SqliteStore,
     command: &Command,
@@ -828,9 +833,6 @@ pub fn issue_retry(
     let inputs: Vec<Input<'_>> = retry.inputs.iter().map(Input::Held).collect();
     let absences: Vec<Absence> = if is_start(retry) {
         start_absences()
-            .into_iter()
-            .filter(|absence| matches!(absence, Absence::Documents { .. }))
-            .collect()
     } else {
         Vec::new()
     };
@@ -1706,6 +1708,46 @@ pub(crate) mod tests {
             &json!({"work_order": I2}),
         );
         assert_eq!(head_in(&store, &project_b()), before);
+    }
+
+    #[test]
+    fn a_start_order_retried_after_the_start_was_approved_is_caught() {
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        issue_start(&store, &project(), I0, R1, T1);
+        fail_order(&store, &project(), I0, R2, T2);
+        approve_a_start(&store, T3);
+        let before = head(&store);
+        let refusal = retry_check(&store, &project(), I0).unwrap_err();
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], "project-already-started", "{refusal}");
+        assert_eq!(head(&store), before);
+    }
+
+    #[test]
+    fn a_start_order_retry_recorded_over_an_approval_since_its_check_is_caught() {
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        issue_start(&store, &project(), I0, R1, T1);
+        fail_order(&store, &project(), I0, R2, T2);
+        let checked = retry_check(&store, &project(), I0).expect("I0 failed");
+        approve_a_start(&store, T3);
+        let command = command_in(&project(), RETRY_COMMAND, R3, 5, T4);
+        let answer = issue_retry(
+            &store,
+            &command,
+            &checked,
+            &policy(Some(ESCALATE), ""),
+            Host::ClaudeCode,
+            &no_names(),
+            I2,
+        );
+        assert_eq!(answer["status"], "failed", "{answer}");
+        assert_eq!(answer["code"], "ledger-busy", "{answer}");
+        assert_eq!(of_type(&history(&store), "work_order.issued").len(), 1);
+        assert_eq!(held(&store, &project(), I2), None);
     }
 
     #[test]
