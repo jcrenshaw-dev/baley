@@ -1007,18 +1007,20 @@ mod tests {
     fn the_document_schema_does_not_omit_or_widen_the_capture_identity() {
         // Design 0012: a capture by its string id, a draft by its string
         // digest, the roadmap with no other field, a story by its integer id
-        // and a work order by its string id, each refusing any other field.
+        // a work order by its string id and a question set by its string
+        // set id, each refusing any other field.
         let schema = served_schema("document").unwrap();
         let identities = schema["properties"]["identity"]["oneOf"]
             .as_array()
             .unwrap();
-        assert_eq!(identities.len(), 5, "{identities:?}");
+        assert_eq!(identities.len(), 6, "{identities:?}");
         for (identity, kind, field) in [
             (&identities[0], "capture", Some(("id", "string"))),
             (&identities[1], "draft", Some(("digest", "string"))),
             (&identities[2], "roadmap", None),
             (&identities[3], "story", Some(("id", "integer"))),
             (&identities[4], "work_order", Some(("id", "string"))),
+            (&identities[5], "questions", Some(("set", "string"))),
         ] {
             assert_eq!(identity["type"], "object", "{identity}");
             assert_eq!(identity["properties"]["kind"]["const"], kind, "{identity}");

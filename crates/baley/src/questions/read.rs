@@ -3,12 +3,91 @@
 //!
 //! One `get` of the set's `questions` view document, handed to the core's
 //! pure reading and round: nothing is appended and no clock is read. The
-//! `document` read, `baley questions round` and the answer check share it.
+//! `document` read, `baley questions round` and the answer check share it,
+//! and the `document` read and the answer receipt share the round's shape.
 
 use baley_core::questions::{
-    QUESTIONS_VIEW, Round, UnreadableSet, questions_key, round_of, set_facts,
+    Pending, QUESTIONS_VIEW, Round, UnreadableSet, questions_key, round_of, set_facts,
 };
 use baley_store::{ProjectId, StoreError, Views};
+use serde_json::{Value, json};
+
+use crate::envelope::Refusal;
+
+/// The code for a set id this project's `questions` view does not hold.
+pub const NO_SUCH_QUESTION_SET: &str = "no-such-question-set";
+
+/// The refusal for a set this project does not hold, in `slot`. It echoes
+/// none of the id, so a long or odd id cannot grow the answer.
+pub fn no_such_question_set(slot: &str) -> Value {
+    Refusal::new(
+        NO_SUCH_QUESTION_SET,
+        "this project holds no question set with that id",
+    )
+    .slot(slot)
+    .value()
+}
+
+/// The sentence a round's answer carries, sending the session to the rounds
+/// relay instruction by its identity (design 0005 section 10).
+pub const RELAY: &str = "Put this round to the owner as the instruction `bal-rounds` says: read it by calling `baley_query` with `{\"operation\":\"instruction\",\"identity\":\"bal-rounds\"}`, and follow it.";
+
+/// A set's round as the `document` read answers it and an answer's receipt
+/// carries it: the derived state, the round number, the current round's
+/// questions with their recommended answers, each waiting question with its
+/// unanswered direct dependencies marked `open` or `deferred`, the answers
+/// and deferrals recorded, an abandonment, and [`RELAY`].
+pub fn round_value(round: &Round) -> Value {
+    let current: Vec<Value> = round
+        .current
+        .iter()
+        .map(|asked| {
+            json!({"id": asked.id, "question": asked.question,
+                "recommended": asked.recommended})
+        })
+        .collect();
+    let waiting: Vec<Value> = round
+        .waiting
+        .iter()
+        .map(|waiting| {
+            let on: Vec<Value> = waiting
+                .on
+                .iter()
+                .map(|(id, pending)| {
+                    let state = match pending {
+                        Pending::Open => "open",
+                        Pending::Deferred => "deferred",
+                    };
+                    json!({"id": id, "state": state})
+                })
+                .collect();
+            json!({"id": waiting.id, "question": waiting.question, "waits_on": on})
+        })
+        .collect();
+    let answered: Vec<Value> = round
+        .answered
+        .iter()
+        .map(|answer| {
+            json!({"id": answer.question, "answer": answer.answer, "accepted": answer.accepted,
+                "round": answer.round, "owner": answer.owner, "at": answer.at})
+        })
+        .collect();
+    let deferred: Vec<Value> = round
+        .deferred
+        .iter()
+        .map(|deferral| {
+            json!({"id": deferral.question, "reason": deferral.reason, "round": deferral.round,
+                "owner": deferral.owner, "at": deferral.at})
+        })
+        .collect();
+    let abandoned = round
+        .abandoned
+        .as_ref()
+        .map(|abandoned| json!({"cause": abandoned.cause.as_str(), "at": abandoned.at}));
+    json!({"state": round.state.as_str(), "round": round.number, "current": current,
+        "waiting": waiting, "answered": answered, "deferred": deferred,
+        "abandoned": abandoned, "relay": RELAY})
+}
 
 /// A set the project's view holds, with its round worked out.
 #[derive(Debug, Clone, PartialEq, Eq)]
