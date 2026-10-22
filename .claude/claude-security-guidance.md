@@ -33,7 +33,8 @@ Out of scope: the inherited engine listed in `crates/baley/src/inherited.rs`, wh
 
 **Owner acts and the sandbox**
 - An owner act (an approval of scope, truths or plans) must be served on the command line only, never over MCP. A new `baley_apply` or `baley_query` operation that records `Actor::Owner` is a critical finding.
-- Over MCP only `capture` and `scope-submit` may write the ledger. A new MCP write path needs the same project-in-ledger check as `crates/baley/src/mcp/prepare.rs`.
+- An answer or deferral a session relays over MCP (`questions-answer`) must be recorded with actor `baley`, the session as the caller and `owner.name` in its payload. An MCP path that records one as `Actor::Owner` is a critical finding. Only `baley questions answer` at the terminal records actor `owner` (ADR 0047).
+- Over MCP only `capture`, `scope-submit`, the ten change operations (`project-describe` to `backlog-reorder`), `project-start`, `work-order-fail`, `work-order-retry` and `questions-answer` may write the ledger. A new MCP write path needs the same project-in-ledger check as `crates/baley/src/mcp/prepare.rs`.
 - Install must render `sandbox.enabled = true`, `failIfUnavailable = true`, `allowUnsandboxedCommands = false` and the deny lists. It must refuse a settings document that would weaken them (`crates/baley/src/host_artifacts/compose.rs`). Flag any change that drops a deny entry, adds an exclusion, or accepts an `allowRead` or `allowWrite` entry that reaches Baley's folders.
 - `baley doctor` must keep reporting drift in those settings and what an agent can reach.
 
