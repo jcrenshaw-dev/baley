@@ -157,6 +157,11 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "1",
         "bf73b552ba3f4247d11f2ac8897f12065de8f9e63f065619e4837317a293a937",
     ),
+    (
+        "bal-analyzer-drafting",
+        "1",
+        "8cfeef1bdc7915b39f5cbe2002a89db30e2a333b678af2dc468cde794bac0810",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {
@@ -529,5 +534,55 @@ fn a_questions_text_missing_its_inputs_or_return_or_naming_cadence_state_is_caug
     }
     for name in CADENCE_NAMES {
         assert!(!body.contains(name), "the questions text names {name}");
+    }
+}
+
+#[test]
+fn a_drafting_text_missing_the_form_refusals_or_human_verify_is_caught() {
+    let body = served_text("bal-analyzer-drafting");
+    for needle in [
+        "`when`",
+        "`for-any`",
+        "`sees`",
+        "`gets`",
+        "`is refused`",
+        "`truth-form`",
+        "`truth-internal`",
+        "`truth-prose-oracle`",
+        "`human_verify`",
+        "`questions`",
+        "deferred question",
+        "keeps that truth's id",
+        "never on a recommendation the owner rejected",
+        "Leave out `observable` and `fixed_oracle`",
+    ] {
+        assert!(body.contains(needle), "the drafting text lacks {needle}");
+    }
+    // The return's shape never carries the attestations the owner makes.
+    assert!(!body.contains("\"observable\"") && !body.contains("\"fixed_oracle\""));
+    for name in CADENCE_NAMES {
+        assert!(!body.contains(name), "the drafting text names {name}");
+    }
+}
+
+#[test]
+fn an_analyzer_text_given_a_help_row_or_a_skill_stub_is_caught() {
+    let doors = crate::host_artifacts::stubs::front_doors();
+    for identity in ["bal-analyzer-questions", "bal-analyzer-drafting"] {
+        let Lookup::Served { entry, text } = lookup(identity) else {
+            panic!("{identity} is served");
+        };
+        assert_eq!(entry.build, 4, "{identity}");
+        assert_eq!(text.version, "1", "{identity}");
+        assert!(
+            !crate::help::table::COMMANDS
+                .iter()
+                .any(|command| command.name == identity),
+            "{identity} is a help row"
+        );
+        assert!(
+            !doors.iter().any(|(name, _)| *name == identity),
+            "{identity} is a front door"
+        );
     }
 }

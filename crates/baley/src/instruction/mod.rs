@@ -304,6 +304,17 @@ pub static ENTRIES: &[Entry] = &[
             body: analyzer::QUESTIONS_TEXT,
         }),
     },
+    // Build 4 serves the analyzer's drafting text inside a story's drafting
+    // order, never as a help row.
+    Entry {
+        identity: analyzer::DRAFTING_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: analyzer::DRAFTING_VERSION,
+            hash: analyzer::DRAFTING_HASH,
+            body: analyzer::DRAFTING_TEXT,
+        }),
+    },
 ];
 
 /// Looks an identity up by exact match. The identity is text compared with the
