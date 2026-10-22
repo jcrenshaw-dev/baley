@@ -1809,6 +1809,57 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn a_retry_recorded_over_a_submission_answering_its_order_or_an_earlier_attempt_since_its_check_is_caught()
+     {
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = two_projects();
+        issue_start(&store, &project(), I0, R1, T1);
+        fail_order(&store, &project(), I0, R2, T2);
+        let checked = retry_check(&store, &project(), I0).expect("I0 failed");
+        answer_order(&store, &project(), I0, &m(), R4, T3);
+        let before = head(&store);
+        let command = command_in(&project(), RETRY_COMMAND, R3, 5, T4);
+        let answer = issue_retry(
+            &store,
+            &command,
+            &checked,
+            &policy(Some(ESCALATE), ""),
+            Host::ClaudeCode,
+            &no_names(),
+            I2,
+        );
+        assert_eq!(answer["status"], "failed", "{answer}");
+        assert_eq!(answer["code"], "ledger-busy", "{answer}");
+        assert_eq!(head(&store), before);
+        assert_eq!(held(&store, &project(), I2), None);
+
+        // The submission answers the chain's first order, not the one retried.
+        issue_start(&store, &project_b(), I1, R1, T1);
+        fail_order(&store, &project_b(), I1, R2, T2);
+        let first = retry_in(&store, &project_b(), I1, I2, R3, T3, ESCALATE);
+        assert_eq!(first["status"], "ok", "{first}");
+        fail_order(&store, &project_b(), I2, R4, T4);
+        let checked = retry_check(&store, &project_b(), I2).expect("I2 failed");
+        answer_order(&store, &project_b(), I1, &m(), R5, T5);
+        let before = head_in(&store, &project_b());
+        let command = command_in(&project_b(), RETRY_COMMAND, R6, 5, T6);
+        let answer = issue_retry(
+            &store,
+            &command,
+            &checked,
+            &policy(Some(ESCALATE), ""),
+            Host::ClaudeCode,
+            &no_names(),
+            I3,
+        );
+        assert_eq!(answer["status"], "failed", "{answer}");
+        assert_eq!(answer["code"], "ledger-busy", "{answer}");
+        assert_eq!(head_in(&store, &project_b()), before);
+        assert_eq!(held(&store, &project_b(), I3), None);
+    }
+
     /// The `route` query judged from `arguments` beside its operation.
     fn route_query(arguments: Value) -> Result<RouteQuery, Value> {
         let mut call = json!({"operation": "route"});
