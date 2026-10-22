@@ -16,6 +16,7 @@ use crate::help::front_door;
 
 pub mod capture;
 pub mod read_contract;
+pub mod rounds;
 pub mod scope;
 pub mod start;
 
@@ -278,6 +279,17 @@ pub static ENTRIES: &[Entry] = &[
             version: start::SURVEY_VERSION,
             hash: start::SURVEY_HASH,
             body: start::SURVEY_TEXT,
+        }),
+    },
+    // Build 4 serves the rounds relay by identity, never as a help row: the
+    // round read and the answer receipt name it.
+    Entry {
+        identity: rounds::IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: rounds::VERSION,
+            hash: rounds::HASH,
+            body: rounds::TEXT,
         }),
     },
 ];

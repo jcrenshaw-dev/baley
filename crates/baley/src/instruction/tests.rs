@@ -147,6 +147,11 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "2",
         "ab97190b91b54fb647853049e3dbf54e82d736a31ba36996a83bc5d981471733",
     ),
+    (
+        "bal-rounds",
+        "1",
+        "8bab77d68c4253a45e63cf5f16397e58e058c21f94781674c0cf08c09bfa3e6d",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {
@@ -435,4 +440,51 @@ fn a_change_front_door_asking_for_an_argument_its_operations_refuse_is_caught() 
             "{identity} asks for instruction"
         );
     }
+}
+
+#[test]
+fn a_rounds_instruction_given_a_help_row_or_a_skill_stub_is_caught() {
+    let Lookup::Served { entry, text } = lookup("bal-rounds") else {
+        panic!("bal-rounds is served");
+    };
+    assert_eq!(entry.build, 4);
+    assert_eq!(text.version, "1");
+    assert!(
+        !crate::help::table::COMMANDS
+            .iter()
+            .any(|command| command.name == "bal-rounds"),
+        "bal-rounds is a help row"
+    );
+    assert!(
+        !crate::host_artifacts::stubs::front_doors()
+            .iter()
+            .any(|(name, _)| *name == "bal-rounds"),
+        "bal-rounds is a front door"
+    );
+}
+
+#[test]
+fn a_rounds_instruction_missing_its_read_its_answer_or_its_relay_rules_is_caught() {
+    let body = served_text("bal-rounds");
+    for needle in [
+        r#""kind":"questions""#,
+        "questions-answer",
+        r#""act":"take""#,
+        r#""act":"answer""#,
+        r#""act":"defer""#,
+        "recommended",
+        "deferred",
+        "closed",
+        "baley questions answer",
+    ] {
+        assert!(body.contains(needle), "the rounds relay lacks {needle}");
+    }
+    let forbidding = body
+        .split(". ")
+        .find(|sentence| sentence.contains("drop"))
+        .expect("a sentence forbids dropping");
+    for word in ["answer", "drop", "merge", "reword", "reorder"] {
+        assert!(forbidding.contains(word), "the forbidding lacks {word}");
+    }
+    assert!(!body.contains("approve"));
 }
