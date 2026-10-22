@@ -108,7 +108,7 @@ In the component view of [0002](0002-system-design.md) (Figure 4) this area is o
 
 ## 5. Commands and operations
 
-Every change follows submit (preview and digest), approve (owner, by digest), record. Answers and deferrals are the one exception: they are the owner's own acts, relayed by the host session, and `questions answer` records them as given (PLN-R25). Each operation is implemented once and reachable from a session through the stub skills ([ADR 0009](../adr/0009-served-instructions.md)). The owner's own acts and reads, such as answers, deferrals, rounds and previews, also have commands under `baley story`, `baley questions`, `baley phase` and `baley plan`, each calling the same function as the operation a session calls ([ADR 0044](../adr/0044-owner-acts-on-the-command-line.md)). Every approval, `story truths approve` and `plan approve` among them, is given only on the command line and is never served over MCP, because over MCP the call comes from the model and nothing proves a person answered, while the sandbox keeps agents from running the command line against Baley's home, where the ledger lives. A step whose only purpose is to issue a work order, such as `story refine`, is served to a session only, and an approval that also releases a work order records that order and returns its id, so a session can launch it.
+Every change follows submit (preview and digest), approve (owner, by digest), record. Answers and deferrals are the one exception: they are the owner's own acts, relayed by the host session, and `questions answer` records them as given (PLN-R25). Over MCP Baley cannot tell whether the owner gave an answer, so an answer or deferral a session relays is recorded as Baley's, with the session as the caller and `owner.name` and Baley's clock in each record; only one given at the terminal with `baley questions answer` is recorded as the owner's ([ADR 0047](../adr/0047-owner-acts-relayed-by-a-session.md)). Each operation is implemented once and reachable from a session through the stub skills ([ADR 0009](../adr/0009-served-instructions.md)). The owner's own acts and reads, such as answers, deferrals, rounds and previews, also have commands under `baley story`, `baley questions`, `baley phase` and `baley plan`, each calling the same function as the operation a session calls ([ADR 0044](../adr/0044-owner-acts-on-the-command-line.md)). Every approval, `story truths approve` and `plan approve` among them, is given only on the command line and is never served over MCP, because over MCP the call comes from the model and nothing proves a person answered, while the sandbox keeps agents from running the command line against Baley's home, where the ledger lives. A step whose only purpose is to issue a work order, such as `story refine`, is served to a session only, and an approval that also releases a work order records that order and returns its id, so a session can launch it.
 
 ### story refine
 
@@ -120,28 +120,30 @@ Every change follows submit (preview and digest), approve (owner, by digest), re
 
 - **Inputs:** the story id, the analyzer's questions work order id, and the questions as the analyzer returned them (PLN-R23).
 - **Outputs:** `questions.opened` recorded; the set id and round 1 as `questions round` gives it. An empty set is closed at once, and the output is the analyzer's drafting work order (PLN-R6). A set already open for the story is abandoned (PLN-R25).
-- **Refusals:** `question-id`, `question-blank`, `question-dependency`, `question-cycle`, `typed-content` (PLN-R23); `no-such-story` (PRJ-R18); `dispatch-active` (PRJ-R16).
+- **Refusals:** `question-id`, `question-blank`, `question-dependency`, `question-cycle`, `typed-content` (PLN-R23), the last also for a question id, question or recommended answer over 4,096 bytes and a `depends_on` naming an id twice; each names the question by its position in the list and, past the grammar, by its id; `no-such-story` (PRJ-R18); `dispatch-active` (PRJ-R16).
 
 ### questions round
 
-- **Inputs:** a question set id.
-- **Outputs:** read only. The round number; the current round's questions, each with its recommended answer; each waiting question with the open or deferred questions it waits on; the answered questions with their answers and the deferred ones with their reasons; `closed` when no question is open; `abandoned` when a later set replaced it (PLN-R24, PLN-R25).
-- **Refusals:** `no-such-question-set` (PLN-R24).
+- **Inputs:** a question set id. A session reads it as a `document` read on `baley_query` with identity `{"kind":"questions","set":"<set id>"}`; the owner prints it with `baley questions round <set>`.
+- **Outputs:** read only; nothing is recorded. The set's state, `open`, `closed` when no question is open, or `abandoned` once its abandonment is recorded; the round number, one more than the highest round recorded on the set and 1 when none is; the current round's questions, each with its recommended answer; each waiting question with its direct dependencies that are not answered, each marked `open` or `deferred`; the answered questions with their answers, whether each took the recommended answer, the round, the owner and the time; the deferred questions with their reasons, the round, the owner and the time; an abandoned set's cause and time; and a sentence naming the rounds relay instruction, `bal-rounds` (section 10). A `document` read too long for one part is cut into parts as every `document` read is. The terminal prints the same round with every recorded text escaped, and leaves out the relay sentence (PLN-R24, PLN-R25).
+- **Refusals:** `no-such-question-set` when this project holds no set with that id, another project's set included; the refusal echoes none of the id (PLN-R24).
 
 ### questions answer
 
-- **Inputs:** the set id; for each question the owner settles, either an answer (the recommended answer taken, or the owner's own answer) or a deferral with its reason; owner, time. The call may settle some or all of the current round, and may defer any open question, waiting or not.
-- **Outputs:** `question.answered` and `question.deferred` recorded together, all or none; the next round. When no question is open: for a story's set, the analyzer's drafting work order (PLN-R6); for a plan draft's set, either `ready` (the draft may be approved) or, when an answer rejected a recommended answer, the planner's revision work order (PLN-R27).
-- **Refusals:**
+- **Inputs:** the set id and one item for each question the owner settles: `{"question":"<id>","act":"take"}` takes the recommended answer, `{"question":"<id>","act":"answer","answer":"<the owner's words>"}` gives the owner's own answer, and `{"question":"<id>","act":"defer","reason":"<the owner's reason>"}` defers it. A session sends them as `questions-answer` on `baley_apply`, with `request_id` (a fresh lowercase UUID, the same on a retry), `set` and `items`. The owner gives them at the terminal as `baley questions answer <set>` with `--take QUESTION`, `--answer QUESTION TEXT` and `--defer QUESTION REASON`, each repeatable, sent as the takes, then the own answers, then the deferrals. The owner and the time are never inputs: Baley records `owner.name`, falling back to git `user.name`, and its own clock, and refuses the call `owner-identity-missing` when neither name is set. The call may settle some or all of the current round, and may defer any open question, waiting or not.
+- **Outputs:** every `question.answered` and `question.deferred` of the call recorded in one transaction on the set's stream, all or none, each with the round. A take records the recommended text with `accepted` true and an own answer the owner's words with `accepted` false; no text is compared with the recommendation. The receipt gives the set, the round recorded, the time, and in `now` the round as it stands after the call, in `questions round`'s shape, whose state is `closed` when no question is open. A receipt is never cut into parts, so when that round would pass the 24,576-byte part bound, `now` holds only the state, the round number, the `document` identity to read the round from and the relay sentence. A retry with the same `request_id` is answered from its record; a set that moved between the check and the transaction is answered `ledger-busy` with nothing recorded. When no question is open, the design's further outputs are, for a story's set, the analyzer's drafting work order (PLN-R6), and for a plan draft's set, either `ready` (the draft may be approved) or, when an answer rejected a recommended answer, the planner's revision work order (PLN-R27). They are not built (section 11): the receipt says only that the set is `closed`.
+- **Refusals:** judged in order, and the first refuses the whole call with nothing recorded: the call's grammar, then the set (`no-such-question-set`, then `question-set-abandoned`), then each item in the call's order through `no-such-question`, `question-closed`, `question-not-in-round`, `answer-blank` and `deferral-reason`. Every item is judged against the round as it stood before the call, so an answer to a question that only another answer in the same call would bring into the round is refused `question-not-in-round`. Over MCP a malformed argument or request id is refused `invalid-arguments` before the call's grammar, as for every write ([0012](0012-host-interface.md)).
 
   | Code | When | Requirement |
   |---|---|---|
-  | `no-such-question-set`, `no-such-question` | The set, or a question id within it, does not exist | PLN-R24 |
-  | `question-not-in-round` | An answer to a question that waits on an open or deferred question | PLN-R24 |
-  | `question-closed` | The question is already answered or deferred | PLN-R25 |
+  | `typed-content` | `items` is empty or not a list; an item is not an object, lacks `question` or `act`, names another act, or carries a member its act does not take; a question is named twice; a question id, answer or reason is over 4,096 bytes | PLN-R24 |
+  | `no-such-question-set` | This project holds no set with that id | PLN-R24 |
   | `question-set-abandoned` | A later set for the story, or the discard of its plan draft, abandoned the set | PLN-R25 |
-  | `answer-blank` | An answer with no text | PLN-R25 |
-  | `deferral-reason` | A deferral with no reason | PLN-R26 |
+  | `no-such-question` | A question id the set lacks | PLN-R24 |
+  | `question-closed` | The question is already answered or deferred | PLN-R25 |
+  | `question-not-in-round` | An answer, not a deferral, to a question outside the round as it stood before the call; a deferral may close a waiting question | PLN-R24 |
+  | `answer-blank` | An own answer that is missing, empty or only whitespace | PLN-R25 |
+  | `deferral-reason` | A deferral whose reason is missing, empty or only whitespace | PLN-R26 |
 
 ### story truths submit, story truths approve
 
@@ -172,7 +174,7 @@ Every change follows submit (preview and digest), approve (owner, by digest), re
 
 - **Inputs:** the typed plan (PLN-R11) with its evidence map (PLN-R12) and its questions (PLN-R23).
 - **Outputs:** the checker's work order when the plan gate is on; then the preview, the checker's findings, the plan's size and the phase's size against capacity, and the digest. With the preview Baley records `questions.opened` for the draft and gives the set id and round 1; a draft with no questions has an empty set, closed at once (PLN-R27). A new submit makes the draft it replaces stale, so approving that draft is refused `stale-draft`, and abandons that draft's set (PLN-R15, PLN-R25). The earlier draft keeps its record, and the plan and truth snapshots a check needs from it stay. For round 2, `plan submit` records `plan.check_issued` on `phase/<n>` before returning the work order. It binds the first check, the original and revised plan digests, the truth versions, the resolved scope, the material references and the policy version used to select the scope. Baley resolves the setting when it creates that work order. A retry must keep the binding from `plan.check_issued`.
-- **Refusals:** every code of PLN-R13; `typed-content` (PLN-R11); `question-id`, `question-blank`, `question-dependency`, `question-cycle` (PLN-R23); `over-capacity` (PLN-R9); `phase-not-active` (PLN-R7); `material-unavailable` when the retained draft, revision, truths or required comparison material cannot be read or does not match the work-order binding; `recheck-truths-changed` when the re-check's truths differ from those used by round 1 (PLN-R16). The evidence-map refusal `truth-version-mismatch` keeps its PLN-R13 meaning. After the one revision and re-check, remaining blockers go to the owner under the configured gate (PLN-R16).
+- **Refusals:** every code of PLN-R13; `typed-content` (PLN-R11), also for a question's id, question or recommended answer over 4,096 bytes and a `depends_on` naming an id twice; `question-id`, `question-blank`, `question-dependency`, `question-cycle` (PLN-R23), each naming the question by its position and id; `over-capacity` (PLN-R9); `phase-not-active` (PLN-R7); `material-unavailable` when the retained draft, revision, truths or required comparison material cannot be read or does not match the work-order binding; `recheck-truths-changed` when the re-check's truths differ from those used by round 1 (PLN-R16). The evidence-map refusal `truth-version-mismatch` keeps its PLN-R13 meaning. After the one revision and re-check, remaining blockers go to the owner under the configured gate (PLN-R16).
 
 Baley recognizes a checker revision from the draft awaiting the one revision granted by its first `plan.checked` result. The caller supplies the revised plan, not a first-check reference; Baley selects that reference from the draft's check state and validates all retained material against it and the revision. A refused re-check leaves this state intact, so another submit in the same draft lineage remains a revision. The draft survives a server restart, as every draft does ([ADR 0043](../adr/0043-submissions-recorded-as-drafts.md)); how a draft whose re-check was refused leaves that state is an open question for Build 4 in section 12.
 
@@ -239,13 +241,13 @@ Baley recognizes a checker revision from the draft awaiting the one revision gra
 
 | Field | Type | Meaning |
 |---|---|---|
-| `set` | set id | Assigned by Baley, unique in the project |
+| `set` | set id | A fresh lowercase UUID Baley mints when it opens the set, never derived from the content, so two sets with the same questions never share an id |
 | `subject` | `story`, `plan` | Whose decisions these are |
 | `story` | story id | For a story's set: the story being refined |
 | `work_order` | work order id | For a story's set: the analyzer's questions work order that returned them |
 | `phase`, `plan_digest` | integer, digest | For a plan draft's set: the phase and the draft whose `questions` field these are |
-| `questions` | list of questions | See below |
-| `at` | time | When Baley recorded the set |
+| `questions` | list of questions | See below, in submitted order. Every text is inline in the event, never a payload, and each is at most 4,096 bytes |
+| `at` | time | When Baley recorded the set, by its own clock |
 
 A set's state (open, closed, abandoned) and each question's state (waiting, in the current round, answered, deferred) are derived from these records, the answers and deferrals on them, and `questions.abandoned`; they are never stored.
 
@@ -267,9 +269,9 @@ A set's state (open, closed, abandoned) and each question's state (waiting, in t
 | `answer` | text | `question.answered` only: the owner's answer; the recommended text when the owner took it |
 | `accepted` | bool | `question.answered` only: true when the owner took the recommended answer, false when the owner rejected it |
 | `reason` | text | `question.deferred` only: why the owner leaves it undecided |
-| `owner`, `at` | owner, time | Who settled it and when |
+| `owner`, `at` | owner, time | Who settled it and when: `owner.name`, falling back to git `user.name`, and the time of the command that recorded it, by Baley's clock. Neither is ever taken from the caller |
 
-One `questions answer` call writes its answers and deferrals in one transaction.
+One `questions answer` call writes its answers and deferrals in one transaction, under one command of kind `questions.answer`. A call a session relays over MCP is recorded with actor `baley` and the session as the caller; a call given at the terminal with actor `owner` and no caller ([ADR 0047](../adr/0047-owner-acts-relayed-by-a-session.md)). Answers, deferrals and reasons are inline, each at most 4,096 bytes.
 
 ### questions.abandoned (event, same stream as its set)
 
@@ -325,7 +327,7 @@ The work order selects the full-plan input or the delta and blocker input from t
 | `backlog` | project | Stories in priority order with truth counts, refinement state (unrefined, questions open with the current round, drafting, refined), size when planned, the phase each is committed to |
 | `phase_plan` | project, phase | Goal, committed stories, plans with sizes, capacity, size, tasks done, definition of done state, velocity of closed phases. It is separate from the `phase` view of [0004](0004-starting-a-project-and-changing-scope.md), which serves Hardin the phase's context, plans, execution and completion state |
 | `plan` | project, phase, plan | The approved plan, its evidence map, its question set, and its completed checks with each round's scope, previous-check reference and material references |
-| `questions` | project, set | The set's subject; each question with its state (waiting and on what, in the current round, answered with the answer and whether it took the recommendation, deferred with the reason); the current round number; whether the set is open, closed or abandoned |
+| `questions` | project, set | The set's facts and records only: its subject, the stream it was opened on, the questions as submitted, each answer with whether it took the recommendation, its round, owner and time, each deferral with its reason, round, owner and time, and its abandonment with the cause and time. Whether the set is open, closed or abandoned, each question's state (waiting and on what, in the current round, answered, deferred) and the current round are computed when the set is read, from the questions in submitted order and these records, never stored |
 
 ## 7. States
 
@@ -399,7 +401,7 @@ stateDiagram-v2
   Closed --> Abandoned: questions.abandoned
 ```
 
-*Figure 7. States of a question set and, inside it, of each question. A set is abandoned when a later set for the same story is opened or its plan draft is discarded. The current round is every question in InRound. A question that waits on a deferred question never enters a round and closes only by its own deferral. Abandoned is terminal and keeps every recorded answer and deferral. The figure is numbered after the workflows so that the figure numbers other documents cite stay fixed.*
+*Figure 7. States of a question set and, inside it, of each question. Every state here is computed when the set is read, from its questions in submitted order and the answers, deferrals and abandonment recorded on it, never from the order they were recorded in, and none is stored. A set is abandoned when a later set for the same story is opened or its plan draft is discarded. The current round is every question in InRound. A question that waits on a deferred question never enters a round and closes only by its own deferral. Abandoned is terminal and keeps every recorded answer and deferral. The figure is numbered after the workflows so that the figure numbers other documents cite stay fixed.*
 
 ## 8. Workflows
 
@@ -554,9 +556,9 @@ sequenceDiagram
   participant B as Baley
   participant L as Ledger
   loop while a question of the set is open
-    H->>B: questions round (set)
+    H->>B: document read, identity kind questions and the set id
     B->>B: current round: open questions whose dependencies are all answered
-    B-->>H: round number, the round's questions with recommended answers, the waiting questions and what each waits on
+    B-->>H: state, round number, the round's questions with recommended answers, the waiting questions and what each waits on, the bal-rounds sentence
     H->>O: every question of the round with its recommended answer, and the waiting questions
     alt the owner takes the recommended answer
       O->>H: take it
@@ -565,17 +567,17 @@ sequenceDiagram
     else the owner defers a question
       O->>H: defer, with a reason
     end
-    H->>B: questions answer, the answers and deferrals unchanged
+    H->>B: questions-answer, request id, set and items unchanged
     alt refused
-      B-->>H: question-not-in-round / question-closed / question-set-abandoned / answer-blank / deferral-reason
+      B-->>H: typed-content / no-such-question-set / question-set-abandoned / no-such-question / question-closed / question-not-in-round / answer-blank / deferral-reason
     else
-      B->>L: question.answered, question.deferred
-      B-->>H: the next round, or the set closed with the work order that follows
+      B->>L: question.answered, question.deferred, in one transaction
+      B-->>H: receipt with the round recorded and the round as it now stands, or closed
     end
   end
 ```
 
-*Figure 8. Putting a question set to the owner in rounds, for a story's refinement and for a plan draft alike. The host session relays questions and answers and decides nothing. The owner may answer part of a round and may defer a waiting question. When the set closes, a story's set yields the analyzer's drafting work order and a plan draft's set yields `ready` or the planner's revision work order.*
+*Figure 8. Putting a question set to the owner in rounds, for a story's refinement and for a plan draft alike. The host session reads the round with `document`, relays questions and answers through `questions-answer` and decides nothing; the owner can do the same at the terminal with `baley questions round` and `baley questions answer`. The owner may answer part of a round and may defer a waiting question. When the set closes, a story's set is to yield the analyzer's drafting work order and a plan draft's set `ready` or the planner's revision work order; neither is built yet, and the receipt says only that the set is closed.*
 
 ## 9. Settings
 
@@ -597,7 +599,7 @@ sequenceDiagram
 | Checker | The checker, in its check work order: the six dimensions (story coverage, task completeness, sequencing, goal-backward truths, scope sanity, proportionality), severity rules, derive what must be true from the goal before opening the plan. For round 2, follow the work order's scope, check every first-round blocker and report new defects in the selected material | PLN-R16 |
 | Default test style | The planner and, through [0006](0006-execution.md), the executor, when the project has set nothing: test a unit through what it exposes; fake only the outside world; never start a program; skip trivial code; write the expected value by hand | PLN-R19 |
 | Stubs | The host session: which operation each of `story refine`, `story questions submit`, `questions round`, `questions answer`, `story truths submit`, `phase plan`, `plan submit`, `phase close` calls, and that the owner approves each preview | PLN-R15 |
-| Rounds | The host session, with every question set: submit the analyzer's questions as returned; put every question of the current round to the owner with its recommended answer and show the waiting questions; relay each answer and deferral unchanged; answer, drop, merge, reword and reorder none; ask again after each call until the set is closed | PLN-R24, PLN-R25, PLN-R26 |
+| Rounds | The host session, with every question set, served by its identity `bal-rounds` and named by the round read and the answer receipt; it has no help row and no stub: read the round with `document`; put every question of the current round to the owner with its recommended answer and show the waiting questions; relay each answer and deferral unchanged through `questions-answer`; answer, drop, merge, reword and reorder none; read again after each call until the set is closed. Its first step, submitting the analyzer's questions as returned, comes with `story questions submit` | PLN-R24, PLN-R25, PLN-R26 |
 
 The test derivation rules the planner receives, as served:
 
@@ -621,7 +623,7 @@ The binary parks the inherited engine for Build 9 to delete, and nothing in prod
 
 | Requirement | Status | Where |
 |---|---|---|
-| PLN-R1 | Partly built | The `backlog` view lists every story approved scope declared, in priority order, which an approved `backlog reorder` changes, keeps a dropped story with status `dropped`, and holds each story `unrefined` with no truths and no size (`crates/baley-core/src/scope/backlog.rs:43-189`), and `baley backlog show` prints it (`crates/baley/src/scope/command.rs:924-947`). A story carrying its truths, and the refinement state, are Build 4 T7 |
+| PLN-R1 | Partly built | The `backlog` view lists every story approved scope declared, in priority order, which an approved `backlog reorder` changes, keeps a dropped story with status `dropped`, and holds each story `unrefined` with no truths and no size (`crates/baley-core/src/scope/backlog.rs:43-189`), and `baley backlog show` prints it (`crates/baley/src/scope/command.rs`, `backlog_render`). A story carrying its truths, and the refinement state, are Build 4 T7 |
 | PLN-R7 to PLN-R10, PLN-R20 to PLN-R22 | Not built | In the parked engine truths are per phase (`crates/baley/src/context/model.rs:36-46`), and nothing knows committed stories, size or capacity |
 | PLN-R2, PLN-R3 | Not built | Only the parked engine validates a submission's form, one trigger, one observer, verbs, kinds and attestations (`crates/baley/src/context/validation.rs:5-106`). The session server answers `context-submit` as unavailable (`crates/baley/src/mcp/operations.rs:157`) until Build 4 |
 | PLN-R4 | Not built | Only the parked engine writes truth version 1 always, with no revision (`crates/baley/src/context/persistence.rs:33-49`, `crates/baley/src/context_service.rs:184-193`). The session server answers `context-submit` as unavailable (`crates/baley/src/mcp/operations.rs:157`) until Build 4 |
@@ -633,7 +635,11 @@ The binary parks the inherited engine for Build 9 to delete, and nothing in prod
 | PLN-R15 | Not built | Only the parked engine holds a plan draft, approves it by digest and refuses `stale-draft` (`crates/baley/src/plan_service.rs:163-260`). Its drafts are memory-only and lost on restart (`crates/baley/src/session/mod.rs:422-432`). The session server answers `plan-submit` as unavailable (`crates/baley/src/mcp/operations.rs:156`) until Build 4. Drafts recorded in the ledger and approved by digest at the terminal are built for the start's scope submission ([0004](0004-starting-a-project-and-changing-scope.md) section 11); plan drafts are Build 4 T9 |
 | PLN-R16 | Not built | `/bal-plan` forbids checker dispatch (`crates/baley/src/plan/instructions.rs:504-506`), and the parked engine still holds the 3.x checker verdict record as a fact kind (`crates/baley/src/evidence/mod.rs:48`, `crates/baley/src/evidence/checker.rs:43-52`). Re-check scope selection, retained comparison material, `plan.check_issued` and pending-check lookup are not built |
 | PLN-R17, PLN-R18, PLN-R19 | Built as text | The derivation rules are compiled at `crates/baley/src/plan/instructions.rs:119-180`, which `baley plan-instructions` prints. The compiled text still tells the planner to flag ambiguity for the owner in prose (`crates/baley/src/plan/instructions.rs:124`). It has no check `level`, and it still sends integration to a pending observation (`crates/baley/src/plan/instructions.rs:175-180`) |
-| PLN-R23 to PLN-R27 | Not built | The parked engine's phase context carries `assumptions` as strings the session writes (`crates/baley/src/context/model.rs:44`). There is no question, question set, round, answer or deferral record, no `questions` view, and no `question-open` or `answer-not-applied` refusal |
+| PLN-R23 | Partly built | `judge_set` (`crates/baley-core/src/questions/set.rs`) judges a set whole with every refusal of PLN-R23, and refuses `typed-content` for a text over 4,096 bytes and a `depends_on` naming an id twice. `open` and `abandon` (`crates/baley/src/questions/record.rs`) record `questions.opened` and `questions.abandoned` inside a caller's transaction, but no served operation calls them yet: `story questions submit`, which opens a story's set and abandons the one it supersedes, is Build 4 T7, and `plan submit`, which opens a plan draft's set and abandons the replaced draft's, is Build 4 T9 |
+| PLN-R24 | Built | `round_of` (`crates/baley-core/src/questions/round.rs`) works out the round from the questions in submitted order and the records, and `judge_call` and `judge_answers` (`crates/baley-core/src/questions/answer.rs`) judge a call against the round as it stood before it. The round is read with `document` (`crates/baley/src/mcp/document.rs`, `questions_answer`) and `baley questions round` (`crates/baley/src/questions/command.rs`, `round_render`), and a round is answered with `questions-answer` (`crates/baley/src/mcp/questions.rs`, `serve`) and `baley questions answer` (`crates/baley/src/questions/command.rs`, `record_answers`). The rounds relay is served as `bal-rounds` (`crates/baley/src/instruction/rounds.rs`). It runs over sets the PLN-R23 row's library functions open |
+| PLN-R25 | Partly built | `check` and `record` (`crates/baley/src/questions/answer.rs`) record every answer and deferral of a call in one transaction with its round, owner and time, a take with the recommended text and `accepted` true and an own answer in the owner's words with `accepted` false; `question-closed`, `answer-blank` and `question-set-abandoned` are judged by `judge_answers`, and the `questions` view refuses any record that would replace one (`crates/baley-core/src/questions/view.rs`, `QuestionsProjector`). A later set for the same story and a replaced plan draft abandon a set only once Build 4 T7 and T9 call `abandon` |
+| PLN-R26 | Partly built | `deferral-reason`, a deferral closing a waiting question, and a question waiting on a deferred one never entering a round are built (`judge_answers`, `round_of`). The `question-open` and `question-set-abandoned` refusals on `story truths approve` are Build 4 T7, and `question-open` on `plan approve` is Build 4 T9 |
+| PLN-R27 | Not built | A plan's `questions` field is Build 4 T8 and T9, judged by `judge_set`. The draft's set opened with the preview, `answer-not-applied` and the planner's revision work order are Build 4 T9. The close-time outputs of `questions answer`, the analyzer's drafting work order (Build 4 T7) and `ready` or the revision work order (Build 4 T9), plug in at `receipt_value` (`crates/baley/src/questions/answer.rs`), which until then answers only `closed` |
 
 ## 12. Open questions
 
@@ -643,4 +649,4 @@ The binary parks the inherited engine for Build 9 to delete, and nothing in prod
 | How a draft whose re-check was refused leaves that state | Build 4 T9 and T10, at the draft and checker revision state in `plan submit` |
 | How a pending round-2 binding is keyed and read back before a plan number exists, and how discarding its draft closes the pending check | Build 4, at `plan.check_issued`, `plan.checked` and draft discard |
 | The exact conditions under which a check's verdict is `rejected` for a test that could not have failed | [0007: Verification](0007-verification.md) |
-| How the analyzer, planner and checker work orders are delivered to the session's subagents on Claude Code, how their output is adjudicated there, and how the session puts a round's questions to the owner and returns the answers | [0012: Host interface](0012-host-interface.md) |
+| How the analyzer, planner and checker work orders are delivered to the session's subagents on Claude Code, and how their output is adjudicated there | [0012: Host interface](0012-host-interface.md) |
