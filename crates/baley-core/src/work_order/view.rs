@@ -3,10 +3,12 @@
 //! design 0012).
 //!
 //! An order is `pending` when issued, `failed` once `work_order.failed`
-//! names it and `answered` once a submission names it. The accepted result
-//! is the approved draft among an order's `drafts`: an approval names only
-//! a digest, so no projector can reach the order from it, and the binary
-//! reads it from the start approval when it reads the order.
+//! names it and `answered` once a return names it: a submission naming it
+//! or, for an analyzer's questions order, the story question set naming
+//! it. The accepted result is the approved draft among an order's `drafts`:
+//! an approval names only a digest, so no projector can reach the order
+//! from it, and the binary reads it from the start approval when it reads
+//! the order.
 
 use baley_store::{
     Caller, Change, DocKey, Event, FieldKind, FieldSpec, IndexField, IndexSpec, KeyValue, Order,
@@ -15,6 +17,7 @@ use baley_store::{
 use serde_json::{Map, Value, json};
 
 use super::event::{WORK_ORDER_FAILED, WORK_ORDER_ISSUED};
+use crate::questions::QUESTIONS_OPENED;
 use crate::scope::SCOPE_SUBMITTED;
 
 /// The view's name.
@@ -46,7 +49,8 @@ const PARENT_FIELD: &str = "parent";
 const CHILD_FIELD: &str = "child";
 /// The failure recorded for an order, or null.
 const FAILURE_FIELD: &str = "failure";
-/// The digests of the drafts submitted under an order, first seen first.
+/// What was returned under an order, first seen first: a draft's digest or
+/// a story question set's id.
 const DRAFTS_FIELD: &str = "drafts";
 
 /// The view's declaration: the order id as a text key and one index over
@@ -61,7 +65,7 @@ pub fn work_order_spec() -> ViewSpec {
     };
     ViewSpec {
         name: WORK_ORDER_VIEW.into(),
-        version: 1,
+        version: 2,
         key: vec![FieldSpec {
             name: ID_FIELD.into(),
             kind: FieldKind::Text,
@@ -89,7 +93,7 @@ pub fn work_order_key(id: &str) -> DocKey {
 }
 
 /// Keeps the `work_order` view current from `work_order.issued`,
-/// `work_order.failed` and `scope.submitted`.
+/// `work_order.failed`, `scope.submitted` and `questions.opened`.
 ///
 /// Issued: a new document holding the payload's members plus `state`
 /// `pending`, the event's `seq` and `recorded_at`, `failure` null, `drafts`
@@ -106,6 +110,11 @@ pub fn work_order_key(id: &str) -> DocKey {
 /// failed order stays failed. A submission naming no order, or one not
 /// held, changes nothing: it is its own record, and the binary checks the
 /// order before it records.
+///
+/// Opened: a story's question set naming an order held is that order's
+/// return, so its id is added to `drafts` once and a pending order becomes
+/// `answered`, as a submission does; a failed order stays failed. A set
+/// naming no order held, and a plan draft's set, change nothing.
 pub struct WorkOrderProjector {
     spec: ViewSpec,
 }
@@ -131,7 +140,12 @@ impl Projector for WorkOrderProjector {
     }
 
     fn handles(&self) -> &[&str] {
-        &[WORK_ORDER_ISSUED, WORK_ORDER_FAILED, SCOPE_SUBMITTED]
+        &[
+            WORK_ORDER_ISSUED,
+            WORK_ORDER_FAILED,
+            SCOPE_SUBMITTED,
+            QUESTIONS_OPENED,
+        ]
     }
 
     fn keys(&self, event: &Event) -> Vec<DocKey> {
@@ -146,6 +160,7 @@ impl Projector for WorkOrderProjector {
                 .and_then(Value::as_str)
                 .into_iter()
                 .collect(),
+            QUESTIONS_OPENED => story_set_order(event).into_iter().collect(),
             _ => caller_order(event).into_iter().collect(),
         };
         ids.dedup();
@@ -238,6 +253,18 @@ impl Projector for WorkOrderProjector {
                     body: Value::Object(document),
                 }])
             }
+            QUESTIONS_OPENED => {
+                // A set naming no order, or one not held, is its own record.
+                let Some((id, document)) =
+                    story_set_order(event).and_then(|id| held(id).map(|document| (id, document)))
+                else {
+                    return Ok(Vec::new());
+                };
+                let Some(set) = event.payload.get("set").and_then(Value::as_str) else {
+                    return Err(refuse("set is not text".into()));
+                };
+                answer(id, document, set).map_err(refuse)
+            }
             _ => {
                 // A submission naming no order, or one not held, is its own record.
                 let Some((id, document)) =
@@ -248,25 +275,40 @@ impl Projector for WorkOrderProjector {
                 let Some(digest) = event.payload.get("digest").and_then(Value::as_str) else {
                     return Err(refuse("digest is not text".into()));
                 };
-                let mut document = document.clone();
-                let mut drafts = match document.get(DRAFTS_FIELD) {
-                    Some(Value::Array(drafts)) => drafts.clone(),
-                    _ => return Err(refuse("the order's drafts are not a list".into())),
-                };
-                if !drafts.iter().any(|draft| draft == digest) {
-                    drafts.push(json!(digest));
-                }
-                document.insert(DRAFTS_FIELD.into(), Value::Array(drafts));
-                if text(&document, STATE_FIELD) == Some(PENDING) {
-                    document.insert(STATE_FIELD.into(), json!(ANSWERED));
-                }
-                Ok(vec![Change::Put {
-                    key: work_order_key(id),
-                    body: Value::Object(document),
-                }])
+                answer(id, document, digest).map_err(refuse)
             }
         }
     }
+}
+
+/// Order `id`'s `document` with `returned` added to its `drafts` once, and
+/// `answered` when it was pending; a failed order stays failed.
+fn answer(id: &str, document: &Map<String, Value>, returned: &str) -> Result<Vec<Change>, String> {
+    let mut document = document.clone();
+    let mut drafts = match document.get(DRAFTS_FIELD) {
+        Some(Value::Array(drafts)) => drafts.clone(),
+        _ => return Err("the order's drafts are not a list".into()),
+    };
+    if !drafts.iter().any(|draft| draft == returned) {
+        drafts.push(json!(returned));
+    }
+    document.insert(DRAFTS_FIELD.into(), Value::Array(drafts));
+    if text(&document, STATE_FIELD) == Some(PENDING) {
+        document.insert(STATE_FIELD.into(), json!(ANSWERED));
+    }
+    Ok(vec![Change::Put {
+        key: work_order_key(id),
+        body: Value::Object(document),
+    }])
+}
+
+/// The order a story's question set names; a plan draft's set names none.
+fn story_set_order(event: &Event) -> Option<&str> {
+    let payload = &event.payload;
+    if payload.get("subject").and_then(Value::as_str) != Some("story") {
+        return None;
+    }
+    payload.get("work_order").and_then(Value::as_str)
 }
 
 /// The work order a submission's caller carries, in either form.
@@ -447,7 +489,7 @@ mod tests {
     fn a_work_order_view_declared_without_its_live_index_is_caught() {
         let spec = work_order_spec();
         assert_eq!(spec.name, "work_order");
-        assert_eq!(spec.version, 1);
+        assert_eq!(spec.version, 2);
         assert_eq!(spec.page_bound, 100);
         assert_eq!(
             spec.key,
@@ -478,7 +520,12 @@ mod tests {
         );
         assert_eq!(
             WorkOrderProjector::new().handles(),
-            ["work_order.issued", "work_order.failed", "scope.submitted"]
+            [
+                "work_order.issued",
+                "work_order.failed",
+                "scope.submitted",
+                "questions.opened"
+            ]
         );
     }
 
@@ -571,5 +618,68 @@ mod tests {
             drafts(&view),
             json!([digest(0x11), digest(0x22), digest(0x44), digest(0x33)])
         );
+    }
+
+    const SECOND_SET: &str = "7f3e4d5c-6071-4c8d-8e9f-1a2b3c4d5e6f";
+
+    /// O1 as an analyzer's questions order for story 3.
+    fn analyzer_o1() -> Value {
+        let mut payload = o1();
+        payload["id"] = json!(I1);
+        payload["role"] = json!("analyzer");
+        payload["subject"] = json!("story/3");
+        payload
+    }
+
+    fn story_set(seq: u64, set: &str, order: &str) -> Event {
+        event(
+            seq,
+            "roadmap",
+            "questions.opened",
+            json!({"set": set, "subject": "story", "story": 3, "work_order": order,
+                "questions": [], "at": T0}),
+        )
+    }
+
+    #[test]
+    fn a_questions_order_left_pending_after_its_set_opened_is_caught() {
+        let mut view = View::new();
+        fold(&mut view, &issued(5, analyzer_o1())).unwrap();
+        fold(&mut view, &story_set(6, I0, I1)).unwrap();
+        assert_eq!(doc(&view, I1)["state"], "answered");
+        assert_eq!(doc(&view, I1)["drafts"], json!([I0]));
+        fold(&mut view, &story_set(7, SECOND_SET, I1)).unwrap();
+        assert_eq!(doc(&view, I1)["state"], "answered");
+        assert_eq!(doc(&view, I1)["drafts"], json!([I0, SECOND_SET]));
+    }
+
+    #[test]
+    fn a_set_naming_no_held_order_or_a_plan_set_changing_an_order_is_caught() {
+        let mut view = View::new();
+        fold(&mut view, &issued(5, analyzer_o1())).unwrap();
+        let before = view.clone();
+        fold(&mut view, &story_set(6, I0, I3)).unwrap();
+        assert_eq!(view, before);
+        // A plan set never names an order; one carrying O1's id anyway must
+        // still change nothing.
+        let plan_set = event(
+            7,
+            "phase/2",
+            "questions.opened",
+            json!({"set": SECOND_SET, "subject": "plan", "phase": 2,
+                "plan_digest": digest(0x5c), "work_order": I1, "questions": [], "at": T0}),
+        );
+        fold(&mut view, &plan_set).unwrap();
+        assert_eq!(view, before);
+    }
+
+    #[test]
+    fn a_failed_questions_order_revived_by_a_late_set_is_caught() {
+        let mut view = View::new();
+        fold(&mut view, &issued(5, analyzer_o1())).unwrap();
+        fold(&mut view, &failed(6, I1, "no return")).unwrap();
+        fold(&mut view, &story_set(7, I0, I1)).unwrap();
+        assert_eq!(doc(&view, I1)["state"], "failed");
+        assert_eq!(doc(&view, I1)["drafts"], json!([I0]));
     }
 }
