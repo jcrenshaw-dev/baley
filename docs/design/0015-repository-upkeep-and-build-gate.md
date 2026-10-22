@@ -39,7 +39,7 @@ This area uses the existing [glossary](../../CONTEXT.md) terms without changing 
 | UPK-R1 | The executable and MCP server are `baley`; the tools are `baley_version`, `baley_query` and `baley_apply`; instruction and agent identities use `bal-`. | Host configuration, advertised tools and instructions must agree. | HST-R5, HST-R12 | Active |
 | UPK-R2 | `baley install` preserves separately owned settings and registrations, including Cadence's, and replaces a Baley registration only with evidence that Baley owns it. A matching name alone grants no ownership. The binary writes the wiring at the stable path under [HST-R17](0012-host-interface.md#3-requirements) and [ADR 0038](../adr/0038-installer-and-opt-in-updates.md). | An occupied name does not establish ownership. | HST-R16, HST-R17 | Active |
 | UPK-R3 | Existing Baley spellings in inherited configuration, records and renderers remain consistent until their consumers are removed; upkeep does not rewrite stored bytes. | Record markers and hash inputs are contracts, not display text. | EVD-R19 | Active |
-| UPK-R4 | The historical mentions listed in section 6 remain, without becoming aliases; baseline performance material describes the replaced store without its project name. | Product history is separate from a supported interface. | | Active |
+| UPK-R4 | The historical mentions and the ported-source names listed in section 6 remain, without becoming aliases; baseline performance material describes the replaced store without its project name. | Product history is separate from a supported interface. | | Active |
 | UPK-R5 | `main` requires `cargo-test`, `clippy`, `cargo-deny` and `fmt`, with strict up-to-date checks and the expected check producer preserved; `fmt` becomes required only after its job exists and passes. | The gate includes formatting without requiring a result no workflow can produce. | | Active |
 | UPK-R6 | Formatting uses the exact toolchain in `rust-toolchain.toml`, explicitly installs that toolchain's `rustfmt`, and runs `cargo fmt --all --check`. | A minimal toolchain installation does not supply every optional component. | UPK-R5 | Active |
 | UPK-R7 | Repository metadata and README status describe the built product and supported host, using section 9's values. | Public entry points must describe the same project. | ADR 0033 | Active |
@@ -111,14 +111,23 @@ The retained historical passages are:
 
 | Passage | Current location | Treatment |
 |---|---|---|
-| Product boundary | [PRD:148](prd/baley.md#L148) | Keep the distinction between the predecessor's behavior and Baley's requirements |
+| Product boundary | [PRD:148](prd/baley.md#L148) | Keep the statement of what carries over and what is designed afresh |
 | No record import | [PRD:170](prd/baley.md#L170) | Keep the explicit exclusion |
-| Heritage | [PRD:174](prd/baley.md#L174) | Keep the explanation of the working loop's origin |
+| Heritage | [PRD:174](prd/baley.md#L174) | Keep the explanation of the working loop's and the agent texts' origin |
 | Story design context | [ADR 0017:14](../adr/0017-stories-and-sprints.md#L14) | Keep the accepted decision's body |
 | Review design context | [ADR 0019:14](../adr/0019-reviews-adjudicated-and-ruled.md#L14) | Keep the accepted decision's body |
 | README lineage | [README lineage](../../README.md#lineage) | Keep the name, repository link and attribution before the `baley-start` tag |
 
-Outside this document, a case-insensitive tracked-content search for `cadence` finds eleven occurrences on nine lines in seven files: the five passages in `docs` above, three occurrences on the README lineage line, and one on line 24 of each of the three dated live-run sheets `spikes/host-matrix/claude-live-2026-10-08-run1.md` to `run3.md`, which record the owner's Cadence plugin hook seen in those sessions. `crates` and `.github` contain zero matches; `scripts` is absent. The old `cad-` instruction prefix has zero matches outside this document. This document's explanatory mentions and registration boundary are also permitted, without establishing aliases. No active identifier is exempted as history.
+The ported sources are:
+
+| Passage | Current location | Treatment |
+|---|---|---|
+| Porting decision | [ADR 0048](../adr/0048-port-what-cadence-hands-agents.md) | Keep: names the Cadence files and commands each Baley text and check is ported from |
+| Sources per build | [Roadmap](../roadmap.md), the `Cadence sources` line of Builds 4 to 8 | Keep: names each owning task's Cadence source |
+| Ported text notes | The doc comment of each ported text's Rust constant | Keep: names the Cadence tag and file the text is ported from |
+| Links to the decision | [ADR index](../adr/README.md), [PRD:148](prd/baley.md#L148), design 0012's related ADRs | Keep: the record's file name |
+
+Outside this document, a case-insensitive tracked-content search for `cadence` finds the five historical passages in `docs` above, three occurrences on the README lineage line, one on line 24 of each of the three dated live-run sheets `spikes/host-matrix/claude-live-2026-10-08-run1.md` to `run3.md`, which record the owner's Cadence plugin hook seen in those sessions, and the ported sources above. `.github` contains zero matches, `crates` holds only ported text notes, and `scripts` is absent. The old `cad-` prefix appears outside this document only in the ported sources, as the names of the Cadence files and commands a Baley text or check is ported from; no Baley identifier uses it. This document's explanatory mentions and registration boundary are also permitted, without establishing aliases. No active identifier is exempted as history.
 
 The unnamed baseline is retained in [0001:35](0001-evidence-ledger.md#L35), its [non-goals](0001-evidence-ledger.md#L57), [performance account](0001-evidence-ledger.md#performance) and [compatibility rule](0001-evidence-ledger.md#compatibility-and-migration). The profile is [baseline-store.json](../../spikes/evidence-ledger-bench/profile/baseline-store.json), identified by the benchmark [README:30](../../spikes/evidence-ledger-bench/README.md#L30) and [loader:558](../../spikes/evidence-ledger-bench/src/main.rs#L558). Those figures describe the replaced store, not the current test suite.
 

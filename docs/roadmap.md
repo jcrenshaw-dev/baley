@@ -266,6 +266,7 @@ Build 4 T6 builds question sets and their rounds. A question set is judged whole
 
 - Designs: [0001 evidence ledger](design/0001-evidence-ledger.md), [0002 system design](design/0002-system-design.md), [0003 configuration and routing](design/0003-configuration-and-routing.md), [0004 starting a project and changing scope](design/0004-starting-a-project-and-changing-scope.md), [0005 context, plans and acceptance](design/0005-context-plans-and-acceptance.md), [0008 review](design/0008-review.md), [0009 risk](design/0009-risk.md), [0012 host interface](design/0012-host-interface.md), [0014 support families](design/0014-support-families.md)
 - ADRs: [0013 host session calls outside models](adr/0013-host-session-calls-outside-models.md), [0017 stories and sprints](adr/0017-stories-and-sprints.md), [0019 reviews adjudicated and ruled](adr/0019-reviews-adjudicated-and-ruled.md), [0030 question rounds](adr/0030-question-rounds.md), [0031 one term per concept](adr/0031-one-term-per-concept.md), [0037 plan re-check scope](adr/0037-plan-recheck-scope.md), [0039 session-owned provider credentials](adr/0039-session-owned-provider-credentials.md), [0042 mocked-boundary integration checks](adr/0042-mocked-boundary-integration-checks.md), [0043 submissions recorded as drafts](adr/0043-submissions-recorded-as-drafts.md), [0044 owner acts on the command line](adr/0044-owner-acts-on-the-command-line.md), [0045 project start from a session](adr/0045-project-start-from-a-session.md), [0046 agent stubs per role and rung](adr/0046-agent-stubs-per-role-and-rung.md), [0047 owner acts relayed by a session](adr/0047-owner-acts-relayed-by-a-session.md)
+- Cadence sources ([ADR 0048](adr/0048-port-what-cadence-hands-agents.md)), each from the Cadence release current when its task is planned: T7's analyzer text from `skills/cad-assumptions-analyzer-contract/SKILL.md` and `cadence-core/workflows/context.md`; T8's planner text from `skills/cad-planner-contract/SKILL.md`, `cadence-core/workflows/plan.md` and `cadence-core/templates/PLAN.md`; T10's checker text from `skills/cad-plan-checker-contract/SKILL.md`; T11's lease risk from `planning.mjs risk-check` and `cadence-core/references/risk-surface.md`; T13's reviewer text from `skills/cad-reviewer-contract/SKILL.md`, `cadence-core/references/reviewer-brief.md` and `cadence-core/references/review-triggers.md`; T14's adjudication and rulings from `planning.mjs adjudication`, `cadence-core/references/triage-gate.md` and `cadence-core/references/review-record.md`; the front doors `bal-context`, `bal-plan`, `bal-review`, `bal-plan-review`, `bal-decision-review` and `bal-minimalism-review` from `/cad-context`, `/cad-plan`, `fire()` in `review-triggers.md`, `/cad-plan-review`, `/cad-decision-review` and `/cad-minimalism-review`
 - Carries: [#40](https://github.com/jcrenshaw-dev/baley/issues/40), [#68](https://github.com/jcrenshaw-dev/baley/issues/68), [#69](https://github.com/jcrenshaw-dev/baley/issues/69), [#72](https://github.com/jcrenshaw-dev/baley/issues/72)
 - Blocked by: Build 3 ([#24](https://github.com/jcrenshaw-dev/baley/issues/24))
 
@@ -362,6 +363,7 @@ Build 5 serves the verifier the VER-R6 rule that rejects an integration check mo
 
 - Designs: [0002 system design](design/0002-system-design.md), [0006 execution](design/0006-execution.md), [0007 verification](design/0007-verification.md), [0008 review](design/0008-review.md), [0009 risk](design/0009-risk.md), [0012 host interface](design/0012-host-interface.md)
 - ADRs: [0014 Baley runs tests](adr/0014-baley-runs-tests.md), [0018 lease enforced at close](adr/0018-lease-enforced-at-close.md), [0019 reviews adjudicated and ruled](adr/0019-reviews-adjudicated-and-ruled.md), [0037 plan re-check scope](adr/0037-plan-recheck-scope.md), [0042 mocked-boundary integration checks](adr/0042-mocked-boundary-integration-checks.md)
+- Cadence sources ([ADR 0048](adr/0048-port-what-cadence-hands-agents.md)): the executor text from `skills/cad-executor-contract/SKILL.md` and `cadence-core/workflows/execute.md`; the verifier text from `skills/cad-verifier-contract/SKILL.md` and `cadence-core/workflows/verify.md`; the test and check runs from `planning.mjs test-checks` and `test-evidence`; the lease at close from `planning.mjs lease-check`; the front doors `bal-execute`, `bal-verify`, `bal-coverage` and `bal-audit` from `/cad-execute`, `/cad-verify`, `/cad-coverage` and `/cad-audit`
 - Carries: no bugs
 - Blocked by: Build 4 ([#25](https://github.com/jcrenshaw-dev/baley/issues/25))
 
@@ -373,6 +375,7 @@ Milestones close and archive. A finished phase lands on GitHub one step at a tim
 
 - Designs: [0001 evidence ledger](design/0001-evidence-ledger.md), [0003 configuration and routing](design/0003-configuration-and-routing.md), [0004 starting a project and changing scope](design/0004-starting-a-project-and-changing-scope.md), [0008 review](design/0008-review.md), [0011 milestones, landing, undo and pause](design/0011-milestones-landing-undo-pause.md)
 - ADRs: [0007 forge anchors](adr/0007-forge-anchors.md), [0031 one term per concept](adr/0031-one-term-per-concept.md)
+- Cadence sources ([ADR 0048](adr/0048-port-what-cadence-hands-agents.md)): the front doors `bal-land`, `bal-milestone` and `bal-undo` from `/cad-land`, `/cad-milestone` and `/cad-undo`
 - Carries: [#68](https://github.com/jcrenshaw-dev/baley/issues/68), its landing part: git's error text in `landing/effects.rs` and the remote URLs landing shows go through `checkout::redact_git_text`
 - Blocked by: Build 5 ([#26](https://github.com/jcrenshaw-dev/baley/issues/26))
 
@@ -384,6 +387,7 @@ Baley answers what to do next and shows progress from keyed ledger views. A stat
 
 - Designs: [0013 next action and progress](design/0013-next-action-and-progress.md), [0014 support families](design/0014-support-families.md)
 - ADRs: [0031 one term per concept](adr/0031-one-term-per-concept.md)
+- Cadence sources ([ADR 0048](adr/0048-port-what-cadence-hands-agents.md)): the front doors `bal-progress` and `bal-suggest` from `/cad-progress` and `/cad-suggest`
 - Carries: no bugs
 - Blocked by: Build 6 ([#27](https://github.com/jcrenshaw-dev/baley/issues/27))
 
@@ -395,6 +399,7 @@ Ranked recall and exact "why" queries, then task, debug and spike on the ledger.
 
 - Designs: [0001 evidence ledger](design/0001-evidence-ledger.md), [0008 review](design/0008-review.md), [0013 next action and progress](design/0013-next-action-and-progress.md), [0014 support families](design/0014-support-families.md)
 - ADRs: none
+- Cadence sources ([ADR 0048](adr/0048-port-what-cadence-hands-agents.md)): the front doors `bal-task`, `bal-debug`, `bal-spike` and `bal-why` from `/cad-task`, `/cad-debug`, `/cad-spike` and `/cad-why`
 - Carries: no bugs
 - Blocked by: Build 7 ([#28](https://github.com/jcrenshaw-dev/baley/issues/28))
 

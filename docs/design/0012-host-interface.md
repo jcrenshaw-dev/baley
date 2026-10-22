@@ -6,7 +6,7 @@
 | Design issue | none; build issues [#25](https://github.com/jcrenshaw-dev/baley/issues/25), [#127](https://github.com/jcrenshaw-dev/baley/issues/127), [#14](https://github.com/jcrenshaw-dev/baley/issues/14) (install) |
 | Requirement prefix | HST |
 | Applies | [0002: System design](0002-system-design.md) |
-| Related | ADRs: [0008](../adr/0008-host-sandbox-isolation.md), [0009](../adr/0009-served-instructions.md), [0011](../adr/0011-one-shared-server.md), [0012](../adr/0012-optimistic-concurrency.md), [0027](../adr/0027-vendor-folders-and-plain-keys.md), [0028](../adr/0028-one-http-stack.md), [0033](../adr/0033-host-security-bar.md), [0034](../adr/0034-one-server-per-session.md), [0038](../adr/0038-installer-and-opt-in-updates.md), [0039](../adr/0039-session-owned-provider-credentials.md) · C4 view: components ([0002](0002-system-design.md) Figure 4) |
+| Related | ADRs: [0008](../adr/0008-host-sandbox-isolation.md), [0009](../adr/0009-served-instructions.md), [0011](../adr/0011-one-shared-server.md), [0012](../adr/0012-optimistic-concurrency.md), [0027](../adr/0027-vendor-folders-and-plain-keys.md), [0028](../adr/0028-one-http-stack.md), [0033](../adr/0033-host-security-bar.md), [0034](../adr/0034-one-server-per-session.md), [0038](../adr/0038-installer-and-opt-in-updates.md), [0039](../adr/0039-session-owned-provider-credentials.md), [0048](../adr/0048-port-what-cadence-hands-agents.md) · C4 view: components ([0002](0002-system-design.md) Figure 4) |
 
 The current design of this area, and nothing else. Edit it in place when the design changes; git holds the history. It describes the design only, never the work still to do.
 
