@@ -7,7 +7,7 @@
 //! and the `document` read and the answer receipt share the round's shape.
 
 use baley_core::questions::{
-    Pending, QUESTIONS_VIEW, Round, UnreadableSet, questions_key, round_of, set_facts,
+    Pending, QUESTIONS_VIEW, Round, SetFacts, UnreadableSet, questions_key, round_of, set_facts,
 };
 use baley_store::{ProjectId, StoreError, Views};
 use serde_json::{Value, json};
@@ -98,13 +98,18 @@ pub struct HeldSet {
     /// The sequence that last produced the set's document, which an answer's
     /// transaction confirms unchanged.
     pub produced_seq: u64,
+    /// The facts the round was worked out from, which an answer call is
+    /// judged against.
+    pub facts: SetFacts,
+    /// The stream the set and every record on it go on.
+    pub stream: String,
 }
 
 /// What a read of one set found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetRead {
     /// The set and its round.
-    Held(HeldSet),
+    Held(Box<HeldSet>),
     /// This project's view holds no set with that id, another project's set
     /// included. Callers answer it `no-such-question-set`.
     NotHeld,
@@ -122,13 +127,21 @@ pub fn read<V: Views + ?Sized>(
     let Some(document) = store.get(project, QUESTIONS_VIEW, &questions_key(set))? else {
         return Ok(SetRead::NotHeld);
     };
-    Ok(match set_facts(&document.body) {
-        Ok(facts) => SetRead::Held(HeldSet {
-            round: round_of(&facts),
-            produced_seq: document.produced_seq,
-        }),
-        Err(unreadable) => SetRead::Unreadable(unreadable),
-    })
+    let facts = match set_facts(&document.body) {
+        Ok(facts) => facts,
+        Err(unreadable) => return Ok(SetRead::Unreadable(unreadable)),
+    };
+    let Some(stream) = document.body.get("stream").and_then(Value::as_str) else {
+        return Ok(SetRead::Unreadable(UnreadableSet(
+            "the set's stream cannot be read".into(),
+        )));
+    };
+    Ok(SetRead::Held(Box::new(HeldSet {
+        round: round_of(&facts),
+        produced_seq: document.produced_seq,
+        facts,
+        stream: stream.into(),
+    })))
 }
 
 #[cfg(test)]
@@ -193,7 +206,7 @@ mod tests {
 
     fn held(store: &SqliteStore, set: &str) -> HeldSet {
         match read(store, &project(), set).unwrap() {
-            SetRead::Held(held) => held,
+            SetRead::Held(held) => *held,
             other => panic!("{set}: {other:?}"),
         }
     }
