@@ -152,6 +152,11 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "1",
         "8bab77d68c4253a45e63cf5f16397e58e058c21f94781674c0cf08c09bfa3e6d",
     ),
+    (
+        "bal-analyzer-questions",
+        "1",
+        "bf73b552ba3f4247d11f2ac8897f12065de8f9e63f065619e4837317a293a937",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {
@@ -487,4 +492,42 @@ fn a_rounds_instruction_missing_its_read_its_answer_or_its_relay_rules_is_caught
         assert!(forbidding.contains(word), "the forbidding lacks {word}");
     }
     assert!(!body.contains("approve"));
+}
+
+/// Names of Cadence's own files, commands and state that no ported analyzer
+/// text may carry (ADR 0048).
+const CADENCE_NAMES: &[&str] = &[
+    ".planning",
+    "CONTEXT.md",
+    "ROADMAP.md",
+    "planning.mjs",
+    "skim.mjs",
+    "excerpt",
+    "recall",
+    "AskUserQuestion",
+    "/cad-",
+];
+
+#[test]
+fn a_questions_text_missing_its_inputs_or_return_or_naming_cadence_state_is_caught() {
+    let body = served_text("bal-analyzer-questions");
+    for needle in [
+        "`story`",
+        "`description`",
+        "`roadmap`",
+        "`truths`",
+        "`document`",
+        "\"id\"",
+        "\"question\"",
+        "\"recommended\"",
+        "\"depends_on\"",
+        "`depends_on`",
+        "`[]`",
+        "Call no `baley_apply` operation",
+    ] {
+        assert!(body.contains(needle), "the questions text lacks {needle}");
+    }
+    for name in CADENCE_NAMES {
+        assert!(!body.contains(name), "the questions text names {name}");
+    }
 }

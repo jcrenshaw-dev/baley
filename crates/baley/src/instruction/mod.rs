@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use crate::envelope::Refusal;
 use crate::help::front_door;
 
+pub mod analyzer;
 pub mod capture;
 pub mod read_contract;
 pub mod rounds;
@@ -290,6 +291,17 @@ pub static ENTRIES: &[Entry] = &[
             version: rounds::VERSION,
             hash: rounds::HASH,
             body: rounds::TEXT,
+        }),
+    },
+    // Build 4 serves the analyzer's questions text inside a story's questions
+    // order, never as a help row.
+    Entry {
+        identity: analyzer::QUESTIONS_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: analyzer::QUESTIONS_VERSION,
+            hash: analyzer::QUESTIONS_HASH,
+            body: analyzer::QUESTIONS_TEXT,
         }),
     },
 ];
