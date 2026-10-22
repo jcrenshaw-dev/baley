@@ -83,6 +83,8 @@ pub mod policy_step;
 pub mod protected_paths;
 /// Outside review providers: the compiled risk warning, the owner's recorded acknowledgement of it and the owner identity it names.
 pub mod providers;
+/// Question sets over the storage port: a set opened and abandoned inside its caller's transaction, and its round read.
+pub mod questions;
 /// Replaces a settings file whole, refusing when it changed since it was read.
 pub mod replace;
 /// The scope records of design 0004: start submissions held as drafts over the storage port.
