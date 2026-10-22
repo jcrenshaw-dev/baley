@@ -213,7 +213,7 @@ pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::questions::record::tests::{open_set, story};
+    use crate::questions::record::tests::{declare, open_set, story};
     use crate::scope::fixtures::*;
 
     pub(crate) const OWNER: &str = "Ada Lovelace";
@@ -282,6 +282,7 @@ pub(crate) mod tests {
     #[test]
     fn a_partly_recorded_or_edited_answer_call_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let set = open_set(&store, R1, &r2(), &story(1));
         let refused = |items: Value, code: &str, question: Option<&str>| {
             let before = head(&store);
@@ -368,6 +369,7 @@ pub(crate) mod tests {
     #[test]
     fn an_answer_recorded_over_a_set_that_moved_since_its_check_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let set = open_set(&store, R1, &r2(), &story(1));
         let first = checked(&store, &set, &json!([take("q1")]));
         let second = run(
@@ -429,6 +431,7 @@ pub(crate) mod tests {
     #[test]
     fn a_receipt_without_the_next_round_or_the_closed_set_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let set = open_set(&store, R1, &r2(), &story(1));
         let first = run(
             &store,
@@ -489,6 +492,7 @@ pub(crate) mod tests {
     #[test]
     fn a_receipt_carrying_a_round_past_the_part_bound_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let text = "x".repeat(4096);
         let questions: Vec<Value> = (1..=10)
             .map(|n| {
@@ -534,6 +538,7 @@ pub(crate) mod tests {
     #[test]
     fn a_replayed_answer_call_recorded_twice_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let set = open_set(&store, R1, &r2(), &story(1));
         let kept = checked(&store, &set, &json!([take("q1")]));
         let command = command(ANSWER_COMMAND, R2, 2, T2);
@@ -547,6 +552,7 @@ pub(crate) mod tests {
     #[test]
     fn an_answer_recorded_without_its_checks_read_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         open_set(&store, R1, &r2(), &story(1));
         let before = head(&store);
         let unchecked = record(&store, &command(ANSWER_COMMAND, R2, 2, T2), OWNER, None);
@@ -557,6 +563,7 @@ pub(crate) mod tests {
     #[test]
     fn an_unknown_set_checked_as_anything_but_no_such_question_set_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         open_set(&store, R1, &r2(), &story(1));
         let before = head(&store);
         let unknown = "7f3e4d5c-6071-4c8d-8e9f-1a2b3c4d5e6f";

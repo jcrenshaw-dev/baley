@@ -922,14 +922,17 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|s| json!([s["id"], s["refinement"], s["truths"]]))
+            .map(|s| {
+                let stored = s.get("refinement").is_some();
+                json!([s["id"], stored, s["set"], s["refined"], s["truths"]])
+            })
             .collect();
         assert_eq!(
             listed,
             [
-                json!([1, "unrefined", 0]),
-                json!([2, "unrefined", 0]),
-                json!([3, "unrefined", 0])
+                json!([1, false, null, null, 0]),
+                json!([2, false, null, null, 0]),
+                json!([3, false, null, null, 0])
             ]
         );
 

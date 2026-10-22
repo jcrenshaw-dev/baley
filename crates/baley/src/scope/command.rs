@@ -928,7 +928,8 @@ pub(crate) fn phase_render(read: Result<Phase, ReadError>) -> Render {
 }
 
 /// What `backlog show` prints for a backlog read: one line per story in
-/// priority order, or one line when it is empty.
+/// priority order, its refinement state shown as `unrefined`, `questions
+/// open in round <n>`, `drafting` or `refined`, or one line when it is empty.
 pub(crate) fn backlog_render(read: Result<Vec<BacklogStory>, ReadError>) -> Render {
     match read {
         Ok(stories) if stories.is_empty() => Render::line("the backlog is empty", 0),
@@ -936,12 +937,16 @@ pub(crate) fn backlog_render(read: Result<Vec<BacklogStory>, ReadError>) -> Rend
             stories
                 .iter()
                 .map(|story| {
+                    let refinement = match story.round {
+                        Some(round) => format!("questions open in round {round}"),
+                        None => escaped(&story.refinement),
+                    };
                     format!(
                         "story {} ({}, {}, {}, {} truths): {}",
                         story.id,
                         escaped(&story.status),
                         committed(story.phase),
-                        escaped(&story.refinement),
+                        refinement,
                         story.truths,
                         escaped(&story.sentence)
                     )
@@ -1537,6 +1542,7 @@ mod tests {
             status: text(status),
             phase,
             refinement: text("unrefined"),
+            round: None,
             truths: 0,
             size: None,
         };
@@ -1561,6 +1567,35 @@ mod tests {
                 "story 1 (active): Every step is recorded",
                 "phase: 1",
                 "truths: 0"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_backlog_line_without_its_state_or_round_is_caught() {
+        let listed = |id, refinement: &str, round, truths| BacklogStory {
+            id,
+            sentence: text("Every step is recorded"),
+            status: text("active"),
+            phase: Some(1),
+            refinement: text(refinement),
+            round,
+            truths,
+            size: None,
+        };
+        let backlog = backlog_render(Ok(vec![
+            listed(1, "questions-open", Some(2), 0),
+            listed(2, "drafting", None, 0),
+            listed(3, "refined", None, 2),
+            listed(4, "unrefined", None, 0),
+        ]));
+        assert_eq!(
+            shown(&backlog),
+            [
+                "story 1 (active, phase 1, questions open in round 2, 0 truths): Every step is recorded",
+                "story 2 (active, phase 1, drafting, 0 truths): Every step is recorded",
+                "story 3 (active, phase 1, refined, 2 truths): Every step is recorded",
+                "story 4 (active, phase 1, unrefined, 0 truths): Every step is recorded",
             ]
         );
     }

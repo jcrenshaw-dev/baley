@@ -11,6 +11,8 @@ use super::event::{
     STORY_REPRIORITIZED,
 };
 use super::roadmap::reprioritized;
+use crate::questions::QUESTIONS_OPENED;
+use crate::truth::STORY_REFINED;
 
 /// The view's name.
 pub const BACKLOG_VIEW: &str = "backlog";
@@ -25,7 +27,7 @@ const PROJECT_KEY: &str = "project";
 pub fn backlog_spec() -> ViewSpec {
     ViewSpec {
         name: BACKLOG_VIEW.into(),
-        version: 2,
+        version: 3,
         key: vec![FieldSpec {
             name: KEY_FIELD.into(),
             kind: FieldKind::Text,
@@ -40,12 +42,20 @@ pub fn backlog_key() -> DocKey {
     DocKey(vec![KeyValue::Text(PROJECT_KEY.into())])
 }
 
-/// Keeps the `backlog` view current from the story events and
-/// `phase.declared`.
+/// Keeps the `backlog` view current from the story events,
+/// `phase.declared`, a story's `questions.opened` and `story.refined`.
 ///
 /// The stories are kept in declaration order, which is priority order
-/// until stories are reprioritized. Each is unrefined with no truths and no
-/// size until refinement and sizing record them. A later declaration of an
+/// until stories are reprioritized. Each records its latest question set
+/// (`set`), the set its latest `story.refined` names (`refined`) and that
+/// refinement's truth count, and holds none, none and 0 when declared, with
+/// no size until sizing records one. Its refinement state is never stored:
+/// the reader works it out from the latest set's round, so nothing stored
+/// can drift from it. A story's set makes that set its latest and a plan
+/// draft's set changes nothing; a refinement replaces the marker and the
+/// count, and a later set leaves both, since approved truths stay until new
+/// ones are approved. A set or a refinement of a story not held is refused,
+/// as a correction of one is. A later declaration of an
 /// id already held replaces that entry in place, so it keeps its priority.
 /// A correction, a move and a drop change a story in place; a dropped
 /// story stays with status `dropped` and no phase. A reprioritization puts
@@ -84,6 +94,8 @@ impl Projector for BacklogProjector {
             STORY_REASSIGNED,
             STORY_DROPPED,
             STORY_REPRIORITIZED,
+            QUESTIONS_OPENED,
+            STORY_REFINED,
         ]
     }
 
@@ -112,6 +124,10 @@ impl Projector for BacklogProjector {
             Some(phase) => Ok(json!(phase.as_u64().ok_or_else(fault)?)),
             None => Err(fault()),
         };
+        // A plan draft's set is not the backlog's.
+        if event.type_name == QUESTIONS_OPENED && text("subject")? != "story" {
+            return Ok(Vec::new());
+        }
         let mut stories = match documents.first() {
             Some((_, document)) => document
                 .get("stories")
@@ -128,7 +144,8 @@ impl Projector for BacklogProjector {
                     "sentence": text("sentence")?,
                     "status": text("status")?,
                     "phase": phase()?,
-                    "refinement": "unrefined",
+                    "set": null,
+                    "refined": null,
                     "truths": 0,
                     "size": null,
                 });
@@ -178,6 +195,22 @@ impl Projector for BacklogProjector {
                     .and_then(|ids| ids.iter().map(Value::as_u64).collect())
                     .ok_or_else(fault)?;
                 stories = reprioritized(stories, &order).ok_or_else(no_story)?;
+            }
+            QUESTIONS_OPENED => {
+                let set = text("set")?;
+                let story = story_mut(&mut stories, whole("story")?).ok_or_else(no_story)?;
+                story["set"] = json!(set);
+            }
+            STORY_REFINED => {
+                let set = text("set")?;
+                let count = payload
+                    .get("truths")
+                    .and_then(Value::as_array)
+                    .ok_or_else(fault)?
+                    .len();
+                let story = story_mut(&mut stories, whole("story")?).ok_or_else(no_story)?;
+                story["refined"] = json!(set);
+                story["truths"] = json!(count);
             }
             _ => return Err(refuse("not a backlog event")),
         }
@@ -322,11 +355,11 @@ mod tests {
             fold(&events),
             json!([
                 {"id": 3, "sentence": "Teammates see the backlog", "status": "deferred",
-                    "phase": null, "refinement": "unrefined", "truths": 0, "size": null},
+                    "phase": null, "set": null, "refined": null, "truths": 0, "size": null},
                 {"id": 1, "sentence": "Every step is recorded", "status": "active", "phase": 1,
-                    "refinement": "unrefined", "truths": 0, "size": null},
+                    "set": null, "refined": null, "truths": 0, "size": null},
                 {"id": 2, "sentence": "The owner approves scope", "status": "active",
-                    "phase": 2, "refinement": "unrefined", "truths": 0, "size": null}
+                    "phase": 2, "set": null, "refined": null, "truths": 0, "size": null}
             ])
         );
     }
@@ -422,10 +455,12 @@ mod tests {
                 "story.corrected",
                 "story.reassigned",
                 "story.dropped",
-                "story.reprioritized"
+                "story.reprioritized",
+                "questions.opened",
+                "story.refined"
             ]
         );
-        assert_eq!(backlog_spec().version, 2);
+        assert_eq!(backlog_spec().version, 3);
     }
 
     #[test]
@@ -472,7 +507,8 @@ mod tests {
         assert_eq!(third["status"], "active");
         assert_eq!(third["phase"], 1);
         for story in stories.as_array().unwrap() {
-            assert_eq!(story["refinement"], "unrefined", "{story}");
+            assert_eq!(story["set"], Value::Null, "{story}");
+            assert_eq!(story["refined"], Value::Null, "{story}");
             assert_eq!(story["truths"], 0, "{story}");
             assert_eq!(story["size"], Value::Null, "{story}");
         }
@@ -502,5 +538,89 @@ mod tests {
         ]);
         assert_eq!(entry(&stories, 4)["phase"], 3);
         assert_eq!(entry(&stories, 2)["phase"], Value::Null);
+    }
+    const S: &str = "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const S2: &str = "7f3e4d5c-6071-4c8d-8e9f-1a2b3c4d5e6f";
+    const O1: &str = "6e2d3c4b-5f60-4b7c-9d8e-0f1a2b3c4d5e";
+
+    /// Story `id`'s set `set`, opened with one question.
+    fn story_set(seq: u64, id: u32, set: &str) -> Event {
+        event(
+            seq,
+            "questions.opened",
+            json!({"set": set, "subject": "story", "story": id, "work_order": O1,
+                "questions": [{"id": "q1", "question": "Which store backs the ledger?",
+                    "recommended": "SQLite", "depends_on": []}],
+                "at": "2026-10-22T09:00:00Z"}),
+        )
+    }
+
+    /// A `story.refined` for story `id` naming set `set`, with `count`
+    /// truths.
+    fn refined(seq: u64, id: u32, set: &str, count: usize) -> Event {
+        let truths: Vec<Value> = (1..=count)
+            .map(|n| {
+                json!({"id": format!("t{n}"), "form": "when",
+                    "trigger": "the owner approves a draft by a stale digest",
+                    "observer": "the owner", "verb": "is refused",
+                    "outcome": "stale-draft naming the first differing part", "kind": "literal",
+                    "observable": true, "fixed_oracle": true, "version": 1})
+            })
+            .collect();
+        event(
+            seq,
+            "story.refined",
+            json!({"story": id, "set": set, "submission": "5c".repeat(32),
+                "owner": "Ada Owner", "at": "2026-10-22T09:00:00Z", "truths": truths}),
+        )
+    }
+
+    /// Story `id`'s latest set, refined marker and truth count.
+    fn refinement(stories: &Value, id: u64) -> (Value, Value, Value) {
+        let story = entry(stories, id);
+        assert!(story.get("refinement").is_none(), "{story}");
+        (
+            story["set"].clone(),
+            story["refined"].clone(),
+            story["truths"].clone(),
+        )
+    }
+
+    #[test]
+    fn a_backlog_storing_a_state_or_missing_the_latest_set_is_caught() {
+        assert_eq!(backlog_spec().version, 3);
+        let plan_set = event(
+            17,
+            "questions.opened",
+            json!({"set": S2, "subject": "plan", "phase": 1, "plan_digest": "5c".repeat(32),
+                "questions": [], "at": "2026-10-22T09:00:00Z"}),
+        );
+        let mut events = vec![story_set(14, 1, S), refined(15, 1, S, 2)];
+        let before_plan = after_s1(events.clone());
+        events.push(plan_set);
+        let stories = after_s1(events.clone());
+        assert_eq!(stories, before_plan, "a plan set changes nothing");
+        assert_eq!(refinement(&stories, 1), (json!(S), json!(S), json!(2)));
+        for id in [2, 3] {
+            assert_eq!(
+                refinement(&stories, id),
+                (Value::Null, Value::Null, json!(0))
+            );
+        }
+
+        events.push(story_set(18, 1, S2));
+        let asked_again = after_s1(events);
+        assert_eq!(refinement(&asked_again, 1), (json!(S2), json!(S), json!(2)));
+    }
+
+    #[test]
+    fn a_set_or_refinement_for_an_undeclared_story_accepted_is_caught() {
+        let held = after_s1(Vec::new());
+        let document = json!({KEY_FIELD: PROJECT_KEY, "stories": held});
+        for undeclared in [story_set(14, 9, S), refined(15, 9, S, 2)] {
+            let answer =
+                BacklogProjector::new().apply(&undeclared, &[(backlog_key(), document.clone())]);
+            assert!(answer.is_err(), "{}: {answer:?}", undeclared.type_name);
+        }
     }
 }

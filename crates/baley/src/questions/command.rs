@@ -640,7 +640,7 @@ mod tests {
         use crate::mcp::prepare::prepared_command;
         use crate::questions::answer::tests::{OWNER, defer, on_stream, own, r2, take};
         use crate::questions::read::HeldSet;
-        use crate::questions::record::tests::{open_set, story, transact};
+        use crate::questions::record::tests::{declare, open_set, story, transact};
         use crate::scope::fixtures::*;
 
         /// Session A, the one that opened the set: the fixtures' caller.
@@ -714,6 +714,7 @@ mod tests {
         #[test]
         fn a_set_lost_to_a_session_exit_or_answered_after_abandonment_is_caught() {
             let (dir, store) = store();
+            declare(&store, &project(), 1);
             assert_eq!(caller().baley_session(), SESSION_A);
             let set = open_set(&store, R1, &r2(), &story(1));
             drop(store);
@@ -777,6 +778,7 @@ mod tests {
         #[test]
         fn a_relayed_answer_recorded_as_the_owners_or_a_terminal_answer_as_baleys_is_caught() {
             let (_dir, store) = store();
+            declare(&store, &project(), 1);
             let set = open_set(&store, R1, &r2(), &story(1));
             let relayed = relayed(&store, &set, &json!([take("q1")]), R2, AT2);
             assert_eq!(relayed["status"], "ok", "{relayed}");

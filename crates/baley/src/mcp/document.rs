@@ -1421,7 +1421,7 @@ mod tests {
         use serde_json::{Value, json};
 
         use super::super::*;
-        use crate::questions::record::tests::{open_set, story};
+        use crate::questions::record::tests::{declare, open_set, story};
         use crate::scope::fixtures::*;
 
         const OWNER: &str = "Ada Lovelace";
@@ -1461,6 +1461,7 @@ mod tests {
         #[test]
         fn a_questions_read_without_its_round_or_the_relay_or_appending_is_caught() {
             let (_dir, store) = store();
+            declare(&store, &project(), 1);
             let set = open_set(&store, R1, &r2(), &story(1));
             append(
                 &store,
@@ -1529,6 +1530,7 @@ mod tests {
         #[test]
         fn an_unknown_set_answered_as_anything_but_no_such_question_set_is_caught() {
             let (_dir, store) = store();
+            declare(&store, &project(), 1);
             open_set(&store, R1, &r2(), &story(1));
             let unknown = "7f3e4d5c-6071-4c8d-8e9f-1a2b3c4d5e6f";
             let long = "s".repeat(300);
@@ -1544,6 +1546,7 @@ mod tests {
         #[test]
         fn a_long_round_not_cut_into_parts_is_caught() {
             let (_dir, store) = store();
+            declare(&store, &project(), 1);
             let text = "x".repeat(4096);
             let questions: Vec<Value> = (1..=10)
                 .map(|n| {
