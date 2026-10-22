@@ -239,16 +239,16 @@ pub(crate) fn reading(
 
 /// The checkout a command runs in: its project, repository root and
 /// working-tree `baley.toml`, with Baley's folders.
-struct Checkout {
+pub(crate) struct Checkout {
     folders: Folders,
-    project: ProjectId,
+    pub(crate) project: ProjectId,
     root: PathBuf,
     working: Option<SettingsFile>,
 }
 
 /// Finds the project from the working directory through its `baley.toml`.
 /// Outside a project the command is refused, naming `baley init`.
-fn checkout() -> Result<Checkout, Render> {
+pub(crate) fn checkout() -> Result<Checkout, Render> {
     let folders = Folders::resolve(Platform::current(), &Environment::read())
         .map_err(|e| Render::refusal(e.to_string()))?;
     let unavailable = |e: std::io::Error| {
@@ -282,7 +282,7 @@ fn checkout() -> Result<Checkout, Render> {
 }
 
 /// Opens the ledger and checks it lists the checkout's project.
-fn open(checkout: &Checkout) -> Result<SqliteStore, Render> {
+pub(crate) fn open(checkout: &Checkout) -> Result<SqliteStore, Render> {
     let store = crate::ledger::open::store(
         &checkout.folders.home,
         &SystemClock::now(),
@@ -359,7 +359,10 @@ fn submit_change(words: &ChangeWords) -> Result<Render, Render> {
 /// command that records scope runs them, so approvals and submissions cannot
 /// drift apart. It gives the policy built with no host, which names the
 /// owner, and the version the step returned.
-fn admitted(store: &SqliteStore, checkout: &Checkout) -> Result<(EffectivePolicy, u64), Render> {
+pub(crate) fn admitted(
+    store: &SqliteStore,
+    checkout: &Checkout,
+) -> Result<(EffectivePolicy, u64), Render> {
     let project = &checkout.project;
     let reads = policy_step::gather(
         &checkout.folders.config,
@@ -451,8 +454,9 @@ pub(crate) fn submit_command(
     )
 }
 
-/// The owner's command of `kind` over the draft `digest`.
-fn owner_command(
+/// The owner's command of `kind` over `digest`, a draft's or an answer
+/// call's.
+pub(crate) fn owner_command(
     kind: &str,
     project: &ProjectId,
     policy_version: u64,

@@ -449,4 +449,40 @@ mod questions_argument_tests {
             .expect("usage refusal");
         assert_eq!(error.exit_code(), 2);
     }
+
+    #[test]
+    fn a_questions_answer_command_lost_or_misread_is_caught() {
+        let Command::Questions(args) = Cli::try_parse_from([
+            "baley",
+            "questions",
+            "answer",
+            SET,
+            "--take",
+            "q1",
+            "--answer",
+            "q2",
+            "Use Postgres",
+            "--defer",
+            "q3",
+            "after the spike",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("questions command lost");
+        };
+        assert_eq!(
+            args.command,
+            QuestionsCommand::Answer {
+                set: SET.into(),
+                take: vec!["q1".into()],
+                answer: vec!["q2".into(), "Use Postgres".into()],
+                defer: vec!["q3".into(), "after the spike".into()],
+            }
+        );
+        let error = Cli::try_parse_from(["baley", "questions", "answer", SET, "--answer", "q2"])
+            .err()
+            .expect("usage refusal");
+        assert_eq!(error.exit_code(), 2);
+    }
 }
