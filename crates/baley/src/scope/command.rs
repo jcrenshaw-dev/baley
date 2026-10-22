@@ -11,8 +11,8 @@
 //! Gathering finds the project and opens the ledger; judging, the arguments,
 //! the commands an approval or a submission is recorded under and what is
 //! printed, is done by the pure functions below. Every text from the ledger
-//! is printed as `escape_debug` writes it, so a recorded line break cannot
-//! forge a line.
+//! is printed as `escape_debug` writes it, quotes left plain, so a recorded
+//! line break cannot forge a line.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -550,10 +550,17 @@ pub(crate) fn submission_render(answer: &Value) -> Render {
     ])
 }
 
-/// Text from the ledger as `escape_debug` writes it, so a recorded line
-/// break or terminal escape cannot forge or rewrite a line of output.
+/// Text from the ledger as `escape_debug` writes it, quotes left plain, so a
+/// recorded line break or terminal escape cannot forge or rewrite a line of
+/// output.
 fn escaped(text: &str) -> String {
-    text.escape_debug().to_string()
+    // The output is not a literal, so a quote needs no backslash. Every
+    // backslash `escape_debug` writes starts an escape, so `\'` and `\"`
+    // match only an escaped quote.
+    text.escape_debug()
+        .to_string()
+        .replace("\\'", "'")
+        .replace("\\\"", "\"")
 }
 
 /// A phase number or story id argument: a whole number above 0, since
@@ -1565,6 +1572,22 @@ mod tests {
             let first = &shown(&render)[0];
             assert_eq!(*first, expected);
             assert!(!first.chars().any(char::is_control), "{first:?}");
+        }
+    }
+
+    #[test]
+    fn a_recorded_quote_printed_with_a_backslash_or_a_recorded_backslash_printed_bare_is_caught() {
+        // A bare backslash would make a recorded `\n` read as an escaped
+        // line break.
+        for (sentence, expected) in [
+            (
+                "the file's \"name\"",
+                "story 1 (active): the file's \"name\"",
+            ),
+            ("one\\ntwo\\'", "story 1 (active): one\\\\ntwo\\\\'"),
+        ] {
+            let render = story_render(Ok(story(1, sentence, "active", Some(1))));
+            assert_eq!(shown(&render)[0], expected);
         }
     }
 

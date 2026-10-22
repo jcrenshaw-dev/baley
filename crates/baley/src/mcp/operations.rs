@@ -106,7 +106,7 @@ pub const QUERY_OPERATIONS: &[Operation] = &[
     retired("evidence-read", 5),
     retired("plan-read", 4),
     retired("context-intake", 4),
-    retired("route", 4),
+    with_project("route"),
     retired("config-entry", 2),
     retired("config-facts", 2),
     retired("config-interview", 2),
@@ -206,6 +206,9 @@ pub const APPLY_OPERATIONS: &[Operation] = &[
     with_project("story-reassign"),
     with_project("story-drop"),
     with_project("backlog-reorder"),
+    with_project("project-start"),
+    with_project("work-order-fail"),
+    with_project("work-order-retry"),
 ];
 
 /// A spelling served only from a project, which its call prepares.
@@ -360,6 +363,18 @@ enum RequestShape {
     StoryDrop(#[allow(dead_code)] crate::mcp::scope::StoryDropShape),
     #[serde(rename = "backlog-reorder")]
     BacklogReorder(#[allow(dead_code)] crate::mcp::scope::BacklogReorderShape),
+    // `project-start` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "project-start")]
+    ProjectStart(#[allow(dead_code)] crate::mcp::work_order::StartShape),
+    // `work-order-fail` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "work-order-fail")]
+    WorkOrderFail(#[allow(dead_code)] crate::mcp::work_order::FailShape),
+    // `work-order-retry` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "work-order-retry")]
+    WorkOrderRetry(#[allow(dead_code)] crate::mcp::work_order::RetryShape),
+    // `route` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "route")]
+    Route(#[allow(dead_code)] crate::mcp::work_order::RouteShape),
 }
 
 fn invalid_arguments(reason: impl Into<String>) -> Value {
@@ -635,6 +650,9 @@ pub(crate) mod expected {
         "story-reassign",
         "story-drop",
         "backlog-reorder",
+        "project-start",
+        "work-order-fail",
+        "work-order-retry",
     ];
 }
 
@@ -698,6 +716,10 @@ mod tests {
                     "story-reassign",
                     "story-drop",
                     "backlog-reorder",
+                    "project-start",
+                    "work-order-fail",
+                    "work-order-retry",
+                    "route",
                 ]
                 .contains(n)
             }) {
@@ -713,12 +735,15 @@ mod tests {
                 needs_project: true
             }
         );
-        assert_eq!(
-            lookup(Tool::Query, Some("document")),
-            Lookup::Available {
-                needs_project: true
-            }
-        );
+        for name in ["document", "route"] {
+            assert_eq!(
+                lookup(Tool::Query, Some(name)),
+                Lookup::Available {
+                    needs_project: true
+                },
+                "{name}"
+            );
+        }
         for name in [
             "scope-submit",
             "project-describe",
@@ -731,6 +756,9 @@ mod tests {
             "story-reassign",
             "story-drop",
             "backlog-reorder",
+            "project-start",
+            "work-order-fail",
+            "work-order-retry",
         ] {
             assert_eq!(
                 lookup(Tool::Apply, Some(name)),
@@ -753,7 +781,7 @@ mod tests {
         assert_eq!(build(Tool::Query, "plan-read"), 4);
         assert_eq!(build(Tool::Apply, "review-admit"), 4);
         assert_eq!(build(Tool::Apply, "risk-fire"), 4);
-        assert_eq!(build(Tool::Query, "route"), 4);
+        assert_eq!(build(Tool::Query, "context-intake"), 4);
         assert_eq!(build(Tool::Query, "detect-surfaces"), 4);
         assert_eq!(build(Tool::Apply, "execution-run"), 5);
         assert_eq!(build(Tool::Query, "verify-next"), 5);
@@ -910,7 +938,7 @@ mod tests {
             .filter(|name| *name != "operation")
             .collect();
         properties.sort_unstable();
-        assert_eq!(properties, ["request_id", "submission"]);
+        assert_eq!(properties, ["request_id", "submission", "work_order"]);
     }
 
     #[test]
@@ -978,18 +1006,19 @@ mod tests {
     #[test]
     fn the_document_schema_does_not_omit_or_widen_the_capture_identity() {
         // Design 0012: a capture by its string id, a draft by its string
-        // digest, the roadmap with no other field and a story by its integer
-        // id, each refusing any other field.
+        // digest, the roadmap with no other field, a story by its integer id
+        // and a work order by its string id, each refusing any other field.
         let schema = served_schema("document").unwrap();
         let identities = schema["properties"]["identity"]["oneOf"]
             .as_array()
             .unwrap();
-        assert_eq!(identities.len(), 4, "{identities:?}");
+        assert_eq!(identities.len(), 5, "{identities:?}");
         for (identity, kind, field) in [
             (&identities[0], "capture", Some(("id", "string"))),
             (&identities[1], "draft", Some(("digest", "string"))),
             (&identities[2], "roadmap", None),
             (&identities[3], "story", Some(("id", "integer"))),
+            (&identities[4], "work_order", Some(("id", "string"))),
         ] {
             assert_eq!(identity["type"], "object", "{identity}");
             assert_eq!(identity["properties"]["kind"]["const"], kind, "{identity}");
@@ -1219,5 +1248,80 @@ mod tests {
         let answer = schema_answer(&json!({"operation": "schema", "tool": "other", "for": "help"}));
         assert_eq!(answer["code"], "unknown-tool");
         assert_eq!(answer["slot"], "tool");
+    }
+
+    #[test]
+    fn a_project_start_spelling_left_unserved_or_out_of_the_baseline_order_is_caught() {
+        assert_eq!(
+            lookup(Tool::Apply, Some("project-start")),
+            Lookup::Available {
+                needs_project: true
+            }
+        );
+        let names: Vec<&str> = APPLY_OPERATIONS.iter().map(|op| op.name).collect();
+        let at = names.iter().position(|name| *name == "work-order-fail");
+        assert_eq!(
+            at.and_then(|at| at.checked_sub(1))
+                .map(|before| names[before]),
+            Some("project-start")
+        );
+        let served =
+            schema_answer(&json!({"operation": "schema", "tool": "apply", "for": "project-start"}));
+        assert_eq!(served["status"], "ok", "{served}");
+        let required = served["schema"]["required"].as_array().unwrap();
+        for name in ["request_id", "brief"] {
+            assert!(required.contains(&json!(name)), "{name} in {served}");
+        }
+        assert!(!required.contains(&json!("instruction")), "{served}");
+    }
+
+    #[test]
+    fn the_work_order_operations_out_of_the_baseline_order_or_unserved_are_caught() {
+        let names: Vec<&str> = APPLY_OPERATIONS.iter().map(|op| op.name).collect();
+        let served = ["project-start", "work-order-fail", "work-order-retry"];
+        assert_eq!(names[names.len().saturating_sub(3)..], served);
+        for name in served {
+            assert_eq!(
+                lookup(Tool::Apply, Some(name)),
+                Lookup::Available {
+                    needs_project: true
+                },
+                "{name}"
+            );
+        }
+        for (name, required) in [
+            (
+                "work-order-fail",
+                &["request_id", "work_order", "reason"][..],
+            ),
+            ("work-order-retry", &["request_id", "work_order"][..]),
+        ] {
+            let answer =
+                schema_answer(&json!({"operation": "schema", "tool": "apply", "for": name}));
+            assert_eq!(answer["status"], "ok", "{answer}");
+            let listed = answer["schema"]["required"].as_array().unwrap();
+            for field in required {
+                assert!(listed.contains(&json!(field)), "{field} in {answer}");
+            }
+            assert!(!listed.contains(&json!("instruction")), "{answer}");
+        }
+    }
+
+    #[test]
+    fn a_route_query_left_retired_or_moved_in_the_baseline_is_caught() {
+        assert_eq!(
+            lookup(Tool::Query, Some("route")),
+            Lookup::Available {
+                needs_project: true
+            }
+        );
+        let names: Vec<&str> = QUERY_OPERATIONS.iter().map(|op| op.name).collect();
+        let at = names.iter().position(|name| *name == "route").unwrap();
+        assert_eq!(names[at - 1], "context-intake");
+        assert_eq!(names[at + 1], "config-entry");
+        assert_eq!(
+            expected::QUERY.iter().position(|name| *name == "route"),
+            Some(at)
+        );
     }
 }

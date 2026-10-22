@@ -374,10 +374,14 @@ mod tests {
     }
 
     fn stubs(capture: Placement, help: Placement) -> Vec<(Entry, Placement)> {
-        let entries = manifest(&front_doors()).unwrap();
-        assert_eq!(entries[0].identity, "bal-capture");
-        assert_eq!(entries[1].identity, "bal-help");
-        entries.into_iter().zip([capture, help]).collect()
+        let entry = |identity: &str| {
+            manifest(&front_doors())
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.identity == identity)
+                .unwrap()
+        };
+        vec![(entry("bal-capture"), capture), (entry("bal-help"), help)]
     }
 
     fn build(
@@ -722,6 +726,33 @@ mod tests {
                 Answer::Deny(reason) => assert!(reason.contains(VERSIONS), "{target}: {reason}"),
                 other => panic!("{target} was not denied: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn an_agent_folder_protected_whole_or_an_agent_file_left_open_is_caught() {
+        let env = crate::folders::Environment {
+            home: Some("/home/o".into()),
+            ..crate::folders::Environment::default()
+        };
+        let installed = crate::host_artifacts::installed::resolve(
+            &env,
+            None,
+            &crate::host_artifacts::installed::skill_and_agent(),
+        )
+        .unwrap();
+        let protected = installed.placements.protected_paths();
+        assert!(
+            protected
+                .iter()
+                .any(|path| path.as_os_str() == "/home/o/.claude/agents/bal-planner-high.md"),
+            "{protected:?}"
+        );
+        for folder in ["/home/o/.claude/agents", "/home/o/.claude/agents/"] {
+            assert!(
+                !protected.iter().any(|path| path == Path::new(folder)),
+                "{folder} is protected whole"
+            );
         }
     }
 }

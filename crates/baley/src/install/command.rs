@@ -115,14 +115,18 @@ fn acquire(home: &Path) -> Result<InstallLock, Render> {
     Ok(InstallLock { _file: file })
 }
 
+/// The stubs install places and records.
+pub(crate) fn manifest() -> Vec<stubs::Entry> {
+    stubs::installed_manifest()
+}
+
 fn install(args: InstallArgs) -> Result<Render, Render> {
     let Host::ClaudeCode = select_host(&args.host)?;
     let env = Environment::read();
     let claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
     let folders = Folders::resolve(Platform::current(), &env)
         .map_err(|error| Render::refusal(error.to_string()))?;
-    let manifest = stubs::manifest(&stubs::front_doors()).expect("unique compiled front doors");
-    let installed = installed::resolve(&env, claude_config_dir, &manifest)
+    let installed = installed::resolve(&env, claude_config_dir, &manifest())
         .map_err(|error| Render::refusal(error.to_string()))?;
     // Held to the end of the run, record included.
     let _lock = acquire(&folders.home)?;

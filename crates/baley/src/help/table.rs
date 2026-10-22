@@ -21,6 +21,31 @@ pub const CLUSTERS: &[&str] = &[
 
 pub const COMMANDS: &[Command] = &[
     Command {
+        name: "bal-project",
+        cluster: "Build spine",
+        description: "Start a project from a brief by issuing the start planner's work order, or revise the project description, as drafts the owner approves at the terminal.",
+    },
+    Command {
+        name: "bal-scope",
+        cluster: "Build spine",
+        description: "Read a scope draft by its digest and show the owner how to approve it at the terminal.",
+    },
+    Command {
+        name: "bal-phase",
+        cluster: "Build spine",
+        description: "Declare, edit, reorder or withdraw a phase as a draft the owner approves at the terminal.",
+    },
+    Command {
+        name: "bal-story",
+        cluster: "Build spine",
+        description: "Declare, edit, reassign or drop a story as a draft the owner approves at the terminal.",
+    },
+    Command {
+        name: "bal-backlog",
+        cluster: "Build spine",
+        description: "Reorder the backlog as a draft the owner approves at the terminal.",
+    },
+    Command {
         name: "bal-context",
         cluster: "Build spine",
         description: "Discuss a phase's scope, decisions and truths with its owner, then publish only the exact approved set through Baley",
@@ -184,7 +209,7 @@ pub fn render_description(name: &str, markdown: &str) -> Option<String> {
 const ABOUT: &str = "Baley keeps AI coding agents accountable to the person who answers for their work. It records what the agents did, and the proof that it works, in a hash-chained ledger the owner controls, and it refuses to let work move on an unproven claim. Claude Code is the host it serves.";
 
 /// The request a session follows so the ledger can say which instruction guided a write.
-const REQUEST: &str = "Send `bal-help` as `instruction` on every `baley_apply` call you make while following help, and on no `baley_query` call.";
+const REQUEST: &str = "Send `bal-help` as `instruction` on the `baley_apply` operations `capture`, `project-start`, `work-order-fail` and `work-order-retry` called while following help, on no other `baley_apply` operation, and on no `baley_query` call.";
 
 /// The help instruction's identity, version and hash, as the registry serves them.
 fn help_instruction() -> Value {
@@ -254,6 +279,11 @@ mod tests {
     /// Every help row's availability and owning build, written out from the
     /// design rather than read from the registry under test.
     const EXPECTED: &[(&str, bool, u64)] = &[
+        ("bal-project", true, 4),
+        ("bal-scope", true, 4),
+        ("bal-phase", true, 4),
+        ("bal-story", true, 4),
+        ("bal-backlog", true, 4),
         ("bal-help", true, 3),
         ("bal-capture", true, 3),
         ("bal-context", false, 4),
@@ -301,7 +331,7 @@ mod tests {
             .map(|(name, available, build)| ((*name).to_owned(), *available, *build))
             .collect();
         expected.sort();
-        assert_eq!(expected.len(), 21);
+        assert_eq!(expected.len(), 26);
         assert_eq!(shown, expected);
     }
 
@@ -342,6 +372,44 @@ mod tests {
                 "on no `baley_query` call",
             ] {
                 assert!(request.contains(needle), "the request lost {needle}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_help_text_asking_for_instruction_on_an_operation_whose_shape_refuses_it_is_caught() {
+        use crate::mcp::operations::{APPLY_OPERATIONS, Status, served_schema};
+        // Split by the served request shapes, not by a list of names, so a
+        // shape that gains or loses the field moves the expectation with it.
+        let (mut taking, mut refusing) = (Vec::new(), Vec::new());
+        for operation in APPLY_OPERATIONS {
+            if !matches!(operation.status, Status::Available { .. }) {
+                continue;
+            }
+            let schema = served_schema(operation.name).expect("a served operation has a shape");
+            if schema["properties"].get("instruction").is_some() {
+                taking.push(operation.name);
+            } else {
+                refusing.push(operation.name);
+            }
+        }
+        assert!(!taking.is_empty() && !refusing.is_empty());
+        for (which, text) in [
+            ("the help text", front_door::TEXT),
+            ("the request", REQUEST),
+        ] {
+            assert!(
+                !text.contains("every `baley_apply`"),
+                "{which} asks for instruction on every baley_apply call"
+            );
+            for name in &taking {
+                assert!(text.contains(&format!("`{name}`")), "{which} omits {name}");
+            }
+            for name in &refusing {
+                assert!(
+                    !text.contains(&format!("`{name}`")),
+                    "{which} asks for instruction on {name}, whose shape refuses it"
+                );
             }
         }
     }

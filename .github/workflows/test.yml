@@ -103,6 +103,17 @@ jobs:
             exit 1
           fi
 
+      # baley-store is the storage port: it reaches neither the engine nor
+      # the domain (design 0001, EVD-R12). Read the same way as above.
+      - name: baley-store cannot reach rusqlite or baley-core
+        run: |
+          set -euo pipefail
+          TREE="$(cargo tree -p baley-store -e normal --target all --all-features --prefix none --locked)"
+          if grep -E '^(rusqlite|libsqlite3-sys|baley-core) ' <<<"$TREE"; then
+            echo "::error::baley-store depends on the SQLite engine or baley-core"
+            exit 1
+          fi
+
   cargo-deny:
     # Advisories, licenses and sources for everything in Cargo.lock. Pinned
     # prebuilt release, same reason as nextest: the job does not build its tool.

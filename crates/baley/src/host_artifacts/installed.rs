@@ -11,12 +11,12 @@ use crate::update::installation::{HomeRefusal, Layout};
 
 use super::executable::{Executable, PathFault, judge};
 use super::placement::{Placement, PlacementMap, PlacementRefusal};
-use super::stubs::Entry;
+use super::stubs::{Entry, Kind};
 
 /// The host files and installation paths, whether or not install has run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
-    /// Claude Code's configuration folder, holding settings and skills.
+    /// Claude Code's configuration folder, holding settings, skills and agents.
     pub claude_folder: PathBuf,
     /// The one document holding the hook and security settings.
     pub settings_file: PathBuf,
@@ -79,7 +79,7 @@ pub fn resolve(
     let stubs = manifest
         .iter()
         .map(|entry| {
-            let path = stub_path(&claude_folder, &entry.identity);
+            let path = stub_path(&claude_folder, entry.kind, &entry.identity);
             (entry.clone(), Placement::At(path))
         })
         .collect();
@@ -103,10 +103,36 @@ pub fn resolve(
     })
 }
 
-/// Where a stub with `identity` goes under Claude Code's configuration
-/// folder.
-pub fn stub_path(claude_folder: &Path, identity: &str) -> PathBuf {
-    claude_folder.join("skills").join(identity).join("SKILL.md")
+/// Where a stub of `kind` named `identity` goes under Claude Code's
+/// configuration folder: a skill in its own folder, an agent as one file in
+/// `agents/` (D-07).
+pub fn stub_path(claude_folder: &Path, kind: Kind, identity: &str) -> PathBuf {
+    match kind {
+        Kind::Skill => claude_folder.join("skills").join(identity).join("SKILL.md"),
+        Kind::Agent => claude_folder.join("agents").join(format!("{identity}.md")),
+    }
+}
+
+/// The shipped `bal-help` skill stub and a `bal-planner-high` agent stub
+/// whose bytes stand in for the rendered agent's.
+#[cfg(test)]
+pub(crate) fn skill_and_agent() -> Vec<Entry> {
+    use super::stubs::{front_doors, manifest};
+
+    let help = manifest(&front_doors())
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.identity == "bal-help")
+        .unwrap();
+    let bytes = b"an agent".to_vec();
+    let agent = Entry {
+        host: baley_core::policy::Host::ClaudeCode,
+        kind: Kind::Agent,
+        identity: "bal-planner-high".into(),
+        digest: crate::store::model::digest(&bytes),
+        bytes,
+    };
+    vec![help, agent]
 }
 
 #[cfg(test)]
@@ -152,6 +178,26 @@ mod tests {
             assert_eq!(
                 files,
                 [
+                    (
+                        Artifact::Stub("bal-project".into()),
+                        PathBuf::from(format!("{folder}/skills/bal-project/SKILL.md")),
+                    ),
+                    (
+                        Artifact::Stub("bal-scope".into()),
+                        PathBuf::from(format!("{folder}/skills/bal-scope/SKILL.md")),
+                    ),
+                    (
+                        Artifact::Stub("bal-phase".into()),
+                        PathBuf::from(format!("{folder}/skills/bal-phase/SKILL.md")),
+                    ),
+                    (
+                        Artifact::Stub("bal-story".into()),
+                        PathBuf::from(format!("{folder}/skills/bal-story/SKILL.md")),
+                    ),
+                    (
+                        Artifact::Stub("bal-backlog".into()),
+                        PathBuf::from(format!("{folder}/skills/bal-backlog/SKILL.md")),
+                    ),
                     (
                         Artifact::Stub("bal-capture".into()),
                         PathBuf::from(format!("{folder}/skills/bal-capture/SKILL.md")),
@@ -242,6 +288,11 @@ mod tests {
             assert_eq!(
                 stubs,
                 [
+                    "/home/o/.claude/skills/bal-project/SKILL.md",
+                    "/home/o/.claude/skills/bal-scope/SKILL.md",
+                    "/home/o/.claude/skills/bal-phase/SKILL.md",
+                    "/home/o/.claude/skills/bal-story/SKILL.md",
+                    "/home/o/.claude/skills/bal-backlog/SKILL.md",
                     "/home/o/.claude/skills/bal-capture/SKILL.md",
                     "/home/o/.claude/skills/bal-help/SKILL.md",
                 ]
@@ -319,6 +370,11 @@ mod tests {
         assert_eq!(
             map.protected_paths(),
             [
+                PathBuf::from("/home/o/.claude/skills/bal-project/SKILL.md"),
+                PathBuf::from("/home/o/.claude/skills/bal-scope/SKILL.md"),
+                PathBuf::from("/home/o/.claude/skills/bal-phase/SKILL.md"),
+                PathBuf::from("/home/o/.claude/skills/bal-story/SKILL.md"),
+                PathBuf::from("/home/o/.claude/skills/bal-backlog/SKILL.md"),
                 PathBuf::from("/home/o/.claude/skills/bal-capture/SKILL.md"),
                 PathBuf::from("/home/o/.claude/skills/bal-help/SKILL.md"),
                 PathBuf::from("/home/o/.claude.json"),
@@ -338,5 +394,54 @@ mod tests {
                 PathBuf::from("/home/o/.local/bin/baley"),
             ]
         );
+    }
+
+    #[test]
+    fn an_agent_stub_placed_as_a_skill_or_a_skill_as_an_agent_is_caught() {
+        let env = Environment {
+            home: Some("/home/o".into()),
+            ..Environment::default()
+        };
+        for (override_folder, expected) in [
+            (
+                None,
+                [
+                    "/home/o/.claude/skills/bal-help/SKILL.md",
+                    "/home/o/.claude/agents/bal-planner-high.md",
+                ],
+            ),
+            (
+                Some("/srv/claude/"),
+                [
+                    "/srv/claude/skills/bal-help/SKILL.md",
+                    "/srv/claude/agents/bal-planner-high.md",
+                ],
+            ),
+        ] {
+            let installed = resolve(
+                &env,
+                override_folder.map(OsString::from),
+                &super::skill_and_agent(),
+            )
+            .unwrap();
+            let files: Vec<_> = installed
+                .placements
+                .expected_files()
+                .into_iter()
+                .filter(|file| file.stub.is_some())
+                .map(|file| (file.artifact, file.path.as_os_str().to_owned()))
+                .collect();
+            assert_eq!(
+                files,
+                [
+                    (Artifact::Stub("bal-help".into()), expected[0].into()),
+                    (
+                        Artifact::Stub("bal-planner-high".into()),
+                        expected[1].into()
+                    ),
+                ],
+                "{override_folder:?}"
+            );
+        }
     }
 }

@@ -74,7 +74,7 @@ graph LR
     1-. "<div>Uses the command line</div><div style='font-size: 70%'></div>" .->2
     14-. "<div>Work orders, results,<br />questions</div><div style='font-size: 70%'>[MCP over stdio]</div>" .->2
     14-. "<div>Asks before each tool call<br />runs</div><div style='font-size: 70%'>[Pre-tool hook, one process per tool call]</div>" .->2
-    2-. "<div>Writes the wiring with baley<br />install: MCP registration,<br />pre-tool hook, sandbox and<br />deny settings, skill stubs.<br />Adds the chosen providers'<br />API hosts to the sandbox<br />allow list with baley config<br />interview</div><div style='font-size: 70%'>[claude mcp add-json, files under the Claude folder]</div>" .->14
+    2-. "<div>Writes the wiring with baley<br />install: MCP registration,<br />pre-tool hook, sandbox and<br />deny settings, skill and<br />agent stubs. Adds the chosen<br />providers' API hosts to the<br />sandbox allow list with baley<br />config interview</div><div style='font-size: 70%'>[claude mcp add-json, files under the Claude folder]</div>" .->14
     14-. "<div>Workers edit source and<br />commit</div><div style='font-size: 70%'></div>" .->15
     14-. "<div>Review and model-list API<br />calls with the owner's<br />environment keys</div><div style='font-size: 70%'></div>" .->18
     2-. "<div>Reads git facts, runs tests<br />and git</div><div style='font-size: 70%'></div>" .->15
@@ -85,7 +85,7 @@ graph LR
 ```
 <!-- /c4:context -->
 
-*Figure 1. System context. The host reaches Baley two ways: over MCP from its session, and through its pre-tool hook before each tool call runs. `baley install` writes the host's wiring: the MCP registration through `claude`, the pre-tool hook, the sandbox and deny settings in the user settings file and the skill stubs. `baley config interview` adds the chosen providers' API hosts to the same settings file. The session sends review and model-list requests to providers. The foreground `baley update` command and the detached opt-in updater are built and contact the release source. `baley serve` starts the detached check only when `updates.auto` is on, without waiting for it. T14 and T17 use unsigned development artifacts only, and #14 supplies release verification.*
+*Figure 1. System context. The host reaches Baley two ways: over MCP from its session, and through its pre-tool hook before each tool call runs. `baley install` writes the host's wiring: the MCP registration through `claude`, the pre-tool hook, the sandbox and deny settings in the user settings file and the skill and agent stubs. `baley config interview` adds the chosen providers' API hosts to the same settings file. The session sends review and model-list requests to providers. The foreground `baley update` command and the detached opt-in updater are built and contact the release source. `baley serve` starts the detached check only when `updates.auto` is on, without waiting for it. T14 and T17 use unsigned development artifacts only, and #14 supplies release verification.*
 
 | Actor | What it is | Its part |
 |---|---|---|
@@ -190,7 +190,7 @@ graph LR
     1-. "<div>Uses the command line</div><div style='font-size: 70%'></div>" .->3
     14-. "<div>Work orders, results,<br />questions</div><div style='font-size: 70%'>[MCP over stdio]</div>" .->3
     14-. "<div>Asks before each tool call<br />runs</div><div style='font-size: 70%'>[Pre-tool hook, one process per tool call]</div>" .->3
-    3-. "<div>Writes the wiring with baley<br />install: MCP registration,<br />pre-tool hook, sandbox and<br />deny settings, skill stubs.<br />Adds the chosen providers'<br />API hosts to the sandbox<br />allow list with baley config<br />interview</div><div style='font-size: 70%'>[claude mcp add-json, files under the Claude folder]</div>" .->14
+    3-. "<div>Writes the wiring with baley<br />install: MCP registration,<br />pre-tool hook, sandbox and<br />deny settings, skill and<br />agent stubs. Adds the chosen<br />providers' API hosts to the<br />sandbox allow list with baley<br />config interview</div><div style='font-size: 70%'>[claude mcp add-json, files under the Claude folder]</div>" .->14
     14-. "<div>Workers edit source and<br />commit</div><div style='font-size: 70%'></div>" .->15
     14-. "<div>Review and model-list API<br />calls with the owner's<br />environment keys</div><div style='font-size: 70%'></div>" .->18
     3-. "<div>Reads, and writes a file<br />whole for config set and for<br />the interview's reviewer list</div><div style='font-size: 70%'></div>" .->13
@@ -206,7 +206,7 @@ graph LR
 ```
 <!-- /c4:containers -->
 
-*Figure 3. Containers: the Baley server, one process per session over MCP and one per tool call through the pre-tool hook, with the ledger and the settings files, plus the detached updater. The binary writes Baley's global settings file whole for `config set` and for the interview's reviewer list. The updater opens the same per-user store through the store port to claim and record at most one check per UTC day per installation. Provider calls and credentials stay with the host session. Manual `baley update` waits for its downloads and receipt in the foreground; only checks started by `baley serve` when `updates.auto` is on run in the detached updater. Both update paths are built and use the binary's HTTP client. T14 and T17 use unsigned development artifacts only; #14 supplies signed checksum manifests and release verification. The guard hook records its answers in the per-user ledger ([0010](0010-guard.md)). `baley install` writes the host's wiring: the MCP registration through `claude`, the pre-tool hook, the sandbox and deny settings in the user settings file and the skill stubs. `baley config interview` adds the chosen providers' API hosts to the same settings file.*
+*Figure 3. Containers: the Baley server, one process per session over MCP and one per tool call through the pre-tool hook, with the ledger and the settings files, plus the detached updater. The binary writes Baley's global settings file whole for `config set` and for the interview's reviewer list. The updater opens the same per-user store through the store port to claim and record at most one check per UTC day per installation. Provider calls and credentials stay with the host session. Manual `baley update` waits for its downloads and receipt in the foreground; only checks started by `baley serve` when `updates.auto` is on run in the detached updater. Both update paths are built and use the binary's HTTP client. T14 and T17 use unsigned development artifacts only; #14 supplies signed checksum manifests and release verification. The guard hook records its answers in the per-user ledger ([0010](0010-guard.md)). `baley install` writes the host's wiring: the MCP registration through `claude`, the pre-tool hook, the sandbox and deny settings in the user settings file and the skill and agent stubs. `baley config interview` adds the chosen providers' API hosts to the same settings file.*
 
 <!-- c4:components -->
 ```mermaid
@@ -242,7 +242,7 @@ graph LR
         style 5 fill:#85bbf0,stroke:#5d82a8,color:#000000
         6["<div style='font-weight: bold'>Domain areas</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>The rules of each process<br />area: planning, execution,<br />verification, review, risk,<br />landing and the rest.</div>"]
         style 6 fill:#85bbf0,stroke:#5d82a8,color:#000000
-        7["<div style='font-weight: bold'>Work order composer</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>Builds every dispatch: role,<br />model and effort from policy,<br />instructions from the binary,<br />inputs from the record.</div>"]
+        7["<div style='font-weight: bold'>Work order composer</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>Builds every work order: the<br />route from policy and the<br />model catalog, instructions<br />by identity from the binary,<br />inputs as references into the<br />record. In this build it<br />issues the start planner's<br />order and its retries.</div>"]
         style 7 fill:#85bbf0,stroke:#5d82a8,color:#000000
         8["<div style='font-weight: bold'>Policy</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>Reads the global and project<br />settings, resolves the values<br />in effect and records which<br />applied.</div>"]
         style 8 fill:#85bbf0,stroke:#5d82a8,color:#000000
@@ -262,12 +262,13 @@ graph LR
     1-. "<div>Uses the command line</div><div style='font-size: 70%'></div>" .->4
     14-. "<div>Work orders, results,<br />questions</div><div style='font-size: 70%'>[MCP over stdio]</div>" .->4
     14-. "<div>Asks before each tool call<br />runs</div><div style='font-size: 70%'>[Pre-tool hook, one process per tool call]</div>" .->4
-    4-. "<div>Writes the wiring with baley<br />install: MCP registration,<br />pre-tool hook, sandbox and<br />deny settings, skill stubs.<br />Adds the chosen providers'<br />API hosts to the sandbox<br />allow list with baley config<br />interview</div><div style='font-size: 70%'>[claude mcp add-json, files under the Claude folder]</div>" .->14
+    4-. "<div>Writes the wiring with baley<br />install: MCP registration,<br />pre-tool hook, sandbox and<br />deny settings, skill and<br />agent stubs. Adds the chosen<br />providers' API hosts to the<br />sandbox allow list with baley<br />config interview</div><div style='font-size: 70%'>[claude mcp add-json, files under the Claude folder]</div>" .->14
     14-. "<div>Workers edit source and<br />commit</div><div style='font-size: 70%'></div>" .->15
     4-. "<div>Asks what may happen next</div><div style='font-size: 70%'></div>" .->5
     5-. "<div>Applies the area's rules</div><div style='font-size: 70%'></div>" .->6
     6-. "<div>Requests work orders</div><div style='font-size: 70%'></div>" .->7
     7-. "<div>Resolves role, model and<br />effort</div><div style='font-size: 70%'></div>" .->8
+    7-. "<div>Reads the host's accepted<br />model names</div><div style='font-size: 70%'></div>" .->9
     8-. "<div>Reads</div><div style='font-size: 70%'></div>" .->13
     4-. "<div>Writes a settings file whole,<br />for config set and for the<br />interview's reviewer list</div><div style='font-size: 70%'></div>" .->13
     8-. "<div>Checks model names</div><div style='font-size: 70%'></div>" .->9
@@ -295,23 +296,25 @@ graph LR
 | Host interface | The MCP server (stdio), the command line and the guard hook: the only ways in |
 | Hardin | Derives the state of the work from the ledger's views, answers what may happen next, refuses the rest |
 | Domain areas | The rules of each process area, one design document each |
-| Work order composer | Builds every dispatch: role, model and effort from policy, instructions from the binary, inputs from the ledger |
+| Work order composer | Builds every work order: the route from policy and the model catalog, instructions by identity from the binary, inputs as references into the record. In this build it issues the start planner's order and its retries |
 | Policy | Reads the global and project settings, resolves the values in effect, records which applied ([0003](0003-configuration-and-routing.md)) |
 | Model catalog | The model names each host and provider offers, seeded from the binary, changed by the owner and refreshed from imported lists ([0003](0003-configuration-and-routing.md)) |
 | Ports and adapters | The store, git and the test runner, the forge, the host adapters |
 
 ## 8. Work orders
 
-The one contract between Baley and every worker, including the outside reviews the host session makes.
+The one contract between Baley and every worker, including the outside reviews the host session makes. An order is recorded as `work_order.issued` and read back through the `work_order` view ([0001](0001-evidence-ledger.md)). This build issues one kind, the start planner's order, and its retries ([0004](0004-starting-a-project-and-changing-scope.md) section 5); the other roles' orders are issued by the builds that add them, in the same shape.
 
 | Part | Content | Source |
 |---|---|---|
-| Identity | Work order id, project, phase, plan, attempt | Ledger |
-| Role | Planner, analyzer, plan checker, executor, verifier or reviewer | The area that issues it |
-| Model and effort | Resolved from the settings, with the setting that decided it | Policy |
-| Instructions | The role's compiled instructions, by id | Binary (SYS-P9) |
-| Inputs | The records the role needs: truths, plan, checks, review material | Ledger |
-| Expected result | The typed result the worker must return | The issuing area |
+| Identity | The order's id; the logical request, the id of its chain's first order; the failed order it retries, or none; the attempt, from 1 | Ledger |
+| Role and subject | Planner, analyzer, checker, executor, verifier or reviewer, and what the order is about, `start` for the start planner | The area that issues it |
+| Route | The route record: the requested rung and the rung the order sends after any escalation, the route's `rung`, the model passed or none, the setting and file that decided each, the level Claude Code's dated effort table supports for that model, and the effective model and effort, recorded `unknown` with the reasons, since no run is observed ([0003](0003-configuration-and-routing.md) section 6); and the agent stub that rung names for the role, `bal-<role>-<rung>` | Policy and the model catalog |
+| Instructions | The compiled instructions, each by identity, version and hash, such as `bal-start-planner` and, when the checkout holds code, `bal-start-survey` | Binary (SYS-P9) |
+| Inputs | The records the role needs, each a `record` payload reference, such as the start's brief | Ledger |
+| Expected result | The typed result the worker must return. For the start planner it is a `scope-submit` naming the order in `work_order` | The issuing area |
+
+An order is delivered as its id. The issuing call answers with the id, the agent stub to launch, the model to pass as the Agent tool's `model` parameter or none, so the stub's `model: inherit` applies, the one-line prompt `Read Baley work order <id> and follow it.`, and a launch sentence saying to start that stub with the Agent tool and that prompt. The session starts the subagent with that prompt, and the worker reads its order whole by id through `document`, kind `work_order`, in parts of at most 24,576 bytes ([0012](0012-host-interface.md) section 5, `crates/baley/src/work_order/issue.rs:94-112, 170-182`).
 
 ## 9. Requirements
 
@@ -334,7 +337,7 @@ The one contract between Baley and every worker, including the outside reviews t
 
 ## 10. Cross-cutting concerns
 
-- **Trust.** The development install script `install.sh`, foreground `baley update` and detached updater fetch a plain executable and an unsigned two-line manifest naming its version and SHA-256. Both delivery paths check the binary's SHA-256 in `verify_download` before staging. Automatic checks are off by default: `baley serve` reads `updates.auto` once at startup and starts the detached check only when it is on, without waiting for it. These requests send no project content or provider credentials. The foreground command and detached updater open the per-user store to claim and record checks. The release design #14 owns signed checksum manifests, the signature format, trust root and both signature verifiers. T14 and T17 use unsigned development artifacts only, and no release exists before #14 supplies and qualifies verification. The script ends by running `baley install` through the stable path. `baley install` writes Claude Code's wiring: the MCP registration through `claude mcp add-json`, the pre-tool hook, the sandbox and deny settings in the user settings file, and the skill stubs. It replaces an artifact only on evidence that Baley wrote it, from its install record in the per-user ledger, and it reports a gap as a partial install ([0012](0012-host-interface.md) section 5). The sandbox settings reach the Claude Code sessions that read that settings file, including projects Baley does not manage. Baley never reads API keys. Keys in the session's environment are visible to every program Claude Code starts, agents and subagents included. Nothing scrubs a key a command prints. Code sent for review goes to the chosen provider under its terms. Agents run as the owner's user. The design guards against accidental exposure, not a determined agent. The ledger is protected by the host sandbox, and tampering is detected through the hash chain and forge anchors.
+- **Trust.** The development install script `install.sh`, foreground `baley update` and detached updater fetch a plain executable and an unsigned two-line manifest naming its version and SHA-256. Both delivery paths check the binary's SHA-256 in `verify_download` before staging. Automatic checks are off by default: `baley serve` reads `updates.auto` once at startup and starts the detached check only when it is on, without waiting for it. These requests send no project content or provider credentials. The foreground command and detached updater open the per-user store to claim and record checks. The release design #14 owns signed checksum manifests, the signature format, trust root and both signature verifiers. T14 and T17 use unsigned development artifacts only, and no release exists before #14 supplies and qualifies verification. The script ends by running `baley install` through the stable path. `baley install` writes Claude Code's wiring: the MCP registration through `claude mcp add-json`, the pre-tool hook, the sandbox and deny settings in the user settings file, and the skill and agent stubs. It replaces an artifact only on evidence that Baley wrote it, from its install record in the per-user ledger, and it reports a gap as a partial install ([0012](0012-host-interface.md) section 5). The sandbox settings reach the Claude Code sessions that read that settings file, including projects Baley does not manage. Baley never reads API keys. Keys in the session's environment are visible to every program Claude Code starts, agents and subagents included. Nothing scrubs a key a command prints. Code sent for review goes to the chosen provider under its terms. Agents run as the owner's user. The design guards against accidental exposure, not a determined agent. The ledger is protected by the host sandbox, and tampering is detected through the hash chain and forge anchors.
 - **Failure and recovery.** Claim, act, record (SYS-P7). A killed process is never taken as success. The log is good enough to diagnose a live failure.
 - **Resources.** Memory use and read cost are defects a user sees: no loading the whole store, bounded reads, streaming.
 - **Concurrency.** One user, one machine, one server process per session; several processes write the one per-user ledger through the store, with no single writer, and optimistic concurrency keeps them from overwriting each other (SYS-R6). No parallel or worktree execution.

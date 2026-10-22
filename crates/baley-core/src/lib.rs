@@ -16,6 +16,7 @@ pub mod registry;
 pub mod restore;
 pub mod retention;
 pub mod scope;
+pub mod work_order;
 
 pub use anchor::{
     AnchorAct, AnchorOutcome, AnchorReport, AnchorRequest, AnchorRow, AnchorSeams, AnchorTarget,

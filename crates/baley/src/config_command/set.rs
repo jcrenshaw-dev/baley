@@ -455,6 +455,7 @@ fn admit_checkout(
         at,
         None,
     )
+    .map(drop)
 }
 
 /// Runs the policy step for `recorded`, built at the project's root by

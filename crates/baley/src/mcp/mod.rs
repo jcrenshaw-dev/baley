@@ -3,7 +3,7 @@
 //! queue, the worker and the transports that carry the calls. The judging is
 //! pure and tested with supplied values. The stdio, the worker thread and the
 //! store are reached only by the gathering in `serve`, `transport`, `worker`,
-//! `prepare`, `capture`, `document` and `scope`.
+//! `prepare`, `capture`, `document`, `scope` and `work_order`.
 
 /// The session's project, working directory and ids, gathered once and judged.
 pub mod context;
@@ -58,3 +58,6 @@ pub mod document;
 
 /// Records a start submission as a draft the owner approves by its digest.
 pub mod scope;
+
+/// The work-order operations: `project-start` issues the start planner's order.
+pub mod work_order;

@@ -3,23 +3,29 @@
 //! `project` stream, in the submission's own domain transaction. Accepted
 //! scope does not change until the owner approves the draft by its digest.
 //!
+//! A start names the start planner's work order it answers, which is checked
+//! before its write is prepared, and its events carry that order and the
+//! order's instructions on their caller.
+//!
 //! A change is checked against accepted scope before its write is prepared,
 //! so a change scope rules out records nothing at all (D-08), and its
 //! transaction confirms the scope it was checked against has not moved.
 
 use std::collections::BTreeMap;
 
+use baley_core::policy::Role;
 use baley_core::scope::{
     ChangeKind, ChangeSubmission, PROJECT_ALREADY_STARTED, PROJECT_STREAM, PhaseFields,
     SCOPE_APPROVED, SCOPE_SUBMITTED, SCOPE_SUBMITTED_VERSION, START_KIND, START_TARGET,
     ScopeRefusal, Submission, SubmissionRefusal, judge_change, judge_scope_change,
     submitted_payload,
 };
+use baley_core::work_order::{NO_SUCH_WORK_ORDER, START_SUBJECT, WRONG_WORK_ORDER};
 use baley_store::{
-    Absence, Command, Decision, EVENT_PAGE_BOUND, EventMatch, Hash, HistoryFilter, Ledger,
-    NewEvent, Observed, OutcomeKind, PageRequest, Payloads, ProjectId, REQUEST_VIEW, Recorded,
-    Refusal as StoreRefusal, RetentionClass, StoreError, StreamName, Views, request_key,
-    request_state,
+    Absence, Command, Decision, EVENT_PAGE_BOUND, EventMatch, Hash, HistoryFilter,
+    InstructionEvidence, Ledger, NewEvent, Observed, OutcomeKind, PageRequest, Payloads, ProjectId,
+    REQUEST_VIEW, Recorded, Refusal as StoreRefusal, RetentionClass, StoreError, StreamName, Views,
+    request_key, request_state,
 };
 use serde_json::{Map, Value, json};
 
@@ -96,6 +102,60 @@ pub fn start_once<L: Ledger + ?Sized>(store: &L, project: &ProjectId) -> Result<
         .value()),
         Err(error) => Err(store_failed(&error, NOT_RECORDED_BUSY)),
     }
+}
+
+/// The order check a start submission is prepared with (D-04): the work
+/// order `id` read from `project`, none `no-such-work-order`, then one that
+/// is not the start planner's `wrong-work-order`, both slot `work_order`,
+/// then [`start_once`]. An answered order passes, so a later submission
+/// naming it is the newest draft (D-03). A pass gives back the order's
+/// instruction evidence, which the submission's caller then carries (D-24).
+/// It records nothing.
+pub fn start_order_check<S: Ledger + Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    id: &str,
+) -> Result<Vec<InstructionEvidence>, Value> {
+    let order = crate::work_order::read::order(store, project, id)
+        .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?
+        .ok_or_else(|| {
+            Refusal::new(
+                NO_SUCH_WORK_ORDER,
+                "this project holds no work order with that id, so nothing was recorded",
+            )
+            .slot("work_order")
+            .value()
+        })?;
+    let text = |field: &str| order.get(field).and_then(Value::as_str);
+    if text("role") != Some(Role::Planner.name()) || text("subject") != Some(START_SUBJECT) {
+        return Err(Refusal::new(
+            WRONG_WORK_ORDER,
+            "that work order is not the start planner's, so a start submission cannot answer it, and nothing was recorded",
+        )
+        .slot("work_order")
+        .value());
+    }
+    start_once(store, project)?;
+    order_evidence(&order).ok_or_else(|| {
+        failed(
+            LEDGER_UNAVAILABLE,
+            "the ledger holds a work order whose instructions cannot be read",
+            PLACE_LEDGER,
+        )
+    })
+}
+
+/// The instruction evidence an order document lists, in order.
+fn order_evidence(order: &Value) -> Option<Vec<InstructionEvidence>> {
+    order
+        .get("instructions")?
+        .as_array()?
+        .iter()
+        .map(|entry| {
+            let text = |field: &str| entry.get(field).and_then(Value::as_str);
+            InstructionEvidence::new(text("identity")?, text("version")?, text("hash")?).ok()
+        })
+        .collect()
 }
 
 /// Records one accepted start `submission` under `command`, the command
@@ -1054,5 +1114,54 @@ mod tests {
             "ledger",
             false,
         );
+    }
+
+    #[test]
+    fn a_submission_bound_to_an_order_that_is_not_the_start_planners_is_caught() {
+        use baley_core::policy::Role;
+        use baley_core::work_order::{
+            IssuedOrder, WORK_ORDER_ISSUED, WORK_ORDER_ISSUED_VERSION, issued_payload,
+        };
+
+        use crate::mcp::work_order::tests::{I0, I1};
+
+        let route = json!({});
+        let order = |id: &str, role: Role, subject: &str| NewEvent {
+            stream: StreamName("roadmap".into()),
+            type_name: WORK_ORDER_ISSUED.into(),
+            type_version: WORK_ORDER_ISSUED_VERSION,
+            git: None,
+            payload: issued_payload(&IssuedOrder {
+                id,
+                request: id,
+                parent: None,
+                role,
+                subject,
+                attempt: 1,
+                route: &route,
+                agent: "bal-checker-high",
+                instructions: &[],
+                inputs: &[],
+            }),
+            attachments: vec![],
+        };
+        let (_dir, store) = store();
+        append(
+            &store,
+            R1,
+            T1,
+            vec![
+                order(I0, Role::Checker, "start"),
+                order(I1, Role::Planner, "phase/2"),
+            ],
+        );
+        let before = head(&store);
+        for id in [I0, I1] {
+            let refusal = start_order_check(&store, &project(), id).unwrap_err();
+            assert_eq!(refusal["status"], "refused", "{id}: {refusal}");
+            assert_eq!(refusal["code"], "wrong-work-order", "{id}: {refusal}");
+            assert_eq!(refusal["slot"], "work_order", "{id}: {refusal}");
+        }
+        assert_eq!(head(&store), before);
     }
 }

@@ -12,6 +12,7 @@ use std::fmt;
 use crate::policy::{Host, UNKNOWN_MODEL};
 
 pub mod detection;
+pub mod effort;
 pub mod events;
 pub mod lookup;
 pub mod owner;
@@ -19,6 +20,10 @@ pub mod seed;
 pub mod tables;
 pub mod view;
 
+pub use effort::{
+    EFFORT_ROWS, EFFORT_TABLE_DATE, EFFORT_TABLE_SOURCE, EffortRow, SupportedEffort,
+    supported_effort,
+};
 pub use events::{
     MODELS_DETECTED, MODELS_DETECTED_VERSION, MODELS_DETECTION_FAILED,
     MODELS_DETECTION_FAILED_VERSION, MODELS_OWNER_CHANGED, MODELS_OWNER_CHANGED_VERSION,
@@ -28,7 +33,9 @@ pub use events::{
 pub use lookup::{Listing, ListingRow, accepted_names, listing};
 pub use owner::{judge_alias_addition, judge_alias_removal, judge_held_removal};
 pub use seed::{seed_due, seed_payload};
-pub use tables::{EXACT_HINTS, HINT_VERSION, HintRow, PREFIX_HINTS, PrefixRow, host_aliases};
+pub use tables::{
+    EXACT_HINTS, HINT_VERSION, HintRow, PREFIX_HINTS, PrefixRow, host_aliases, rung_map,
+};
 pub use view::{
     CatalogState, MODEL_CATALOG_VIEW, ModelCatalogProjector, Placement, Source, catalog_key,
     model_catalog_spec, read_state, state_key,

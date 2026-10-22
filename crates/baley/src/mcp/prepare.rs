@@ -15,7 +15,9 @@
 //! rather than refused. Checkout admission and the policy step
 //! are separate transactions, as on the command line, so a store failure at
 //! the step can follow a checkout admission that already recorded
-//! `checkout.seen`. That record stands. Preparation creates no project, no
+//! `checkout.seen`. That record stands. A read may also read and judge the
+//! settings as a write does, for the `route` query, and stops there with the
+//! host's policy, so it too records nothing. Preparation creates no project, no
 //! `project.initialized` event, no catalog seed and runs no detection: the
 //! owner sets those up with `baley init` and `baley config`.
 
@@ -63,6 +65,12 @@ const PLACE_GIT: &str = "git";
 const PLACE_CHECKOUT: &str = "checkout";
 
 /// A project read or write ready to run.
+///
+/// Project start is the reader of the project file and of what the write's
+/// steps found: it resolves its route from the host's policy at the step's
+/// version (D-11) and classifies the checkout from the root commit and the
+/// project file (D-20). The `route` query is the reader of the policy a
+/// settings-reading read judged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prepared {
     /// The project the working tree's `baley.toml` names, known to the ledger.
@@ -70,8 +78,28 @@ pub struct Prepared {
     /// The canonical repository root discovery found. The caller keeps the
     /// project directory text exactly as it was given.
     pub root: PathBuf,
+    /// The working-tree `baley.toml` discovery found, in the discovered folder
+    /// under `root`.
+    pub project_file: PathBuf,
     /// The domain command to run. `Some` exactly when a write was requested.
     pub command: Option<Command>,
+    /// What the write's own steps found. `Some` exactly on a write that is not
+    /// a replay: a read gathers nothing, and a replay runs no step.
+    pub stepped: Option<Stepped>,
+    /// The host's effective policy a settings-reading read judged. `Some`
+    /// exactly on that read, which records nothing, so no version comes with
+    /// it (D-11).
+    pub policy: Option<EffectivePolicy>,
+}
+
+/// What a write's checkout admission and policy step found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stepped {
+    /// The host's effective policy, the one the policy step recorded at the
+    /// command's policy version.
+    pub policy: EffectivePolicy,
+    /// The root commit checkout admission gathered, `None` when HEAD is unborn.
+    pub root_commit: Option<String>,
 }
 
 /// The identity a served write supplies, which preparation carries into the
@@ -118,16 +146,19 @@ pub fn prepared_command(
     }
 }
 
-/// The two policies a write is judged under.
+/// The policies a write is judged under.
 #[derive(Debug)]
 struct WritePolicies {
     /// The policy built with no host. Its `git.remote` names the remote the
     /// checkout's facts come from, the one the command line uses, so the
     /// server and the command line record one remote for one checkout.
     facts: EffectivePolicy,
-    /// The policy built for the call's host, recorded at the root. The policy
-    /// step records it as `policy.effective` under (checkout, host), so the
-    /// host's section values apply.
+    /// The policy built for the call's host, which the prepared write hands
+    /// to the operation.
+    host: EffectivePolicy,
+    /// The host's policy, recorded at the root. The policy step records it as
+    /// `policy.effective` under (checkout, host), so the host's section values
+    /// apply.
     recorded: RecordedPolicy,
 }
 
@@ -140,7 +171,11 @@ fn judge_settings(reads: &Reads, host: Host, root: &Path) -> Result<WritePolicie
     let facts = policy_step::build(reads, None).map_err(|e| e.to_string())?;
     let with_host = policy_step::build(reads, Some(host)).map_err(|e| e.to_string())?;
     let recorded = recorded_policy(root, &with_host).map_err(|e| e.to_string())?;
-    Ok(WritePolicies { facts, recorded })
+    Ok(WritePolicies {
+        facts,
+        host: with_host,
+        recorded,
+    })
 }
 
 /// Why a store step could not answer.
@@ -173,8 +208,9 @@ struct Seen {
     relooked: Option<Result<Option<Value>, LedgerFault>>,
     /// The global file and HEAD's copy of the project file.
     reads: Option<Reads>,
-    /// Checkout facts gathered and the checkout admitted.
-    admitted: Option<Result<(), LedgerFault>>,
+    /// Checkout facts gathered and the checkout admitted: the root commit
+    /// admission gathered, `None` inside for an unborn HEAD.
+    admitted: Option<Result<Option<String>, LedgerFault>>,
     /// The version the policy step returned.
     stepped: Option<Result<u64, LedgerFault>>,
 }
@@ -189,6 +225,8 @@ struct Call<'a> {
     host: Host,
     at: &'a str,
     write: Option<&'a WriteRequest>,
+    /// Whether a read also reads and judges the settings.
+    reads_settings: bool,
     check: Option<&'a Check<'a>>,
 }
 
@@ -287,7 +325,8 @@ fn fault_failed(fault: &LedgerFault) -> Next {
 
 /// The next step for the call, or its answer. Discovery starts from the
 /// project directory the caller holds and from nothing else. A read stops at
-/// the known-project check. A write goes on, in the command line's order, to
+/// the known-project check, and a settings-reading read after the settings
+/// are judged. A write goes on, in the command line's order, to
 /// the replay lookup, its own check when it has one, then the settings,
 /// checkout admission and the policy step.
 fn next(call: &Call, seen: &Seen) -> Next {
@@ -347,17 +386,80 @@ fn next(call: &Call, seen: &Seen) -> Next {
         }
         Ok(_) => {}
     }
-    let Some(request) = call.write else {
+    if call.write.is_none() && !call.reads_settings {
         return Next::Ready(Box::new(Prepared {
             project,
             root,
+            project_file: file,
             command: None,
+            stepped: None,
+            policy: None,
         }));
-    };
+    }
     let Some(working) = working.as_ref().ok().and_then(Option::as_ref) else {
         return unavailable_file(&file);
     };
-    write_next(call, request, seen, project, root, working)
+    let found = Found {
+        project,
+        root,
+        file,
+    };
+    let Some(request) = call.write else {
+        return match judged_settings(call, seen, &found, working) {
+            Ok(policies) => Next::Ready(Box::new(Prepared {
+                project: found.project,
+                root: found.root,
+                project_file: found.file,
+                command: None,
+                stepped: None,
+                policy: Some(policies.host),
+            })),
+            Err(next) => *next,
+        };
+    };
+    write_next(call, request, seen, found, working)
+}
+
+/// The settings step a write and a settings-reading read share: the read of
+/// both files, then their judgement for the call's host. `Err` is the step to
+/// perform or the `config-unavailable` answer, boxed since a step is large.
+fn judged_settings(
+    call: &Call,
+    seen: &Seen,
+    found: &Found,
+    working: &SettingsFile,
+) -> Result<WritePolicies, Box<Next>> {
+    let Some(reads) = &seen.reads else {
+        return Err(Box::new(Next::Do(Step::ReadSettings {
+            root: found.root.clone(),
+            working: working.clone(),
+        })));
+    };
+    judge_settings(reads, call.host, &found.root)
+        .map_err(|fault| Box::new(failed(CONFIG_UNAVAILABLE, fault, PLACE_SETTINGS)))
+}
+
+/// Where discovery found the project a write is prepared for.
+#[derive(Clone)]
+struct Found {
+    project: ProjectId,
+    root: PathBuf,
+    file: PathBuf,
+}
+
+impl Found {
+    /// The prepared call for `command`, carrying `stepped` when the write's
+    /// steps ran.
+    fn ready(self, command: Command, stepped: Option<Stepped>) -> Next {
+        Next::Ready(Box::new(Prepared {
+            project: self.project,
+            root: self.root,
+            project_file: self.file,
+            command: Some(command),
+            stepped,
+            policy: None,
+        }))
+    }
 }
 
 /// The write's steps after the known-project check: the replay lookup, the
@@ -367,8 +469,7 @@ fn write_next(
     call: &Call,
     request: &WriteRequest,
     seen: &Seen,
-    project: ProjectId,
-    root: PathBuf,
+    found: Found,
     working: &SettingsFile,
 ) -> Next {
     // A request the ledger already holds is answered by its own transaction, so
@@ -378,21 +479,25 @@ fn write_next(
     // recorded answer whatever the check would say now. The replay's
     // command carries version 0: it appends nothing, and the version stays out
     // of the digest.
-    let replay = prepared_command(&project, request, 0, call.at, call.caller);
+    let replay = prepared_command(&found.project, request, 0, call.at, call.caller);
     let Some(looked_up) = &seen.replay else {
         return Next::Do(Step::LookUpRequest {
             key: request_key(&replay),
-            project,
+            project: found.project,
         });
     };
-    if let Some(end) = held(looked_up, &project, &root, &replay) {
+    if let Some(end) = held(looked_up, &found, &replay) {
         return end;
     }
     // Checked before anything records, so a scope refusal judged against the
     // ledger leaves no checkout admission or policy step behind it.
     if call.check.is_some() {
         match &seen.checked {
-            None => return Next::Do(Step::Check { project }),
+            None => {
+                return Next::Do(Step::Check {
+                    project: found.project,
+                });
+            }
             Some(Err(answer)) => {
                 // The original of a retry can commit between the lookup and
                 // the check, and the check may refuse because of it, such as
@@ -403,69 +508,61 @@ fn write_next(
                 let Some(relooked) = &seen.relooked else {
                     return Next::Do(Step::LookUpRequestAgain {
                         key: request_key(&replay),
-                        project,
+                        project: found.project,
                     });
                 };
-                return held(relooked, &project, &root, &replay)
+                return held(relooked, &found, &replay)
                     .unwrap_or_else(|| Next::Checked(answer.clone()));
             }
             Some(Ok(())) => {}
         }
     }
-    let Some(reads) = &seen.reads else {
-        return Next::Do(Step::ReadSettings {
-            root,
-            working: working.clone(),
-        });
-    };
-    let policies = match judge_settings(reads, call.host, &root) {
+    let policies = match judged_settings(call, seen, &found, working) {
         Ok(policies) => policies,
-        Err(fault) => return failed(CONFIG_UNAVAILABLE, fault, PLACE_SETTINGS),
+        Err(next) => return *next,
     };
-    match &seen.admitted {
+    let root_commit = match &seen.admitted {
         None => {
             return Next::Do(Step::AdmitCheckout {
-                project,
+                project: found.project,
                 path: policies.recorded.checkout.clone(),
                 policy: policies.facts,
-                root,
+                root: found.root,
             });
         }
         Some(Err(fault)) => return fault_failed(fault),
-        Some(Ok(())) => {}
-    }
+        Some(Ok(root_commit)) => root_commit,
+    };
     match &seen.stepped {
         None => Next::Do(Step::RecordPolicy {
-            project,
+            project: found.project,
             recorded: policies.recorded,
         }),
         Some(Err(fault)) => fault_failed(fault),
         Some(Ok(version)) => {
-            let command = prepared_command(&project, request, *version, call.at, call.caller);
-            Next::Ready(Box::new(Prepared {
-                project,
-                root,
-                command: Some(command),
-            }))
+            let command = prepared_command(&found.project, request, *version, call.at, call.caller);
+            let stepped = Stepped {
+                policy: policies.host,
+                root_commit: root_commit.clone(),
+            };
+            found.ready(command, Some(stepped))
         }
     }
 }
 
 /// What a replay lookup found decides the call when the ledger holds a record
-/// of the request: its replay, or a fault. `None` when it holds none.
+/// of the request: its replay, or a fault. `None` when it holds none. A replay
+/// carries nothing a step found, since it runs none.
 fn held(
     looked_up: &Result<Option<Value>, LedgerFault>,
-    project: &ProjectId,
-    root: &Path,
+    found: &Found,
     replay: &Command,
 ) -> Option<Next> {
     match looked_up {
         Err(fault) => Some(fault_failed(fault)),
-        Ok(Some(body)) if request_state(body).is_some() => Some(Next::Ready(Box::new(Prepared {
-            project: project.clone(),
-            root: root.to_path_buf(),
-            command: Some(replay.clone()),
-        }))),
+        Ok(Some(body)) if request_state(body).is_some() => {
+            Some(found.clone().ready(replay.clone(), None))
+        }
         Ok(Some(_)) => Some(failed(
             LEDGER_UNAVAILABLE,
             "the ledger holds a record of this request that cannot be read",
@@ -501,6 +598,11 @@ fn unavailable_file(file: &Path) -> Next {
 /// own transactions. `config` is the config folder, where the global file is.
 /// `store` is `None` when the ledger was not opened at startup.
 ///
+/// Every prepared call carries the project file discovery found. A write that
+/// ran its steps also carries the host's policy the step recorded and the root
+/// commit admission gathered, which project start resolves its route from at
+/// the step's version (D-11) and classifies the checkout by (D-20).
+///
 /// A refusal is the `failed` answer, boxed to keep the result small.
 pub fn prepare<S: Admin + Views + Ledger>(
     store: Option<&S>,
@@ -517,6 +619,7 @@ pub fn prepare<S: Admin + Views + Ledger>(
         at,
         write,
         check: None,
+        reads_settings: false,
     };
     match drive(store, &call, config, process) {
         Ok(prepared) => Ok(prepared),
@@ -555,9 +658,39 @@ pub fn prepare_checked<S: Admin + Views + Ledger>(
         at,
         write: Some(write),
         check: Some(check),
+        reads_settings: false,
     };
     drive(store, &call, config, process).map_err(|ended| match ended {
         Ended::Failed(answer) => serde_json::to_value(*answer).expect("a failed answer serializes"),
+        Ended::Checked(answer) => answer,
+    })
+}
+
+/// Prepares a project read that also reads and judges the settings, by the
+/// same settings read and judgement a write runs, and is ready with the
+/// host's effective policy in [`Prepared::policy`]. It never looks up a
+/// request, runs a check, admits the checkout or runs the policy step, so it
+/// records nothing and carries no command (D-11). Any end is preparation's
+/// own `failed` answer as a JSON value.
+pub fn prepare_settings_read<S: Admin + Views + Ledger>(
+    store: Option<&S>,
+    caller: &ServerCaller,
+    config: &Path,
+    host: Host,
+    at: &str,
+    process: &mut dyn Process,
+) -> Result<Prepared, Value> {
+    let call = Call {
+        caller,
+        host,
+        at,
+        write: None,
+        reads_settings: true,
+        check: None,
+    };
+    drive(store, &call, config, process).map_err(|ended| match ended {
+        Ended::Failed(answer) => serde_json::to_value(*answer).expect("a failed answer serializes"),
+        // A read has no check step to end the call.
         Ended::Checked(answer) => answer,
     })
 }
@@ -631,6 +764,8 @@ fn perform<S: Admin + Views + Ledger>(
             policy,
             path,
         } => {
+            // Only the root commit is kept: project start classifies the
+            // checkout from it.
             seen.admitted = Some(match store {
                 None => Err(LedgerFault::NoStore),
                 Some(store) => {
@@ -648,6 +783,7 @@ fn perform<S: Admin + Views + Ledger>(
                         call.at,
                         server(),
                     )
+                    .map(|facts| facts.root_commit)
                     .map_err(LedgerFault::Checkout)
                 }
             });
@@ -1054,6 +1190,7 @@ mod tests {
             at: AT,
             write: None,
             check: None,
+            reads_settings: false,
         }
     }
 
@@ -1087,8 +1224,11 @@ mod tests {
         seen
     }
 
+    /// The root commit admission gathered, A.
+    const ROOT_COMMIT: &str = "1111111111111111111111111111111111111111";
+
     fn admitted(mut seen: Seen) -> Seen {
-        seen.admitted = Some(Ok(()));
+        seen.admitted = Some(Ok(Some(ROOT_COMMIT.into())));
         seen
     }
 
@@ -1393,6 +1533,173 @@ mod tests {
         // Unable to tell, the call fails retryably rather than refusing.
         seen.relooked = Some(Err(LedgerFault::Store(StoreError::Busy)));
         assert_failed(next(&checked, &seen), "ledger-busy", "ledger", true);
+    }
+
+    #[test]
+    fn a_prepared_write_without_the_host_policy_or_the_admitted_root_commit_is_caught() {
+        use baley_core::policy::{Layer, Rung, Value as Setting};
+        let mut seen = admitted(with_reads(looked_up(), "[project]\n"));
+        let global = settings::file(
+            Path::new("/c/config.toml"),
+            b"[roles.planner]\neffort = \"max\"\n".to_vec(),
+        );
+        seen.reads.as_mut().unwrap().global = Ok(Some(global));
+        seen.stepped = Some(Ok(7));
+        let Next::Ready(prepared) = write_step(&seen) else {
+            panic!("the step's version is observed, so the write is ready");
+        };
+        assert_eq!(prepared.command.as_ref().unwrap().policy_version, 7);
+        let stepped = prepared.stepped.expect("a write that ran its steps");
+        assert_eq!(stepped.policy.host, Some(Host::ClaudeCode));
+        let effort = &stepped.policy.settings["roles.planner.effort"];
+        assert_eq!(effort.value, Some(Setting::Rung(Rung::Max)));
+        assert_eq!(effort.source.layer, Layer::Global);
+        assert_eq!(stepped.root_commit.as_deref(), Some(ROOT_COMMIT));
+        assert_eq!(prepared.project_file, Path::new("/real/r/baley.toml"));
+    }
+
+    #[test]
+    fn a_route_read_that_admits_the_checkout_or_runs_the_policy_step_is_caught() {
+        use baley_core::policy::{Rung, Value as Setting};
+        let caller = caller("/real/r/p", "/w");
+        let call = Call {
+            reads_settings: true,
+            ..read_call(&caller)
+        };
+        let step = |seen: &Seen| match next(&call, seen) {
+            Next::Do(step) => step,
+            other => panic!("expected a step, got {other:?}"),
+        };
+        assert_eq!(step(&Seen::default()), Step::Discover("/real/r/p".into()));
+        assert_eq!(
+            step(&walked()),
+            Step::ReadProjectFile("/real/r/baley.toml".into())
+        );
+        assert_eq!(step(&with_file(walked())), Step::ListProjects);
+        let Step::ReadSettings { root, .. } = step(&known_project()) else {
+            panic!("a known project's settings are read next");
+        };
+        assert_eq!(root, Path::new("/real/r"));
+
+        let with_global = |text: &str| {
+            let mut seen = with_reads(known_project(), "[project]\n");
+            let global = settings::file(Path::new("/c/config.toml"), text.as_bytes().to_vec());
+            seen.reads.as_mut().unwrap().global = Ok(Some(global));
+            seen
+        };
+        let Next::Ready(prepared) =
+            next(&call, &with_global("[roles.planner]\neffort = \"max\"\n"))
+        else {
+            panic!("the settings are read, so the read is ready");
+        };
+        assert_eq!(prepared.command, None);
+        assert_eq!(prepared.stepped, None);
+        let policy = prepared.policy.expect("the host's policy");
+        assert_eq!(policy.host, Some(Host::ClaudeCode));
+        assert_eq!(
+            policy.settings["roles.planner.effort"].value,
+            Some(Setting::Rung(Rung::Max))
+        );
+
+        assert_failed(
+            next(&call, &with_global("[roles.planner\n")),
+            "config-unavailable",
+            "settings",
+            false,
+        );
+    }
+
+    #[test]
+    fn a_replay_or_a_read_carrying_a_policy_or_a_root_commit_is_caught() {
+        let seen = with_replay(known_project(), Ok(Some(completed_request())));
+        let Next::Ready(replayed) = write_step(&seen) else {
+            panic!("a known request is ready with no other step");
+        };
+        let caller = caller("/real/r/p", "/w");
+        let Next::Ready(read) = next(&read_call(&caller), &known_project()) else {
+            panic!("a read is ready at the known-project check");
+        };
+        for prepared in [replayed, read] {
+            assert_eq!(prepared.stepped, None, "{prepared:?}");
+            assert_eq!(prepared.project_file, Path::new("/real/r/baley.toml"));
+        }
+    }
+
+    #[test]
+    fn a_project_start_that_records_on_a_refusal_or_hides_its_settings_line_is_caught() {
+        use crate::mcp::work_order::tests::{B1, I0, issue_start};
+        use crate::mcp::work_order::{judge_start_arguments, settings_lines, start_check};
+        use crate::scope::fixtures;
+
+        let start = |brief: &str| json!({"operation": "project-start", "request_id": REQUEST, "brief": brief});
+        let judged = judge_start_arguments(&start(B1)).unwrap();
+        let caller = caller("/real/r/p", "/w");
+        // The plan only asks for the check, so this one is never run.
+        let check: &Check = &|_| panic!("the pure plan ran the check");
+        let call = Call {
+            check: Some(check),
+            ..write_call(&caller, &judged.request)
+        };
+
+        // (a) A project the ledger does not list.
+        let other = known(
+            with_file(walked()),
+            &["00000000-0000-4000-8000-000000000000"],
+        );
+        let value = assert_failed(
+            next(&call, &other),
+            "project-not-in-ledger",
+            "project",
+            false,
+        );
+        let reason = value["reason"].as_str().unwrap();
+        assert!(reason.contains("baley init"), "{reason}");
+
+        let (_dir, store) = fixtures::store();
+        issue_start(&store, &fixtures::project(), I0, fixtures::R1, fixtures::T1);
+        let before = fixtures::head(&store);
+
+        // (b) A blank or oversized brief.
+        for (brief, code) in [
+            (String::new(), "brief-blank"),
+            ("x".repeat(65_537), "brief-too-large"),
+        ] {
+            let refusal = judge_start_arguments(&start(&brief)).unwrap_err();
+            assert_eq!(refusal["status"], "refused", "{refusal}");
+            assert_eq!(refusal["code"], code, "{refusal}");
+            assert_eq!(refusal["slot"], "brief", "{refusal}");
+        }
+
+        // (c) A start while I0 is pending ends the call with the check's answer.
+        let refusal = start_check(&store, &ProjectId(ID.into())).unwrap_err();
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], "start-order-pending", "{refusal}");
+        assert_eq!(refusal["details"], json!({"work_order": I0}), "{refusal}");
+        assert!(
+            refusal["reason"].as_str().unwrap().contains(I0),
+            "{refusal}"
+        );
+        let mut seen = looked_up();
+        seen.checked = Some(Err(refusal.clone()));
+        seen.relooked = Some(Ok(None));
+        match next(&call, &seen) {
+            Next::Checked(answer) => assert_eq!(answer, refusal),
+            other => panic!("the check's refusal ends the call, got {other:?}"),
+        }
+        assert_eq!(fixtures::head(&store), before, "a refused start recorded");
+
+        // (d) No global file and a project file of `[project]` only.
+        let mut seen = admitted(with_reads(looked_up(), "[project]\n"));
+        seen.checked = Some(Ok(()));
+        seen.stepped = Some(Ok(3));
+        let Next::Ready(prepared) = next(&call, &seen) else {
+            panic!("a start with missing settings goes on");
+        };
+        let lines = settings_lines(&prepared.stepped.expect("the steps ran").policy);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        for line in &lines {
+            assert!(line.contains("baley config interview"), "{line}");
+        }
     }
 
     #[test]

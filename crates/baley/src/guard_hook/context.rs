@@ -62,6 +62,11 @@ impl fmt::Display for Refusal {
 /// evidence of no repository.
 pub(super) type Walk = Result<Discovery, String>;
 
+/// The stubs the guard protects.
+pub(crate) fn manifest() -> Vec<stubs::Entry> {
+    stubs::installed_manifest()
+}
+
 /// Reads the environment and walks the project directory and the cwd. It
 /// owns no policy, so it has no unit test.
 pub(super) fn gather(cwd: &str) -> HookContext {
@@ -77,8 +82,7 @@ pub(super) fn gather(cwd: &str) -> HookContext {
     let env = Environment::read();
     let folders = Folders::resolve(Platform::current(), &env);
     let claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
-    let manifest = stubs::manifest(&stubs::front_doors()).expect("unique compiled front doors");
-    let installed = installed::resolve(&env, claude_config_dir, &manifest);
+    let installed = installed::resolve(&env, claude_config_dir, &manifest());
     judge(
         project_dir.as_deref(),
         &project,
@@ -223,6 +227,11 @@ mod tests {
             installed::resolve(&env, None, &stubs::manifest(&stubs::front_doors()).unwrap())
                 .unwrap();
         let placed = [
+            "/u/.claude/skills/bal-project/SKILL.md",
+            "/u/.claude/skills/bal-scope/SKILL.md",
+            "/u/.claude/skills/bal-phase/SKILL.md",
+            "/u/.claude/skills/bal-story/SKILL.md",
+            "/u/.claude/skills/bal-backlog/SKILL.md",
             "/u/.claude/skills/bal-capture/SKILL.md",
             "/u/.claude/skills/bal-help/SKILL.md",
             "/u/.claude.json",
@@ -386,5 +395,24 @@ mod tests {
                 protected: Err(Refusal::Folders(FolderRefusal::UserHomeUnset)),
             }
         );
+    }
+
+    #[test]
+    fn a_manifest_reader_left_on_the_skill_stubs_only_is_caught() {
+        use crate::host_artifacts::{agents, stubs};
+
+        let skills = stubs::manifest(&stubs::front_doors()).unwrap();
+        let agents = agents::manifest();
+        assert_eq!(skills.len(), 7);
+        assert_eq!(agents.len(), 30);
+        let expected: Vec<stubs::Entry> = skills.into_iter().chain(agents).collect();
+        assert_eq!(stubs::installed_manifest(), expected);
+        for (reader, read) in [
+            ("install", crate::install::command::manifest()),
+            ("guard", super::manifest()),
+            ("doctor", crate::host_doctor::manifest()),
+        ] {
+            assert_eq!(read, expected, "{reader}");
+        }
     }
 }

@@ -290,6 +290,11 @@ pub struct Process<'a> {
     pub os: &'a str,
 }
 
+/// The stubs the doctor places and compares.
+pub(crate) fn manifest() -> Vec<stubs::Entry> {
+    stubs::installed_manifest()
+}
+
 /// Gathers the observation the doctor judges for `host`: derives the
 /// installed paths from `process`, reads the host's latest install record,
 /// builds the placement map from both and gathers as [`gather`] does, with
@@ -303,8 +308,7 @@ pub fn observe<S: Ledger + Admin + Views>(
     host: Host,
     stored: Stored<'_, S>,
 ) -> Observation {
-    let manifest = stubs::manifest(&stubs::front_doors()).expect("unique compiled front doors");
-    let derived = installed::resolve(process.env, process.claude_config_dir, &manifest);
+    let derived = installed::resolve(process.env, process.claude_config_dir, &manifest());
     let record = install::record::read(stored.store, host.name());
     let latest = record.as_ref().ok().cloned().flatten();
     let placements = derived
@@ -842,7 +846,7 @@ pub(crate) mod fixtures {
                 let placement = match entry.identity.as_str() {
                     "bal-capture" => place(capture),
                     "bal-help" => place(help),
-                    other => panic!("an unexpected front door {other}"),
+                    _ => Placement::Unknown,
                 };
                 (entry, placement)
             })
@@ -1299,12 +1303,45 @@ mod tests {
 
     #[test]
     fn an_installed_artifact_reported_not_installed_by_the_doctor_is_caught() {
-        let record = record_for(&["bal-capture", "bal-help"], true, true, true);
+        let record = record_for(
+            &[
+                "bal-project",
+                "bal-scope",
+                "bal-phase",
+                "bal-story",
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+            ],
+            true,
+            true,
+            true,
+        );
         let map = installed_placements(derived(), Ok(Some(record))).unwrap();
         assert_eq!(map.not_installed(), []);
         assert_eq!(
             files(&map),
             [
+                (
+                    Artifact::Stub("bal-project".into()),
+                    "/home/o/.claude/skills/bal-project/SKILL.md".to_owned()
+                ),
+                (
+                    Artifact::Stub("bal-scope".into()),
+                    "/home/o/.claude/skills/bal-scope/SKILL.md".to_owned()
+                ),
+                (
+                    Artifact::Stub("bal-phase".into()),
+                    "/home/o/.claude/skills/bal-phase/SKILL.md".to_owned()
+                ),
+                (
+                    Artifact::Stub("bal-story".into()),
+                    "/home/o/.claude/skills/bal-story/SKILL.md".to_owned()
+                ),
+                (
+                    Artifact::Stub("bal-backlog".into()),
+                    "/home/o/.claude/skills/bal-backlog/SKILL.md".to_owned()
+                ),
                 (
                     Artifact::Stub("bal-capture".into()),
                     "/home/o/.claude/skills/bal-capture/SKILL.md".to_owned()
@@ -1336,6 +1373,11 @@ mod tests {
         assert_eq!(
             map.not_installed(),
             [
+                Artifact::Stub("bal-project".into()),
+                Artifact::Stub("bal-scope".into()),
+                Artifact::Stub("bal-phase".into()),
+                Artifact::Stub("bal-story".into()),
+                Artifact::Stub("bal-backlog".into()),
                 Artifact::Stub("bal-capture".into()),
                 Artifact::Stub("bal-help".into()),
                 Artifact::Registration,
@@ -1374,7 +1416,15 @@ mod tests {
         );
         assert_eq!(
             map.not_installed(),
-            [Artifact::Stub("bal-help".into()), Artifact::Registration]
+            [
+                Artifact::Stub("bal-project".into()),
+                Artifact::Stub("bal-scope".into()),
+                Artifact::Stub("bal-phase".into()),
+                Artifact::Stub("bal-story".into()),
+                Artifact::Stub("bal-backlog".into()),
+                Artifact::Stub("bal-help".into()),
+                Artifact::Registration,
+            ]
         );
 
         let help_only = record_for(&["bal-help"], true, false, false);
@@ -1392,6 +1442,11 @@ mod tests {
         assert_eq!(
             map.not_installed(),
             [
+                Artifact::Stub("bal-project".into()),
+                Artifact::Stub("bal-scope".into()),
+                Artifact::Stub("bal-phase".into()),
+                Artifact::Stub("bal-story".into()),
+                Artifact::Stub("bal-backlog".into()),
                 Artifact::Stub("bal-capture".into()),
                 Artifact::Hook,
                 Artifact::Settings,

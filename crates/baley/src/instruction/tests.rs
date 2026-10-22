@@ -107,6 +107,46 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "2",
         "e20a4e61b36b0e0787a672c58558b04102a4357d428155ac3b618243b578ddd2",
     ),
+    (
+        "bal-start-planner",
+        "1",
+        "5c2872a582d0d1b38105c8ff971cbeae8727d0a74e51593e80b794a2bc90488a",
+    ),
+    (
+        "bal-start-survey",
+        "1",
+        "ef390f27faddc98daf28a40e86a917589caf0ae1fd8185a9ebcce06592986955",
+    ),
+    (
+        "bal-project",
+        "1",
+        "7153c55fcb0acaf2712762b305b9d96cfd6a48ae4e44aa354b3685820411d3d1",
+    ),
+    (
+        "bal-scope",
+        "1",
+        "8ca51542feb46f946b787f5609c6a896ee5cd7954655c9ba7397a709390e74c8",
+    ),
+    (
+        "bal-phase",
+        "1",
+        "8232b5d90eea73bef1d92f09919ce23ec8dae6dec60bd76b75dca6c65c09ba3b",
+    ),
+    (
+        "bal-story",
+        "1",
+        "7688ddacbf34f6c93a4eb82b8eb60d69089eb2fee0ab5176097a4dc560877693",
+    ),
+    (
+        "bal-backlog",
+        "1",
+        "4dceb6272fd0d130c5d74c904919128e51a06eab7330fb7bc02b932aa3322351",
+    ),
+    (
+        "bal-help",
+        "2",
+        "ab97190b91b54fb647853049e3dbf54e82d736a31ba36996a83bc5d981471733",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {
@@ -175,7 +215,6 @@ fn the_help_text_asks_for_its_identity_on_apply_calls_only() {
     };
     let body = text.body;
     assert!(body.contains("`bal-help`") && body.contains("`instruction`"));
-    assert!(body.contains("on every `baley_apply` call"));
     assert!(body.contains("Never send it on a `baley_query` call"));
 }
 
@@ -253,4 +292,147 @@ fn an_unavailable_or_unknown_identity_is_refused_and_given_no_evidence() {
         unavailable("bal-plan", 4)
     );
     assert_eq!(evidence("no-such-instruction").unwrap_err(), unknown());
+}
+
+fn served_text(identity: &str) -> &'static str {
+    let Lookup::Served { text, .. } = lookup(identity) else {
+        panic!("{identity} is served");
+    };
+    text.body
+}
+
+#[test]
+fn a_start_planner_text_missing_its_order_binding_or_submission_shape_is_caught() {
+    let body = served_text("bal-start-planner");
+    for needle in [
+        "inputs",
+        "brief",
+        "scope-submit",
+        "\"work_order\"",
+        "request_id",
+        "bal-start-survey",
+        "baley scope approve",
+        "description",
+        "what",
+        "core_value",
+        "constraints",
+        "stories",
+        "label",
+        "sentence",
+        "status",
+        "active",
+        "deferred",
+        "excluded",
+        "roadmap",
+        "name",
+        "goal",
+        "detail",
+        "depends_on",
+    ] {
+        assert!(
+            body.contains(needle),
+            "the start planner text lacks {needle}"
+        );
+    }
+    assert!(!body.contains("scope-approve"));
+}
+
+#[test]
+fn a_survey_text_that_writes_or_submits_is_caught() {
+    let body = served_text("bal-start-survey");
+    assert!(body.contains("host's own file, search and shell tools"));
+    assert!(body.contains("Write no file") && body.contains("make no commit"));
+    assert!(!body.contains("scope-submit"));
+}
+
+#[test]
+fn a_start_instruction_given_a_help_row_or_a_skill_stub_is_caught() {
+    let doors = crate::host_artifacts::stubs::front_doors();
+    for identity in ["bal-start-planner", "bal-start-survey"] {
+        let Lookup::Served { entry, text } = lookup(identity) else {
+            panic!("{identity} is served");
+        };
+        assert_eq!(entry.build, 4, "{identity}");
+        assert_eq!(text.version, "1", "{identity}");
+        assert!(
+            !crate::help::table::COMMANDS
+                .iter()
+                .any(|command| command.name == identity),
+            "{identity} is a help row"
+        );
+        assert!(
+            !doors.iter().any(|(name, _)| *name == identity),
+            "{identity} is a front door"
+        );
+    }
+}
+
+#[test]
+fn a_project_front_door_missing_an_operation_it_drives_or_the_terminal_approval_is_caught() {
+    let body = served_text("bal-project");
+    for needle in [
+        "project-start",
+        "brief",
+        r#""instruction":"bal-project""#,
+        "settings",
+        "start-order-pending",
+        "launch",
+        "prompt",
+        "work-order-fail",
+        "work-order-retry",
+        "project-describe",
+        "baley scope approve",
+    ] {
+        assert!(
+            body.contains(needle),
+            "the project front door lacks {needle}"
+        );
+    }
+    assert!(!body.contains("scope-approve"));
+}
+
+/// The four scope change front doors, each with the operations it drives,
+/// written out from design 0004 rather than read from the texts under test.
+const CHANGE_DOORS: &[(&str, &[&str])] = &[
+    ("bal-scope", &[r#""kind":"draft""#]),
+    (
+        "bal-phase",
+        &[
+            "phase-declare",
+            "phase-edit",
+            "phase-reorder",
+            "phase-withdraw",
+        ],
+    ),
+    (
+        "bal-story",
+        &[
+            "story-declare",
+            "story-edit",
+            "story-reassign",
+            "story-drop",
+        ],
+    ),
+    ("bal-backlog", &["backlog-reorder"]),
+];
+
+#[test]
+fn a_change_front_door_missing_an_operation_it_drives_or_the_terminal_approval_is_caught() {
+    for (identity, operations) in CHANGE_DOORS {
+        let body = served_text(identity);
+        for needle in operations.iter().chain(&["baley scope approve"]) {
+            assert!(body.contains(needle), "{identity} lacks {needle}");
+        }
+        assert!(!body.contains("scope-approve"), "{identity}");
+    }
+}
+
+#[test]
+fn a_change_front_door_asking_for_an_argument_its_operations_refuse_is_caught() {
+    for (identity, _) in CHANGE_DOORS {
+        assert!(
+            !served_text(identity).contains(r#""instruction":"#),
+            "{identity} asks for instruction"
+        );
+    }
 }

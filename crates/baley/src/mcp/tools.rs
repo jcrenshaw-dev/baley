@@ -349,20 +349,24 @@ mod tests {
         let schema = input_schema(Tool::Query);
         let identity = alternative_of_type(&schema["properties"]["identity"], "object");
         let objects = leaves(&identity);
-        assert_eq!(objects.len(), 4, "{identity}");
+        assert_eq!(objects.len(), 5, "{identity}");
         let object = &objects[0];
         assert_eq!(object["properties"]["kind"]["const"], "capture");
         assert_eq!(object["properties"]["id"]["type"], "string");
         assert_eq!(object["required"], json!(["kind", "id"]));
         assert_eq!(object["additionalProperties"], false);
-        // The scope kinds are objects with their own typed fields too, so no
-        // identity leaves room for loose text.
-        for (object, kind) in objects[1..].iter().zip(["draft", "roadmap", "story"]) {
+        // The scope and work-order kinds are objects with their own typed
+        // fields too, so no identity leaves room for loose text.
+        for (object, kind) in objects[1..]
+            .iter()
+            .zip(["draft", "roadmap", "story", "work_order"])
+        {
             assert_eq!(object["type"], "object", "{object}");
             assert_eq!(object["properties"]["kind"]["const"], kind, "{object}");
             assert_eq!(object["additionalProperties"], false, "{object}");
         }
         assert_eq!(objects[3]["properties"]["id"]["type"], "integer");
+        assert_eq!(objects[4]["properties"]["id"]["type"], "string");
         let parts = alternatives(&schema["properties"]["part"]);
         assert!(!parts.is_empty(), "no part in {schema}");
         for part in parts {
@@ -376,8 +380,13 @@ mod tests {
     fn a_served_operations_argument_left_out_of_the_tool_schema_is_caught() {
         // Design 0012: help takes name, schema takes tool and for, instruction
         // and document take identity, all four take part, and capture takes
-        // request_id, kind, text, phase and instruction, and scope-submit and
-        // each change operation take request_id and submission.
+        // request_id, kind, text, phase and instruction, scope-submit takes
+        // request_id, work_order and submission, each change operation takes
+        // request_id and submission,
+        // project-start takes request_id, brief and instruction,
+        // work-order-fail takes request_id, work_order, reason and instruction,
+        // work-order-retry takes request_id, work_order and instruction,
+        // and route takes role or work_order.
         let names = |tool| {
             let schema = input_schema(tool);
             let mut names: Vec<String> = schema["properties"]
@@ -391,18 +400,30 @@ mod tests {
         };
         assert_eq!(
             names(Tool::Query),
-            ["for", "identity", "name", "operation", "part", "tool"]
+            [
+                "for",
+                "identity",
+                "name",
+                "operation",
+                "part",
+                "role",
+                "tool",
+                "work_order"
+            ]
         );
         assert_eq!(
             names(Tool::Apply),
             [
+                "brief",
                 "instruction",
                 "kind",
                 "operation",
                 "phase",
+                "reason",
                 "request_id",
                 "submission",
-                "text"
+                "text",
+                "work_order"
             ]
         );
     }
@@ -448,7 +469,13 @@ mod tests {
             .iter()
             .map(description)
             .collect();
-        for taker in ["capture", "scope-submit"] {
+        for taker in [
+            "capture",
+            "scope-submit",
+            "project-start",
+            "work-order-fail",
+            "work-order-retry",
+        ] {
             let sentence = format!("Taken by {taker} (required).");
             assert!(
                 request_ids.iter().any(|d| d.ends_with(&sentence)),

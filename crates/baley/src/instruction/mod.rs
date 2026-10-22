@@ -16,6 +16,8 @@ use crate::help::front_door;
 
 pub mod capture;
 pub mod read_contract;
+pub mod scope;
+pub mod start;
 
 /// The served text of one instruction, pinned in source.
 #[derive(Debug, PartialEq, Eq)]
@@ -63,6 +65,55 @@ pub enum Lookup {
 /// Every instruction, in the help table's order. A build adds its texts here,
 /// beside the operations it ships, by giving the entry a `text`.
 pub static ENTRIES: &[Entry] = &[
+    // Build 4 serves the project front door beside `project-start`, the
+    // work-order operations and `project-describe`.
+    Entry {
+        identity: scope::PROJECT_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: scope::PROJECT_VERSION,
+            hash: scope::PROJECT_HASH,
+            body: scope::PROJECT_TEXT,
+        }),
+    },
+    // Build 4 serves the four scope change front doors beside `document`'s
+    // scope reads and the ten change operations.
+    Entry {
+        identity: scope::SCOPE_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: scope::SCOPE_VERSION,
+            hash: scope::SCOPE_HASH,
+            body: scope::SCOPE_TEXT,
+        }),
+    },
+    Entry {
+        identity: scope::PHASE_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: scope::PHASE_VERSION,
+            hash: scope::PHASE_HASH,
+            body: scope::PHASE_TEXT,
+        }),
+    },
+    Entry {
+        identity: scope::STORY_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: scope::STORY_VERSION,
+            hash: scope::STORY_HASH,
+            body: scope::STORY_TEXT,
+        }),
+    },
+    Entry {
+        identity: scope::BACKLOG_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: scope::BACKLOG_VERSION,
+            hash: scope::BACKLOG_HASH,
+            body: scope::BACKLOG_TEXT,
+        }),
+    },
     // Build 4 adds this text beside its operations.
     Entry {
         identity: "bal-context",
@@ -205,6 +256,28 @@ pub static ENTRIES: &[Entry] = &[
             version: read_contract::VERSION,
             hash: read_contract::HASH,
             body: read_contract::TEXT,
+        }),
+    },
+    // Build 4 serves the start planner's text inside the start order, never as a
+    // help row, so no session reaches it outside an order.
+    Entry {
+        identity: start::PLANNER_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: start::PLANNER_VERSION,
+            hash: start::PLANNER_HASH,
+            body: start::PLANNER_TEXT,
+        }),
+    },
+    // Build 4 serves the start survey beside the planner's text, listed in a
+    // start order only when the checkout already holds code.
+    Entry {
+        identity: start::SURVEY_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: start::SURVEY_VERSION,
+            hash: start::SURVEY_HASH,
+            body: start::SURVEY_TEXT,
         }),
     },
 ];

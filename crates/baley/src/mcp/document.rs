@@ -4,15 +4,21 @@
 //! operations, design 0014 section 6). A draft by its digest, the accepted
 //! roadmap and an accepted story come from `scope::read` (design 0004
 //! section 5), the same reads the owner's commands print; a draft whose
-//! body this project purged answers a tombstone the same way.
+//! body this project purged answers a tombstone the same way. A work order
+//! by its id comes from the `work_order` view with its inputs, its accepted
+//! result and a fixed sentence sending the worker to the instructions it
+//! lists; an input this project purged answers its tombstone and is never
+//! rebuilt (design 0012, D-16).
 
 use std::io::Read;
 use std::path::Path;
 
 use baley_core::capture::{CAPTURE_ID_INDEX, CAPTURE_VIEW, NO_SUCH_PHASE};
 use baley_core::scope::UNKNOWN_DRAFT;
+use baley_core::work_order::NO_SUCH_WORK_ORDER;
 use baley_store::{
-    Hash, IndexQuery, KeyValue, PageRequest, PayloadBody, PayloadStatus, Payloads, ProjectId, Views,
+    Hash, IndexQuery, KeyValue, Ledger, PageRequest, PayloadBody, PayloadRef, PayloadStatus,
+    Payloads, ProjectId, Views,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -26,6 +32,7 @@ use crate::mcp::prepare::{LEDGER_UNAVAILABLE, prepare};
 use crate::scope::read::{
     self as scope, Draft, NO_SUCH_STORY, PreviewError, ReadError, Roadmap, Story,
 };
+use crate::work_order::read as work_order;
 
 /// The code for a capture id the project's `capture` view does not hold.
 pub const NO_SUCH_CAPTURE: &str = "no-such-capture";
@@ -67,6 +74,12 @@ pub enum Identity {
     Story {
         /// The story id Baley assigned when the scope was approved.
         id: u32,
+    },
+    /// A work order with its inputs, as its worker reads it.
+    #[serde(rename = "work_order")]
+    WorkOrder {
+        /// The work order id the session gave the worker.
+        id: String,
     },
 }
 
@@ -230,8 +243,9 @@ const SCOPE_NOT_READ_BUSY: &str = "the ledger is busy, so the scope was not read
 /// Reads the record `shape` names from `project` in `store`. A capture is
 /// read from its view document by id, then its body only when the view says
 /// this project still holds it; a draft, the roadmap and a story through
-/// `scope::read`. Nothing is appended.
-pub fn read<S: Views + Payloads + ?Sized>(
+/// `scope::read`; a work order through `work_order::read`. Nothing is
+/// appended.
+pub fn read<S: Ledger + Views + Payloads + ?Sized>(
     store: &S,
     project: &ProjectId,
     shape: &DocumentShape,
@@ -257,6 +271,7 @@ pub fn read<S: Views + Payloads + ?Sized>(
         Identity::Story { id } => {
             story_answer(identity, scope::story(store, project, *id), shape.part)
         }
+        Identity::WorkOrder { id } => work_order_answer(store, project, identity, id, shape.part),
     }
 }
 
@@ -342,6 +357,144 @@ fn read_failed(error: ReadError) -> Value {
         ),
         ReadError::Unreadable(reason) => failed(LEDGER_UNAVAILABLE, reason, PLACE_LEDGER),
         ReadError::Store(error) => store_failed(&error, SCOPE_NOT_READ_BUSY),
+    }
+}
+
+/// The sentence every work-order answer carries, sending the worker from its
+/// order to the instructions it lists, which the order names only by
+/// identity, version and hash (HST-R11).
+pub const FOLLOW: &str = "Read each instruction this order lists, in order, by calling `baley_query` with `{\"operation\":\"instruction\",\"identity\":\"<its identity>\"}`, and follow them.";
+
+/// A busy ledger's reason when a work order was not read.
+const ORDER_NOT_READ_BUSY: &str =
+    "the ledger is busy, so the work order was not read. Try it again";
+
+/// The answer for work order `id` in `project`: the order as the view holds
+/// it, its accepted result, [`FOLLOW`] and each input, in parts when large.
+/// An order the project does not hold is `no-such-work-order`, echoing none
+/// of the id.
+fn work_order_answer<S: Ledger + Views + Payloads + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    identity: &Identity,
+    id: &str,
+    part: Option<usize>,
+) -> Value {
+    let order = match work_order::order(store, project, id) {
+        Ok(Some(order)) => order,
+        Ok(None) => {
+            return Refusal::new(
+                NO_SUCH_WORK_ORDER,
+                "this project holds no work order with that id",
+            )
+            .slot("identity")
+            .value();
+        }
+        Err(error) => return store_failed(&error, ORDER_NOT_READ_BUSY),
+    };
+    let read = work_order::accepted(store, project, &order).and_then(|accepted| {
+        work_order::releases(store, project).map(|releases| (accepted, releases))
+    });
+    let (accepted, releases) = match read {
+        Ok(read) => read,
+        Err(error) => return store_failed(&error, ORDER_NOT_READ_BUSY),
+    };
+    let inputs = match order_inputs(store, project, &order, &releases) {
+        Ok(inputs) => inputs,
+        Err(answer) => return answer,
+    };
+    in_parts(
+        json!({"status": "ok", "identity": identity, "order": order, "accepted": accepted,
+            "follow": FOLLOW, "inputs": inputs}),
+        part,
+    )
+}
+
+/// Each input of `order` with its name, hash and size, and its text, the
+/// tombstone of a purge `project` released it in, or the store's status when
+/// the body is gone otherwise. A purge reason only ever comes from this
+/// project's `releases`. Nothing is rebuilt from current input.
+fn order_inputs<S: Ledger + Payloads + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    order: &Value,
+    releases: &work_order::Releases,
+) -> Result<Vec<Value>, Value> {
+    let unreadable = || {
+        failed(
+            LEDGER_UNAVAILABLE,
+            "the work order is recorded, but its view document cannot be read",
+            PLACE_LEDGER,
+        )
+    };
+    let seq = order
+        .get("seq")
+        .and_then(Value::as_u64)
+        .ok_or_else(unreadable)?;
+    let listed = order
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or_else(unreadable)?;
+    let mut inputs = Vec::with_capacity(listed.len());
+    for input in listed {
+        let name = input.get("name").and_then(Value::as_str);
+        let body = input.get("body").and_then(PayloadRef::from_value);
+        let (Some(name), Some(body)) = (name, body) else {
+            return Err(unreadable());
+        };
+        let mut answer = json!({"name": name, "hash": body.hash.to_hex(), "bytes": body.bytes});
+        // This project's own release decides, since another project may
+        // still hold the same bytes.
+        if let Some(release) = releases.find(seq, &body.hash) {
+            answer["tombstone"] = json!({"state": "purged", "reason": release.reason});
+            inputs.push(answer);
+            continue;
+        }
+        match store.open(&body.hash) {
+            Err(error) => return Err(store_failed(&error, ORDER_NOT_READ_BUSY)),
+            Ok(PayloadBody::Gone(PayloadStatus::Purged { .. })) => {
+                // The store's reason is the last purge of the shared bytes,
+                // perhaps another project's, so this project's releases are
+                // read again for a purge of its own since the first read.
+                let current = work_order::releases(store, project)
+                    .map_err(|error| store_failed(&error, ORDER_NOT_READ_BUSY))?;
+                match current.find(seq, &body.hash) {
+                    Some(release) => {
+                        answer["tombstone"] = json!({"state": "purged", "reason": release.reason});
+                    }
+                    None => answer["unavailable"] = json!({"state": "purged"}),
+                }
+            }
+            Ok(PayloadBody::Gone(status)) => answer["unavailable"] = gone_status(&status),
+            Ok(PayloadBody::Present(mut reader)) => {
+                let mut bytes = Vec::new();
+                if let Err(error) = reader.read_to_end(&mut bytes) {
+                    return Err(failed(LEDGER_UNAVAILABLE, error.to_string(), PLACE_LEDGER));
+                }
+                match String::from_utf8(bytes) {
+                    Ok(text) => answer["text"] = json!(text),
+                    Err(_) => {
+                        return Err(failed(
+                            LEDGER_UNAVAILABLE,
+                            "the work order is recorded, but an input's body is not UTF-8 text",
+                            PLACE_LEDGER,
+                        ));
+                    }
+                }
+            }
+        }
+        inputs.push(answer);
+    }
+    Ok(inputs)
+}
+
+/// The store's status for a body that is not held whole, without the store's
+/// purge reason, which may be another project's.
+fn gone_status(status: &PayloadStatus) -> Value {
+    match status {
+        PayloadStatus::Present { .. } => json!({"state": "present"}),
+        PayloadStatus::Reduced { .. } => json!({"state": "reduced"}),
+        PayloadStatus::Purged { .. } => json!({"state": "purged"}),
     }
 }
 
@@ -1077,5 +1230,133 @@ mod tests {
             value["tombstone"],
             json!({"state": "purged", "reason": "pasted a secret"})
         );
+    }
+
+    mod work_orders {
+        //! Orders are issued through project start's recording over the real
+        //! store, and briefs purged as the owner purges them.
+
+        use baley_store::{Hash, ProjectId};
+        use serde_json::{Value, json};
+
+        use super::super::*;
+        use crate::mcp::work_order::tests::{B1, I0, issue_start};
+        use crate::scope::fixtures::*;
+
+        const I1: &str = "6e2d3c4b-5f60-4b7c-9d8e-0f1a2b3c4d5e";
+        const B1_SHA256: &str = "04fe1dc2bdd0a95df1e6d96c47379024f73df0d9584025e1431b6b5c3162ac9b";
+        const FOLLOW: &str = "Read each instruction this order lists, in order, by calling `baley_query` with `{\"operation\":\"instruction\",\"identity\":\"<its identity>\"}`, and follow them.";
+
+        fn shape(identity: Value) -> DocumentShape {
+            judge_arguments(&json!({"operation": "document", "identity": identity}))
+                .expect("a work-order identity is judged")
+        }
+
+        fn read_order(
+            store: &baley_store_sqlite::SqliteStore,
+            project: &ProjectId,
+            id: &str,
+        ) -> Value {
+            read(
+                store,
+                project,
+                &shape(json!({"kind": "work_order", "id": id})),
+            )
+        }
+
+        #[test]
+        fn a_work_order_read_without_its_brief_or_rebuilt_after_a_purge_is_caught() {
+            let (_dir, store) = two_projects();
+            issue_start(&store, &project(), I0, R1, T1);
+            issue_start(&store, &project_b(), I1, R1, T1);
+
+            let first = read_order(&store, &project(), I0);
+            assert_eq!(first["status"], "ok", "{first}");
+            assert_eq!(first["identity"], json!({"kind": "work_order", "id": I0}));
+            assert_eq!(first["order"]["id"], I0, "{first}");
+            assert_eq!(first["order"]["state"], "pending", "{first}");
+            assert_eq!(first["accepted"], Value::Null, "{first}");
+            assert_eq!(first["follow"], FOLLOW, "{first}");
+            assert_eq!(
+                first["inputs"],
+                json!([{"name": "brief", "hash": B1_SHA256, "bytes": 29, "text": B1}])
+            );
+
+            purge_in(
+                &store,
+                &project(),
+                Hash::from_hex(B1_SHA256).unwrap(),
+                "owner purge",
+            );
+            let after = read_order(&store, &project(), I0);
+            assert_eq!(after["status"], "ok", "{after}");
+            assert_eq!(
+                after["inputs"],
+                json!([{"name": "brief", "hash": B1_SHA256, "bytes": 29,
+                    "tombstone": {"state": "purged", "reason": "owner purge"}}])
+            );
+            let other = read_order(&store, &project_b(), I1);
+            assert_eq!(other["inputs"][0]["text"], B1, "{other}");
+        }
+
+        #[test]
+        fn a_work_order_read_answering_another_projects_purge_reason_is_caught() {
+            const OTHER: &str = "the other project's purge";
+            let (_dir, store) = two_projects();
+            issue_start(&store, &project(), I0, R1, T1);
+            issue_start(&store, &project_b(), I1, R1, T1);
+            let order = work_order::order(&store, &project(), I0).unwrap().unwrap();
+            // Read before either purge, as a read racing them would.
+            let before = work_order::releases(&store, &project()).unwrap();
+
+            let b1 = Hash::from_hex(B1_SHA256).unwrap();
+            purge_in(&store, &project(), b1, "owner purge");
+            purge_in(&store, &project_b(), b1, OTHER);
+            let gone = matches!(
+                store.open(&b1),
+                Ok(PayloadBody::Gone(PayloadStatus::Purged { ref reason })) if reason == OTHER
+            );
+            assert!(gone, "the store answers the other project's reason");
+
+            let inputs = order_inputs(&store, &project(), &order, &before).unwrap();
+            assert_eq!(
+                Value::Array(inputs),
+                json!([{"name": "brief", "hash": B1_SHA256, "bytes": 29,
+                    "tombstone": {"state": "purged", "reason": "owner purge"}}])
+            );
+        }
+
+        #[test]
+        fn an_unknown_work_order_echoed_or_read_across_projects_is_caught() {
+            let (_dir, store) = two_projects();
+            issue_start(&store, &project(), I0, R1, T1);
+            for (project, id) in [(project(), I1), (project_b(), I0)] {
+                let refusal = read_order(&store, &project, id);
+                assert_eq!(refusal["status"], "refused", "{refusal}");
+                assert_eq!(refusal["code"], "no-such-work-order", "{refusal}");
+                assert_eq!(refusal["slot"], "identity", "{refusal}");
+                let text = refusal.to_string();
+                for held in [I0, I1] {
+                    assert!(!text.contains(held), "{text}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_work_order_identity_in_another_form_accepted_is_caught() {
+            let judged = shape(json!({"kind": "work_order", "id": I0}));
+            assert_eq!(
+                serde_json::to_value(&judged.identity).unwrap(),
+                json!({"kind": "work_order", "id": I0})
+            );
+            for identity in [
+                json!({"kind": "work_order", "id": I0, "digest": "ab".repeat(32)}),
+                json!({"kind": "work_order"}),
+            ] {
+                let arguments = json!({"operation": "document", "identity": identity});
+                let refusal = judge_arguments(&arguments).expect_err("refused");
+                assert_eq!(refusal["code"], "invalid-arguments", "{refusal}");
+            }
+        }
     }
 }

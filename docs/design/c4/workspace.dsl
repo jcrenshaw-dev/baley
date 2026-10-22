@@ -8,7 +8,7 @@ workspace "Baley" "The C4 model behind Baley's design documents. Every structure
                 hostInterface = component "Host interface" "MCP server (stdio), command line and guard hook: the only ways in. The guard hook records its answers in the per-user ledger."
                 hardin = component "Hardin" "Derives the state of the work from the record, answers what may happen next and refuses the rest."
                 domain = component "Domain areas" "The rules of each process area: planning, execution, verification, review, risk, landing and the rest."
-                composer = component "Work order composer" "Builds every dispatch: role, model and effort from policy, instructions from the binary, inputs from the record."
+                composer = component "Work order composer" "Builds every work order: the route from policy and the model catalog, instructions by identity from the binary, inputs as references into the record. In this build it issues the start planner's order and its retries."
                 policy = component "Policy" "Reads the global and project settings, resolves the values in effect and records which applied."
                 catalog = component "Model catalog" "The models each host and provider offers, seeded from the binary, changed by the owner and refreshed from imported lists."
                 ports = component "Ports and adapters" "Storage, git and test runner, forge and host adapters. The core sees only these ports."
@@ -34,13 +34,14 @@ workspace "Baley" "The C4 model behind Baley's design documents. Every structure
         host -> binary "Asks before each tool call runs" "Pre-tool hook, one process per tool call"
         # The only relation from a component to the host, so the context and
         # container views show it as an implied edge with this text.
-        hostInterface -> host "Writes the wiring with baley install: MCP registration, pre-tool hook, sandbox and deny settings, skill stubs. Adds the chosen providers' API hosts to the sandbox allow list with baley config interview" "claude mcp add-json, files under the Claude folder"
+        hostInterface -> host "Writes the wiring with baley install: MCP registration, pre-tool hook, sandbox and deny settings, skill and agent stubs. Adds the chosen providers' API hosts to the sandbox allow list with baley config interview" "claude mcp add-json, files under the Claude folder"
         host -> repo "Workers edit source and commit"
         host -> reviewers "Review and model-list API calls with the owner's environment keys"
         hostInterface -> hardin "Asks what may happen next"
         hardin -> domain "Applies the area's rules"
         domain -> composer "Requests work orders"
         composer -> policy "Resolves role, model and effort"
+        composer -> catalog "Reads the host's accepted model names"
         # Explicit, so the container view shows the write beside the reads; the
         # implied edge would carry only the first component relation.
         binary -> settings "Reads, and writes a file whole for config set and for the interview's reviewer list"

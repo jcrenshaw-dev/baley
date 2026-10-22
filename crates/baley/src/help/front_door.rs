@@ -6,11 +6,11 @@
 pub const IDENTITY: &str = "bal-help";
 
 /// Pinned by hand: raise it by one whenever [`TEXT`] changes.
-pub const VERSION: &str = "1";
+pub const VERSION: &str = "2";
 
 /// Lowercase hex SHA-256 of [`TEXT`]'s exact bytes, computed outside the code
 /// so a changed text without a new pin fails the registry's pin test.
-pub const HASH: &str = "6a546a62197f3070cdfa4725732e5f8e3c00d21addf3b77696459c0dcb469cad";
+pub const HASH: &str = "ab97190b91b54fb647853049e3dbf54e82d736a31ba36996a83bc5d981471733";
 
 /// What a session is told when it follows the help command.
 pub const TEXT: &str = r#"Baley help lists the commands Baley offers and says what each one does.
@@ -23,5 +23,5 @@ When an answer carries a `next` that is not null, call again with the same argum
 
 Read nothing else, search nothing and write nothing. Help reads only what Baley has compiled.
 
-Send `bal-help`, the identity of this instruction, as `instruction` on every `baley_apply` call you make while following it. Never send it on a `baley_query` call.
+Send `bal-help`, the identity of this instruction, as `instruction` when you call the `baley_apply` operation `capture`, `project-start`, `work-order-fail` or `work-order-retry` while following it. Send it on no other `baley_apply` operation, since their shapes refuse it. Never send it on a `baley_query` call.
 "#;

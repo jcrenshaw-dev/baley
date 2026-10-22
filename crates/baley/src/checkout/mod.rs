@@ -1,7 +1,8 @@
 //! Checkout admission and the facts it judges (design 0001 Project identity
 //! and policy, EVD-R17, ADR 0004). The module gathers a checkout's root
 //! commit and remote URL through git and runs checkout admission against the
-//! project's `checkout` view.
+//! project's `checkout` view. It also lists the files HEAD tracks, for the
+//! existing-code judgement project start makes.
 
 mod admit;
 mod gather;
@@ -15,7 +16,7 @@ use baley_core::policy::EffectivePolicy;
 use baley_store::{Caller, Ledger, ProjectId, RequestId, StoreError, Views};
 
 pub use admit::{ADMIT_COMMAND, AdmitError, admit};
-pub use gather::{Facts, gather, root_commit};
+pub use gather::{Facts, Listing, gather, holds_existing_code, root_commit, tracked_files};
 pub use strip::{redact_git_text, strip_user_information};
 
 use crate::process::Process;
@@ -77,7 +78,8 @@ pub(crate) struct Site<'a> {
 /// Gathers the facts of `site` and admits it under `project`, for the callers
 /// that do both at once: the ledger commands, `purge`, `config set` and the
 /// session server's write preparation. It prints nothing, and it runs before
-/// the policy step.
+/// the policy step. It returns the facts it admitted, so the server's project
+/// start can classify the checkout from the root commit without a second read.
 ///
 /// `caller` goes to checkout admission unchanged. For the server, `site.policy`
 /// is the policy that names no host, so the remote is the command line's, and
@@ -90,14 +92,15 @@ pub(crate) fn gather_and_admit(
     request_id: RequestId,
     at: &str,
     caller: Option<Caller>,
-) -> Result<(), EntryError> {
+) -> Result<Facts, EntryError> {
     let facts = gather(site.root, site.policy, process).map_err(EntryError::Gather)?;
     let checkout = Checkout {
         path: site.path.into(),
-        root_commit: facts.root_commit,
-        remote_url: facts.remote_url,
+        root_commit: facts.root_commit.clone(),
+        remote_url: facts.remote_url.clone(),
     };
-    admit(store, project, &checkout, request_id, at, caller).map_err(EntryError::Admit)
+    admit(store, project, &checkout, request_id, at, caller).map_err(EntryError::Admit)?;
+    Ok(facts)
 }
 
 #[cfg(test)]

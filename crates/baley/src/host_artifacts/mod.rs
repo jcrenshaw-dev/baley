@@ -6,6 +6,9 @@
 //! The module holds:
 //! - `stubs`: one skill stub per served front door and the manifest that
 //!   lists them with host, identity, bytes and digest;
+//! - `agents`: one agent stub per role and rung, each inheriting the model
+//!   and naming the session's `baley` entry, as manifest entries of the
+//!   agent kind;
 //! - `executable`: the supplied absolute executable the hook and the
 //!   registration run, judged once;
 //! - `registration`: the `mcpServers` entry for `baley serve`;
@@ -33,10 +36,9 @@
 //! is written or removed are decided there, with this module's content and
 //! installed paths as the input.
 //!
-//! Build 4 adds the agent and rung definition renderer here. Its definitions
-//! reference the session's `baley` MCP entry by the key `registration`
-//! exports and never define an inline server, so every subagent shares the
-//! session's connection (ADR 0034).
+//! The agent stubs reference the session's `baley` MCP entry by the key
+//! `registration` exports and never define an inline server, so every
+//! subagent shares the session's connection (ADR 0034).
 //!
 //! Host facts the shapes depend on, confirmed on 2026-10-06 against Claude
 //! Code 2.1.292's bundled configuration schema and hooks reference:
@@ -53,6 +55,7 @@
 //!   `powershell`), so an executable path in it is quoted for POSIX `sh`. A
 //!   hook `matcher` is a regular expression over tool names.
 
+pub mod agents;
 pub mod command;
 pub mod compose;
 pub mod coverage;

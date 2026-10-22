@@ -15,6 +15,7 @@ use crate::folders::Folders;
 use crate::host_artifacts::compose::same_server;
 use crate::host_artifacts::installed::stub_path;
 use crate::host_artifacts::placement::{Artifact, PlacementMap};
+use crate::host_artifacts::stubs::Kind;
 use crate::host_doctor::placed::{ExecutableGap, Fault, FileState};
 use crate::host_doctor::prerequisites::Judged;
 use crate::ledger::display::Render;
@@ -116,9 +117,9 @@ pub struct Retired {
 /// The stubs the latest record lists that this binary does not place.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RetiredStubs {
-    /// Recorded at exactly the path a stub of its identity takes under the
-    /// current Claude folder, which is no placed file's path: judged, and
-    /// removed when it is still Baley's.
+    /// Recorded at exactly the path a skill or agent stub of its identity
+    /// takes under the current Claude folder, which is no placed file's
+    /// path: judged, and removed when it is still Baley's.
     pub own: Vec<Retired>,
     /// Recorded anywhere else. Never read or touched, so a record cannot
     /// point a removal outside a stub's own file, and kept in the record.
@@ -126,9 +127,10 @@ pub(crate) struct RetiredStubs {
 }
 
 /// Sorts the stubs the latest record lists that this binary does not place
-/// by whether they sit at their own stub path under `claude_folder`. The
-/// identity must be one path name spelled exactly, so `bal-capture/` cannot
-/// stand for `bal-capture`.
+/// by whether they sit at their own stub path under `claude_folder`, the
+/// skill path or the agent path for their identity (D-07). The identity must
+/// be one path name spelled exactly, so `bal-capture/` cannot stand for
+/// `bal-capture`.
 pub(crate) fn retired(
     latest: Option<&Value>,
     placements: &PlacementMap,
@@ -165,10 +167,13 @@ pub(crate) fn retired(
             (parts.next(), parts.next()),
             (Some(Component::Normal(name)), None) if name == OsStr::new(&retired.identity)
         );
-        // A second guard: whatever the identity says, a placed file is
-        // never a retired one.
+        // The record holds no kind, so either kind's path for the identity
+        // is its own. A second guard: whatever the identity says, a placed
+        // file is never a retired one.
         let own = plain
-            && retired.path == stub_path(claude_folder, &retired.identity)
+            && [Kind::Skill, Kind::Agent]
+                .into_iter()
+                .any(|kind| retired.path == stub_path(claude_folder, kind, &retired.identity))
             && placed.iter().all(|file| file.path != retired.path);
         if own {
             found.own.push(retired);
@@ -696,6 +701,15 @@ mod tests {
         }
     }
 
+    /// The shipped stub for `identity`, found by name so a new front door
+    /// does not move it.
+    fn shipped<'a>(manifest: &'a [stubs::Entry], identity: &str) -> &'a stubs::Entry {
+        manifest
+            .iter()
+            .find(|entry| entry.identity == identity)
+            .expect("a shipped stub")
+    }
+
     /// The settings decision over a document the owner's file holds.
     fn decision(document: &Value, latest: Option<&Value>) -> settings::Decision {
         let installed = installed();
@@ -723,12 +737,12 @@ mod tests {
         let capture = event::Stub {
             identity: "bal-capture".into(),
             path: "/home/o/.claude/skills/bal-capture/SKILL.md".into(),
-            sha256: manifest[0].digest.clone(),
+            sha256: shipped(&manifest, "bal-capture").digest.clone(),
         };
         let help = event::Stub {
             identity: "bal-help".into(),
             path: "/home/o/.claude/skills/bal-help/SKILL.md".into(),
-            sha256: manifest[1].digest.clone(),
+            sha256: shipped(&manifest, "bal-help").digest.clone(),
         };
         let old_help = event::Stub {
             sha256: "cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4".into(),
@@ -800,6 +814,26 @@ mod tests {
                 PathBuf::from("/home/o/.claude.json"),
                 seen(FileState::Absent),
             ),
+            (
+                PathBuf::from("/home/o/.claude/skills/bal-project/SKILL.md"),
+                seen(FileState::Absent),
+            ),
+            (
+                PathBuf::from("/home/o/.claude/skills/bal-scope/SKILL.md"),
+                seen(FileState::Absent),
+            ),
+            (
+                PathBuf::from("/home/o/.claude/skills/bal-phase/SKILL.md"),
+                seen(FileState::Absent),
+            ),
+            (
+                PathBuf::from("/home/o/.claude/skills/bal-story/SKILL.md"),
+                seen(FileState::Absent),
+            ),
+            (
+                PathBuf::from("/home/o/.claude/skills/bal-backlog/SKILL.md"),
+                seen(FileState::Absent),
+            ),
             (capture.clone(), seen(FileState::Absent)),
             (help.clone(), seen(FileState::Bytes(b"mine".to_vec()))),
         ]);
@@ -835,6 +869,11 @@ mod tests {
         let installed = installed();
         let outcomes = |stubs: ArtifactOutcome, settings: ArtifactOutcome| {
             vec![
+                (Artifact::Stub("bal-project".into()), stubs.clone()),
+                (Artifact::Stub("bal-scope".into()), stubs.clone()),
+                (Artifact::Stub("bal-phase".into()), stubs.clone()),
+                (Artifact::Stub("bal-story".into()), stubs.clone()),
+                (Artifact::Stub("bal-backlog".into()), stubs.clone()),
                 (Artifact::Stub("bal-capture".into()), stubs.clone()),
                 (Artifact::Stub("bal-help".into()), stubs),
                 (Artifact::Registration, ArtifactOutcome::NotWritten),
@@ -880,7 +919,7 @@ mod tests {
         assert_eq!(facts.hook, None);
         assert_eq!(facts.sandbox, None);
         assert!(!facts.complete);
-        assert_eq!(facts.stubs.len(), 2);
+        assert_eq!(facts.stubs.len(), 7);
 
         // A completed installation left unchanged stays in the record.
         let complete = complete_settings();
@@ -903,8 +942,8 @@ mod tests {
                 "/home/o/.config/crenshawdev/baley"
             ]
         );
-        assert_eq!(sandbox.deny_write.len(), 8);
-        assert_eq!(sandbox.permissions_deny.len(), 10);
+        assert_eq!(sandbox.deny_write.len(), 13);
+        assert_eq!(sandbox.permissions_deny.len(), 15);
 
         // The write failed over Baley's own older entries.
         let old_hook = json!({
@@ -1159,7 +1198,7 @@ mod tests {
 
         assert!(plan.writes.is_empty(), "{:?}", plan.writes);
         assert_eq!(plan.registration, Step::Unchanged);
-        assert_eq!(plan.outcomes.len(), 5);
+        assert_eq!(plan.outcomes.len(), 10);
         for (artifact, outcome) in &plan.outcomes {
             assert_eq!(*outcome, ArtifactOutcome::Unchanged, "{artifact}");
         }
@@ -1172,6 +1211,17 @@ mod tests {
         let settings = decision(&complete_settings(), None);
         let outcomes = |registration: ArtifactOutcome| {
             vec![
+                (
+                    Artifact::Stub("bal-project".into()),
+                    ArtifactOutcome::Written,
+                ),
+                (Artifact::Stub("bal-scope".into()), ArtifactOutcome::Written),
+                (Artifact::Stub("bal-phase".into()), ArtifactOutcome::Written),
+                (Artifact::Stub("bal-story".into()), ArtifactOutcome::Written),
+                (
+                    Artifact::Stub("bal-backlog".into()),
+                    ArtifactOutcome::Written,
+                ),
                 (
                     Artifact::Stub("bal-capture".into()),
                     ArtifactOutcome::Written,
@@ -1274,14 +1324,14 @@ mod tests {
             assert_eq!(document["sandbox"]["enabled"], true);
             assert_eq!(
                 document["permissions"]["deny"].as_array().unwrap().len(),
-                10
+                15
             );
             let stubs = plan
                 .writes
                 .iter()
                 .filter(|write| matches!(write.artifacts[0], Artifact::Stub(_)))
                 .count();
-            assert_eq!(stubs, 2);
+            assert_eq!(stubs, 7);
             assert_eq!(plan.writes[0].artifacts, [Artifact::Settings]);
             let wiring = plan.wiring.as_ref().expect("the wiring is held back");
             assert!(wiring.gap.contains(stable), "{}", wiring.gap);
@@ -1397,12 +1447,7 @@ mod tests {
     /// `stubs`, with `extra` observed beside the placed paths.
     fn plan_with(stubs: Value, extra: &[(&str, Observation)]) -> Plan {
         let installed = installed();
-        let mut observations = BTreeMap::from([
-            (PathBuf::from(SETTINGS), file(None, false)),
-            (PathBuf::from("/home/o/.claude.json"), file(None, false)),
-            (PathBuf::from(CAPTURE), file(None, false)),
-            (PathBuf::from(HELP), file(None, false)),
-        ]);
+        let mut observations = all_absent(&installed);
         for (path, seen) in extra {
             observations.insert(PathBuf::from(path), seen.clone());
         }
@@ -1461,8 +1506,7 @@ mod tests {
     #[test]
     fn a_retired_stub_recorded_outside_its_own_stub_path_planned_for_removal_is_caught() {
         let manifest = stubs::manifest(&stubs::front_doors()).unwrap();
-        let capture = &manifest[0];
-        assert_eq!(capture.identity, "bal-capture");
+        let capture = shipped(&manifest, "bal-capture");
         let old: &[u8] = b"old stub";
         for (case, identity, path, bytes) in [
             ("another file", "bal-old", "/home/o/notes.md", old),
@@ -1564,8 +1608,7 @@ mod tests {
         };
         // A retired entry naming a placed path whose bytes it would match.
         let manifest = stubs::manifest(&stubs::front_doors()).unwrap();
-        let capture = &manifest[0];
-        assert_eq!(capture.identity, "bal-capture");
+        let capture = shipped(&manifest, "bal-capture");
         let at_capture = Retired {
             path: CAPTURE.into(),
             sha256: capture.digest.clone(),
@@ -1591,6 +1634,26 @@ mod tests {
         let build = |outcome: RetiredOutcome| {
             let applied = Applied {
                 outcomes: vec![
+                    (
+                        Artifact::Stub("bal-project".into()),
+                        ArtifactOutcome::Unchanged,
+                    ),
+                    (
+                        Artifact::Stub("bal-scope".into()),
+                        ArtifactOutcome::Unchanged,
+                    ),
+                    (
+                        Artifact::Stub("bal-phase".into()),
+                        ArtifactOutcome::Unchanged,
+                    ),
+                    (
+                        Artifact::Stub("bal-story".into()),
+                        ArtifactOutcome::Unchanged,
+                    ),
+                    (
+                        Artifact::Stub("bal-backlog".into()),
+                        ArtifactOutcome::Unchanged,
+                    ),
                     (
                         Artifact::Stub("bal-capture".into()),
                         ArtifactOutcome::Unchanged,
@@ -1628,13 +1691,36 @@ mod tests {
         };
 
         let removed = build(RetiredOutcome::Removed);
-        assert_eq!(identities(&removed), ["bal-capture", "bal-help"]);
+        assert_eq!(
+            identities(&removed),
+            [
+                "bal-project",
+                "bal-scope",
+                "bal-phase",
+                "bal-story",
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+            ]
+        );
         assert!(removed.complete);
 
         let left = build(RetiredOutcome::Failed("not-removable: denied".into()));
-        assert_eq!(identities(&left), ["bal-capture", "bal-help", "bal-old"]);
         assert_eq!(
-            left.stubs[2],
+            identities(&left),
+            [
+                "bal-project",
+                "bal-scope",
+                "bal-phase",
+                "bal-story",
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+                "bal-old",
+            ]
+        );
+        assert_eq!(
+            left.stubs[7],
             event::Stub {
                 identity: "bal-old".into(),
                 path: OLD.into(),
@@ -1645,7 +1731,19 @@ mod tests {
 
         // Recorded under another Claude folder: kept, and nothing failed.
         let carried = build(RetiredOutcome::Carried);
-        assert_eq!(identities(&carried), ["bal-capture", "bal-help", "bal-old"]);
+        assert_eq!(
+            identities(&carried),
+            [
+                "bal-project",
+                "bal-scope",
+                "bal-phase",
+                "bal-story",
+                "bal-backlog",
+                "bal-capture",
+                "bal-help",
+                "bal-old",
+            ]
+        );
         assert!(carried.complete);
     }
 
@@ -1709,6 +1807,155 @@ mod tests {
                 "an earlier write failed: not-writable: /home/o/.claude/settings.json"
             ),
             "{cause}"
+        );
+    }
+
+    #[test]
+    fn a_retired_agent_stub_left_on_disk_or_a_record_reaching_outside_its_own_file_is_caught() {
+        let mut manifest = stubs::manifest(&stubs::front_doors()).unwrap();
+        manifest.extend(crate::host_artifacts::agents::manifest());
+        let env = crate::folders::Environment {
+            home: Some("/home/o".into()),
+            ..crate::folders::Environment::default()
+        };
+        let installed = crate::host_artifacts::installed::resolve(&env, None, &manifest).unwrap();
+        let shipped = shipped(&manifest, "bal-planner-high");
+        let stub = |identity: &str, path: &str, bytes: &[u8]| Retired {
+            identity: identity.into(),
+            path: path.into(),
+            sha256: digest(bytes),
+        };
+        let old_agent = stub(
+            "bal-old-agent",
+            "/home/o/.claude/agents/bal-old-agent.md",
+            b"old agent",
+        );
+        let old_skill = stub("bal-old", OLD, b"old stub");
+        let elsewhere = stub(
+            "bal-elsewhere",
+            "/home/o/.claude/agents/sub/bal-elsewhere.md",
+            b"elsewhere",
+        );
+        let latest = json!({"stubs": [
+            recorded(&old_agent),
+            recorded(&old_skill),
+            recorded(&elsewhere),
+            {"identity": "bal-planner-high",
+             "path": "/home/o/.claude/agents/bal-planner-high.md",
+             "sha256": shipped.digest},
+        ]});
+
+        let found = retired(
+            Some(&latest),
+            &installed.placements,
+            Path::new("/home/o/.claude"),
+        );
+        assert_eq!(found.own, [old_agent.clone(), old_skill]);
+        assert_eq!(found.elsewhere, [elsewhere]);
+
+        let mut observations = all_absent(&installed);
+        observations.insert(old_agent.path.clone(), file(Some(b"old agent"), false));
+        let plan = judge(&Gathered {
+            placements: &installed.placements,
+            claude_folder: &installed.claude_folder,
+            folders: &folders(),
+            latest: Some(&latest),
+            observations: &observations,
+            prerequisites: &linux(),
+            executable: None,
+        })
+        .expect("plans");
+        assert_eq!(plan.removals, [old_agent]);
+    }
+
+    #[test]
+    fn an_install_placing_fewer_than_thirty_agents_or_a_doctor_blind_to_a_changed_one_is_caught() {
+        // The role and rung names, written out from design 0003.
+        const ROLES: [&str; 6] = [
+            "planner", "analyzer", "checker", "executor", "verifier", "reviewer",
+        ];
+        const RUNGS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+        let manifest = stubs::installed_manifest();
+        let env = crate::folders::Environment {
+            home: Some("/home/o".into()),
+            ..crate::folders::Environment::default()
+        };
+        let derive = || crate::host_artifacts::installed::resolve(&env, None, &manifest);
+        let installed = derive().unwrap();
+        let observations = all_absent(&installed);
+        let (folders, prerequisites) = (folders(), linux());
+
+        let plan = judge(&gathered_for(
+            &installed,
+            None,
+            &observations,
+            &prerequisites,
+            &folders,
+        ))
+        .expect("a fresh Claude folder plans");
+
+        let agents: Vec<&Write> = plan
+            .writes
+            .iter()
+            .filter(|write| write.path.starts_with("/home/o/.claude/agents"))
+            .collect();
+        assert_eq!(agents.len(), 30);
+        for role in ROLES {
+            for rung in RUNGS {
+                let name = format!("bal-{role}-{rung}");
+                let path = PathBuf::from(format!("/home/o/.claude/agents/{name}.md"));
+                let write = agents
+                    .iter()
+                    .find(|write| write.path == path)
+                    .unwrap_or_else(|| panic!("{name} is not written at {path:?}"));
+                assert_eq!(write.artifacts, [Artifact::Stub(name.clone())]);
+                assert_eq!(write.bytes, shipped(&manifest, &name).bytes, "{name}");
+                let lines: Vec<&str> = std::str::from_utf8(&write.bytes).unwrap().lines().collect();
+                assert!(lines.contains(&"model: inherit"), "{name}");
+                assert!(
+                    lines.contains(&format!("effort: {rung}").as_str()),
+                    "{name}"
+                );
+                let servers = lines
+                    .iter()
+                    .position(|line| *line == "mcpServers:")
+                    .unwrap_or_else(|| panic!("{name} names no server"));
+                assert_eq!(lines[servers + 1], "  - baley", "{name}");
+                for line in &lines {
+                    let key = line.trim_start();
+                    for refused in ["command:", "type:", "args:"] {
+                        assert!(!key.starts_with(refused), "{name}: {line}");
+                    }
+                    if key.starts_with("model:") {
+                        assert_eq!(*line, "model: inherit", "{name}");
+                    }
+                }
+            }
+        }
+
+        let entry = shipped(&manifest, "bal-planner-high");
+        let record = json!({"stubs": [{
+            "identity": "bal-planner-high",
+            "path": "/home/o/.claude/agents/bal-planner-high.md",
+            "sha256": entry.digest,
+        }]});
+        let map = crate::host_doctor::installed_placements(derive(), Ok(Some(record))).unwrap();
+        let placed = map
+            .expected_files()
+            .into_iter()
+            .find(|file| file.artifact == Artifact::Stub("bal-planner-high".into()))
+            .expect("the doctor places bal-planner-high");
+        assert_eq!(
+            placed.path,
+            Path::new("/home/o/.claude/agents/bal-planner-high.md")
+        );
+        let placed_entry = placed.stub.expect("with its manifest entry");
+        assert_eq!(placed_entry, entry);
+        let mut changed = placed_entry.bytes.clone();
+        changed[0] ^= 1;
+        assert_ne!(
+            crate::host_doctor::placed::stub(placed_entry, &changed),
+            crate::host_doctor::placed::StubJudgement::Matches
         );
     }
 }

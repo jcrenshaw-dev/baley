@@ -9,7 +9,10 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use baley_core::scope::{ChangeKind, ChangeSubmission, Submission, judge_change, judge_submission};
-use baley_store::{Command, CommandKind, Hash, ProjectId, RequestId, request_digest};
+use baley_store::{
+    Caller, Command, CommandKind, InstructionEvidence, ProjectId, RequestId, ServerCaller,
+    request_digest,
+};
 use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -20,6 +23,7 @@ use crate::mcp::capture::{PLACE_LEDGER, failed};
 use crate::mcp::client::MAX_ECHOED_BYTES;
 use crate::mcp::handler::Preparation;
 use crate::mcp::prepare::{LEDGER_UNAVAILABLE, WriteRequest, prepare_checked};
+use crate::mcp::work_order::judge_order_id;
 use crate::scope::submit::{self, SUBMIT_COMMAND};
 
 // `schema` serves this same declaration, so its doc comments are wire text.
@@ -31,6 +35,9 @@ pub struct SubmitShape {
     /// A fresh UUID for this submission in lowercase hyphenated form. A retry
     /// of the same submission sends the same id.
     pub request_id: String,
+    /// The id of the start planner's work order this submission answers, as
+    /// its receipt gave it, a UUID in lowercase hyphenated form.
+    pub work_order: String,
     /// The whole start submission: `description` with `what`, `core_value`
     /// and `constraints`; `stories`, each with a `label`, a `sentence` and a
     /// `status` of `active`, `deferred` or `excluded`; and `roadmap`, the
@@ -151,24 +158,35 @@ pub struct JudgedChange {
 pub struct JudgedSubmission {
     /// The write preparation carries into the domain command.
     pub request: WriteRequest,
+    /// The id of the start planner's work order the submission answers.
+    pub work_order: String,
     /// The accepted submission.
     pub submission: Submission,
 }
 
 /// Judges `scope-submit`'s arguments before anything is prepared or
-/// recorded: the shape, then the request id, then the submission whole. A
-/// fault is the `refused` answer, which records nothing. A fault in the
-/// submission is never `invalid-arguments` (D-08).
+/// recorded: the shape, then the request id, the work order's id and the
+/// submission whole. A fault is the `refused` answer, which records nothing.
+/// A fault in the submission is never `invalid-arguments` (D-08). The order
+/// stays out of the submission, so the draft's digest is the content's alone,
+/// while the request digest covers the order too, so one request id cannot
+/// answer two orders (D-04).
 pub fn judge_arguments(arguments: &Value) -> Result<JudgedSubmission, Value> {
     let shape = match serde_json::from_value::<SubmitCall>(arguments.clone()) {
         Ok(SubmitCall::Submit(shape)) => shape,
         Err(error) => return Err(shape_refused(&error)),
     };
     let request_id = judge_request_id(shape.request_id)?;
+    judge_order_id(&shape.work_order)?;
     let submission = judge_submission(&shape.submission)
         .map_err(|refusal| submit::submission_refused(&refusal))?;
     Ok(JudgedSubmission {
-        request: write_request(request_id, submission.digest()),
+        request: write_request(
+            request_id,
+            &json!({"command": SUBMIT_COMMAND, "submission": submission.digest().to_hex(),
+                "work_order": shape.work_order}),
+        ),
+        work_order: shape.work_order,
         submission,
     })
 }
@@ -189,7 +207,10 @@ pub fn judge_change_arguments(arguments: &Value) -> Result<JudgedChange, Value> 
     let change =
         judge_change(kind, &submission).map_err(|refusal| submit::submission_refused(&refusal))?;
     Ok(JudgedChange {
-        request: write_request(request_id, change.digest()),
+        request: write_request(
+            request_id,
+            &json!({"command": SUBMIT_COMMAND, "submission": change.digest().to_hex()}),
+        ),
         change,
     })
 }
@@ -218,15 +239,13 @@ fn judge_request_id(request_id: String) -> Result<RequestId, Value> {
     Ok(RequestId(request_id))
 }
 
-/// The write a scope submission prepares. The draft digest stands for the
-/// content, and for a change its kind too, so the same content under the same
-/// id replays and other content, or another kind, is a reused id.
-fn write_request(request_id: RequestId, draft: Hash) -> WriteRequest {
-    let digest = request_digest(&json!({
-        "command": SUBMIT_COMMAND,
-        "submission": draft.to_hex(),
-    }))
-    .expect("text is canonical");
+/// The write a scope submission prepares, its digest over `identity`: the
+/// command and the draft digest, which stands for the content and for a
+/// change its kind too, and for a start the order it answers. So the same
+/// call under the same id replays, and other content, another kind or
+/// another order is a reused id.
+fn write_request(request_id: RequestId, identity: &Value) -> WriteRequest {
+    let digest = request_digest(identity).expect("text is canonical");
     WriteRequest {
         kind: CommandKind(SUBMIT_COMMAND.into()),
         request_id,
@@ -249,22 +268,77 @@ fn bounded(text: String) -> String {
     format!("{}{CUT}", &text[..end])
 }
 
+/// The caller a submission is prepared under: the session's `caller`
+/// carrying the `work_order` it answers, so every event of the call carries
+/// the order (D-04). A fault is the `refused` answer at slot `work_order`.
+pub fn order_caller(caller: &ServerCaller, work_order: &str) -> Result<ServerCaller, Value> {
+    caller.clone().with_work_order(work_order).map_err(|error| {
+        Refusal::new("invalid-arguments", error.to_string())
+            .slot("work_order")
+            .value()
+    })
+}
+
+/// `command` with the answered order's instruction `evidence` on its server
+/// caller, so every event of the submission's transaction carries the order
+/// and the start planner's instruction (D-24). With no evidence, as on a
+/// replay, which runs no check, the command is as preparation made it. A
+/// list the caller cannot carry is a `failed` answer.
+pub fn bind_instructions(
+    mut command: Command,
+    evidence: Option<&[InstructionEvidence]>,
+) -> Result<Command, Value> {
+    let (Some(evidence), Some(Caller::Server(caller))) = (evidence, &command.caller) else {
+        return Ok(command);
+    };
+    let bound = caller
+        .clone()
+        .with_instructions(evidence.to_vec())
+        .map_err(|error| {
+            failed(
+                LEDGER_UNAVAILABLE,
+                format!("the work order's instructions cannot be carried: {error}"),
+                PLACE_LEDGER,
+            )
+        })?;
+    command.caller = Some(Caller::Server(bound));
+    Ok(command)
+}
+
 /// Serves one `scope-submit` call for the session's `preparation`: the
-/// arguments are judged first, then the write is prepared with the
-/// start-once read as its own check, so a start already approved ends the
-/// call before checkout admission and the policy step. Then the submission
-/// runs in its own transaction. An answer that ends preparation is returned
-/// as it is.
+/// arguments are judged first, then the write is prepared under the caller
+/// carrying the order it answers, with the order check as its own check, so
+/// an order that is not this project's start order, or a start already
+/// approved, ends the call before checkout admission and the policy step.
+/// Then the command's caller takes the order's instruction evidence and the
+/// submission runs in its own transaction. An answer that ends preparation
+/// is returned as it is.
 pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
     let judged = match judge_arguments(arguments) {
         Ok(judged) => judged,
         Err(refusal) => return refusal,
     };
-    let check = |store: &SqliteStore, project: &ProjectId| submit::start_once(store, project);
-    match prepared(preparation, &judged.request, &check) {
-        Ok((store, command)) => {
-            submit::answer(submit::record(store, &command, &judged.submission), store)
-        }
+    let caller = match order_caller(&preparation.caller, &judged.work_order) {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    // Kept for the binding. A replay skips the check and keeps none, and the
+    // store answers it from its record.
+    let kept = RefCell::new(None);
+    let check = |store: &SqliteStore, project: &ProjectId| {
+        *kept.borrow_mut() = Some(submit::start_order_check(
+            store,
+            project,
+            &judged.work_order,
+        )?);
+        Ok(())
+    };
+    let (store, command) = match prepared(preparation, &caller, &judged.request, &check) {
+        Ok(prepared) => prepared,
+        Err(answer) => return answer,
+    };
+    match bind_instructions(command, kept.borrow().as_deref()) {
+        Ok(command) => submit::answer(submit::record(store, &command, &judged.submission), store),
         Err(answer) => answer,
     }
 }
@@ -290,7 +364,7 @@ pub fn serve_change(arguments: &Value, preparation: &Preparation) -> Value {
         *read.borrow_mut() = Some(checked);
         Ok(())
     };
-    match prepared(preparation, &judged.request, &check) {
+    match prepared(preparation, &preparation.caller, &judged.request, &check) {
         Ok((store, command)) => {
             let read = read.borrow();
             submit::answer(
@@ -302,11 +376,12 @@ pub fn serve_change(arguments: &Value, preparation: &Preparation) -> Value {
     }
 }
 
-/// Prepares a scope write for the session with `check` as its own check,
-/// asked against the session's ledger. It gives the ledger and the command to
-/// record under, or the answer preparation ended with.
+/// Prepares a scope write for the session under `caller` with `check` as its
+/// own check, asked against the session's ledger. It gives the ledger and the
+/// command to record under, or the answer preparation ended with.
 fn prepared<'a>(
     preparation: &'a Preparation,
+    caller: &ServerCaller,
     request: &WriteRequest,
     check: &dyn Fn(&SqliteStore, &ProjectId) -> Result<(), Value>,
 ) -> Result<(&'a SqliteStore, Command), Value> {
@@ -324,7 +399,7 @@ fn prepared<'a>(
     };
     let prepared = prepare_checked(
         ledger.map(|ledger| &ledger.store),
-        &preparation.caller,
+        caller,
         request,
         config,
         preparation.host,
@@ -345,10 +420,11 @@ fn prepared<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::work_order::tests::{I0, I1};
     use crate::scope::fixtures::{R1, m, s1};
 
     fn arguments(request_id: &str, submission: Value) -> Value {
-        json!({"operation": "scope-submit", "request_id": request_id,
+        json!({"operation": "scope-submit", "request_id": request_id, "work_order": I0,
             "submission": submission})
     }
 
@@ -489,5 +565,104 @@ mod tests {
         assert_eq!(first.digest, again.digest);
         assert_ne!(changed.digest, first.digest);
         assert_ne!(backlog.digest, first.digest);
+    }
+
+    /// The command preparation makes for `judged` in the project at `at`,
+    /// under the caller a submission is prepared under, then bound to
+    /// `evidence`.
+    fn bound_command(
+        judged: &JudgedSubmission,
+        evidence: &[InstructionEvidence],
+        at: &str,
+    ) -> Command {
+        use crate::mcp::prepare::prepared_command;
+        use crate::scope::fixtures::{caller, project};
+
+        let caller = order_caller(&caller(), &judged.work_order).expect("an order id fits");
+        let command = prepared_command(&project(), &judged.request, 1, at, &caller);
+        bind_instructions(command, Some(evidence)).expect("the evidence fits")
+    }
+
+    #[test]
+    fn a_submission_recorded_without_its_order_or_under_another_digest_is_caught() {
+        use baley_core::scope::{DRAFT_NEWEST_INDEX, DRAFT_VIEW};
+        use baley_store::{IndexQuery, KeyValue, PageRequest, Views};
+
+        use crate::mcp::work_order::tests::issue_start;
+        use crate::scope::fixtures::*;
+
+        let unbound = json!({"operation": "scope-submit", "request_id": R1, "submission": m()});
+        let refusal = refused(&unbound);
+        assert_eq!(refusal["code"], "invalid-arguments", "{refusal}");
+        assert_eq!(refusal["slot"], "arguments", "{refusal}");
+
+        let (_dir, store) = two_projects();
+        let before = head(&store);
+        let refusal = submit::start_order_check(&store, &project(), I1).unwrap_err();
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], "no-such-work-order", "{refusal}");
+        assert_eq!(refusal["slot"], "work_order", "{refusal}");
+        assert_eq!(head(&store), before);
+
+        issue_start(&store, &project(), I0, R5, T1);
+        let evidence =
+            submit::start_order_check(&store, &project(), I0).expect("I0 is the start's");
+        let judged = judge_arguments(&arguments(R1, m())).unwrap();
+        let command = bound_command(&judged, &evidence, T2);
+        submit::record(&store, &command, &judged.submission).unwrap();
+        let events = history(&store);
+        let submitted = of_type(&events, "scope.submitted");
+        let event = submitted.last().expect("M is submitted");
+        let Some(Caller::Server(on)) = &event.caller else {
+            panic!("a server caller: {:?}", event.caller);
+        };
+        assert_eq!(on.work_order(), Some(I0));
+        let planner = crate::instruction::evidence("bal-start-planner").unwrap();
+        assert_eq!(
+            on.instructions(),
+            [InstructionEvidence::new("bal-start-planner", "1", planner.hash()).unwrap()]
+        );
+        assert_eq!(event.payload["digest"], M_DIGEST);
+
+        let evidence = submit::start_order_check(&store, &project(), I0).expect("I0 is answered");
+        let again = judge_arguments(&arguments(R2, s1())).unwrap();
+        let command = bound_command(&again, &evidence, T3);
+        submit::record(&store, &command, &again.submission).unwrap();
+        let s1_digest = again.submission.digest().to_hex();
+        let query = IndexQuery {
+            index: DRAFT_NEWEST_INDEX.into(),
+            equals: vec![KeyValue::Text("start".into())],
+            page: PageRequest {
+                limit: 1,
+                after: None,
+            },
+        };
+        let newest = store.find(&project(), DRAFT_VIEW, &query).unwrap();
+        assert_eq!(newest.items[0].body["digest"], s1_digest);
+        let order = crate::work_order::read::order(&store, &project(), I0)
+            .unwrap()
+            .expect("I0 is held");
+        assert_eq!(order["state"], "answered", "{order}");
+        assert_eq!(order["drafts"], json!([M_DIGEST, s1_digest]), "{order}");
+    }
+
+    #[test]
+    fn a_submission_request_blind_to_its_order_is_caught() {
+        use crate::scope::fixtures::M_DIGEST;
+
+        let naming = |order: &str| {
+            judge_arguments(&json!({"operation": "scope-submit", "request_id": R1,
+                "work_order": order, "submission": m()}))
+        };
+        let first = naming(I0).unwrap();
+        let second = naming(I1).unwrap();
+        assert_ne!(first.request.digest, second.request.digest);
+        assert_eq!(first.submission.digest().to_hex(), M_DIGEST);
+        assert_eq!(second.submission.digest().to_hex(), M_DIGEST);
+
+        let refusal = naming(&I0.to_uppercase()).unwrap_err();
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], "invalid-arguments", "{refusal}");
+        assert_eq!(refusal["slot"], "work_order", "{refusal}");
     }
 }
