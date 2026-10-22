@@ -9,9 +9,9 @@
 //! call's host, the session's ledger and the server's time. `capture`,
 //! `scope-submit`, the ten change operations from `project-describe` to
 //! `backlog-reorder`, `project-start`, `work-order-fail`, `work-order-retry`,
-//! `document` and `route` set `needs_project`, and in their [`operate`] arms
-//! the writes prepare a write from it, `document` a read and `route` a read
-//! that also reads the settings.
+//! `questions-answer`, `document` and `route` set `needs_project`, and in
+//! their [`operate`] arms the writes prepare a write from it, `document` a
+//! read and `route` a read that also reads the settings.
 //! rmcp has already validated the request's metadata by the time any
 //! of this runs, so a protocol-required metadata error stays a protocol error
 //! and runs nothing.
@@ -37,6 +37,7 @@ use super::context::{SessionContext, call_context};
 use super::document;
 use super::gate::{Admitted, After, Called, after_queue, encode};
 use super::operations::{help_answer, instruction_answer, schema_answer, unknown_operation};
+use super::questions;
 use super::scope;
 use super::tools::{info, supported_protocol_versions, tool_list, version_answer};
 use super::transport::RawFrameBytes;
@@ -189,6 +190,9 @@ fn operate(called: &Called, arguments: Option<&Value>, project: Option<&Preparat
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "work-order-retry" => {
             work_order::serve_retry(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation)) if spelling == "questions-answer" => {
+            questions::serve(arguments_or_null, preparation)
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "route" => {
             work_order::serve_route(arguments_or_null, preparation)
@@ -936,5 +940,33 @@ mod tests {
         assert_eq!(answer["status"], "refused", "{answer}");
         assert_eq!(answer["code"], "invalid-arguments", "{answer}");
         assert_eq!(answer["slot"], "arguments", "{answer}");
+    }
+
+    #[test]
+    fn a_questions_answer_left_unserved_by_operate_is_caught() {
+        let caller = ServerCaller::new(
+            "/real/r",
+            "/real/r",
+            "claude-code",
+            "0b7e4a52-3c1d-4f6a-8e9b-1a2b3c4d5e6f",
+            &json!(7),
+        )
+        .unwrap();
+        // No ledger, so a call that reached preparation would answer `failed`.
+        let preparation = Preparation {
+            ledger: None,
+            host: Host::ClaudeCode,
+            caller,
+            at: "2026-10-22T09:00:00Z".into(),
+        };
+        let answer = operate(
+            &Called::Operation(Tool::Apply, "questions-answer".into()),
+            Some(&json!({"operation": "questions-answer",
+                "request_id": "9d0c1b7e-2f4a-4b6c-8d1e-3a5b7c9d0e2f",
+                "set": "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "items": []})),
+            Some(&preparation),
+        );
+        assert_eq!(answer["status"], "refused", "{answer}");
+        assert_eq!(answer["code"], "typed-content", "{answer}");
     }
 }

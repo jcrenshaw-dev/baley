@@ -38,6 +38,8 @@ enum Command {
     Backlog(baley::scope::command::BacklogArgs),
     /// Show one accepted story, or submit a story reassignment or drop for approval.
     Story(baley::scope::command::StoryArgs),
+    /// Show a question set's current round and what it has settled.
+    Questions(baley::questions::command::QuestionsArgs),
     /// Check the update source and stage a newer version behind the stable path.
     Update(baley::update::command::UpdateArgs),
     /// Install Claude Code's user-level wiring and seed the model catalog.
@@ -125,6 +127,7 @@ fn run_command(command: Command) -> std::process::ExitCode {
         Command::Phase(args) => return baley::scope::command::run_phase(args),
         Command::Backlog(args) => return baley::scope::command::run_backlog(args),
         Command::Story(args) => return baley::scope::command::run_story(args),
+        Command::Questions(args) => return baley::questions::command::run(args),
         Command::Update(args) => return baley::update::command::run(args),
         Command::Install(args) => return baley::install::command::run(args),
         other => other,
@@ -139,6 +142,7 @@ fn run_command(command: Command) -> std::process::ExitCode {
         | Command::Phase(_)
         | Command::Backlog(_)
         | Command::Story(_)
+        | Command::Questions(_)
         | Command::Install(_)
         | Command::Update(_) => {
             unreachable!("dispatched above")
@@ -420,6 +424,65 @@ mod artifact_argument_tests {
         ])
         .err()
         .expect("usage refusal");
+        assert_eq!(error.exit_code(), 2);
+    }
+}
+
+#[cfg(test)]
+mod questions_argument_tests {
+    use super::*;
+    use baley::questions::command::QuestionsCommand;
+
+    const SET: &str = "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+
+    #[test]
+    fn a_questions_round_command_lost_or_misread_is_caught() {
+        let Command::Questions(args) = Cli::try_parse_from(["baley", "questions", "round", SET])
+            .unwrap()
+            .command
+        else {
+            panic!("questions command lost");
+        };
+        assert_eq!(args.command, QuestionsCommand::Round { set: SET.into() });
+        let error = Cli::try_parse_from(["baley", "questions", "round"])
+            .err()
+            .expect("usage refusal");
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn a_questions_answer_command_lost_or_misread_is_caught() {
+        let Command::Questions(args) = Cli::try_parse_from([
+            "baley",
+            "questions",
+            "answer",
+            SET,
+            "--take",
+            "q1",
+            "--answer",
+            "q2",
+            "Use Postgres",
+            "--defer",
+            "q3",
+            "after the spike",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("questions command lost");
+        };
+        assert_eq!(
+            args.command,
+            QuestionsCommand::Answer {
+                set: SET.into(),
+                take: vec!["q1".into()],
+                answer: vec!["q2".into(), "Use Postgres".into()],
+                defer: vec!["q3".into(), "after the spike".into()],
+            }
+        );
+        let error = Cli::try_parse_from(["baley", "questions", "answer", SET, "--answer", "q2"])
+            .err()
+            .expect("usage refusal");
         assert_eq!(error.exit_code(), 2);
     }
 }

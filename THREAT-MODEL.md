@@ -69,7 +69,7 @@ No clap argument reads the environment.
 - In `baley serve`, MCP frames.
 - In `baley guard`, Claude Code's hook JSON, read up to 64 KiB plus one byte (`crates/baley/src/hook_input/mod.rs:21`).
 - `baley models import` reads curl's output, at most 4 MiB plus a trailer (`crates/baley/src/models.rs:546-565`).
-- `baley skill-description` reads markdown with no limit (`main.rs:148-151`).
+- `baley skill-description` reads markdown with no limit (`crates/baley/src/main.rs`, the `Command::SkillDescription` arm of `run_command`).
 - `baley config interview` reads answers.
 
 **Network.** The update manifest and binary from `updates.source`, and anchor tags read back through git from the remote that `git.remote` names. The section on network responses below gives the limits.
@@ -157,7 +157,7 @@ The guard launches no program except git (design 0010 GRD-R14). MCP tool calls (
   - Tag names are built from the project id and a sequence number.
 - **SQL.** rusqlite with bundled SQLite, and values are bound as parameters. `format!` SQL inserts only identifiers: compiled view names checked by `safe_identifier` (`crates/baley-store-sqlite/src/view.rs:836-846`), registry table names, and constant PRAGMAs. The `main` or `source` schema name in `view.rs:326` is guarded only by a `debug_assert`. No FTS5. `[VERIFY]` that every query was covered; the trace did not read each one.
 - **Regex.** None is built from input in reachable code. The MCP `document-search` operation that took a pattern is retired.
-- **Prompts.** Instruction text is compiled into the binary and served by the `instruction` operation, and no prompt is built from read data. The `document` operation returns stored capture text and scope drafts, written earlier by agents, into the model's context unchanged.
+- **Prompts.** Instruction text is compiled into the binary and served by the `instruction` operation, and no prompt is built from read data. The `document` operation returns stored capture text and scope drafts, written earlier by agents, and a question set's question texts and recommended answers, written by an agent, with the answers and deferral reasons a session relayed or the owner gave, into the model's context unchanged.
 
 ## What it must never touch
 
@@ -165,7 +165,8 @@ The guard launches no program except git (design 0010 GRD-R14). MCP tool calls (
 - **Baley's home and config folders.** An agent must never read or write them. The sandbox, the `Read` and `Edit` deny rules, and the guard's refusal of `Read`, `Grep`, `Glob`, `Write`, `Edit` and `NotebookEdit` calls into them carry this (design 0010 GRD-R11, GRD-R13).
 - **Placed artifacts.** An agent must never write the placed stubs, the Claude Code settings and registration files, the installed executable or the versions folder.
 - **Owner acts.** An agent must never get an act recorded as the owner's.
-  - Approvals are served on the command line only, never over MCP, and `baley_apply` refuses `scope-approve` (`crates/baley/src/mcp/handler.rs:556-582`; ADR 0044).
+  - Approvals are served on the command line only, never over MCP, and `baley_apply` refuses `scope-approve` (`crates/baley/src/mcp/handler.rs`, `an_owner_approval_accepted_over_mcp_is_caught`; ADR 0044).
+  - An answer or deferral a session relays through `questions-answer` is recorded with actor `baley`, the session as the caller and `owner.name` in its payload. Only `baley questions answer` at the terminal records actor `owner` (ADR 0047), so no MCP call gets an act recorded as the owner's (`crates/baley/src/mcp/questions.rs`, `serve`; `crates/baley/src/questions/command.rs`, `record_answers`).
   - Over MCP, only the `baley_apply` operations listed under MCP over stdio write to the ledger.
 - **Data leaving the machine.** Data must never leave except in two ways:
   - anchor tags pushed to the push URL of `git.remote` when the owner runs `baley anchor`;
@@ -193,9 +194,9 @@ Everything runs as the interactive user. There is no service user, no root, and 
 | `baley update detached` | `baley serve`, when `updates.auto = true` | No |
 | `install.sh` | The owner, by hand | No. It ends by running the downloaded binary as `baley install`. |
 
-Nothing in the code tells the owner at a terminal apart from an agent running the same command. The sandbox is the only thing that separates them. `baley scope approve` records the actor `Owner` under the name in `owner.name`, or git's `user.name` when that is unset, read in the current directory so a repository-local value applies (`crates/baley/src/providers/identity.rs`, `crates/baley/src/scope/command.rs:240-337`). That name is a label, not authentication.
+Nothing in the code tells the owner at a terminal apart from an agent running the same command. The sandbox is the only thing that separates them. `baley scope approve` records the actor `Owner` under the name in `owner.name`, or git's `user.name` when that is unset, read in the current directory so a repository-local value applies (`crates/baley/src/providers/identity.rs`, `crates/baley/src/scope/command.rs`, `checkout`, `open` and `approve`). `baley questions answer` records the actor `Owner` under the same name (`crates/baley/src/questions/command.rs`, `record_answers`). That name is a label, not authentication.
 
-The control everything rests on is therefore the sandbox block and deny rules `baley install` writes. If they are missing or weakened, an agent's `baley scope approve` counts as the owner's. These belong in scope as critical:
+The control everything rests on is therefore the sandbox block and deny rules `baley install` writes. If they are missing or weakened, an agent's `baley scope approve` or `baley questions answer` counts as the owner's. These belong in scope as critical:
 
 - that install writes them correctly;
 - that install refuses a document that would weaken them;
@@ -237,10 +238,11 @@ What the owner would not notice:
 - **Client.** Its identity is self-reported, and only the `claude-code` host is accepted (`crates/baley/src/mcp/client.rs:1-5`, `gate.rs:79-87`). The identity is not authorization.
 - **Tools.** Three tools: `baley_version`, `baley_query` and `baley_apply` (`crates/baley/src/mcp/tools.rs:97-119`).
   - Query serves `help`, `schema`, `instruction`, `document` and `route`.
-  - Apply serves `capture`, `scope-submit`, the ten change operations (`project-describe`, `phase-declare`, `phase-edit`, `phase-reorder`, `phase-withdraw`, `story-declare`, `story-edit`, `story-reassign`, `story-drop` and `backlog-reorder`), and `project-start`, `work-order-fail` and `work-order-retry`.
-  - Every other operation name answers retired (`crates/baley/src/mcp/operations.rs:88-212`).
+  - Apply serves `capture`, `scope-submit`, the ten change operations (`project-describe`, `phase-declare`, `phase-edit`, `phase-reorder`, `phase-withdraw`, `story-declare`, `story-edit`, `story-reassign`, `story-drop` and `backlog-reorder`), `project-start`, `work-order-fail` and `work-order-retry`, and `questions-answer`.
+  - A spelling a tool's list marks retired, one an earlier build served, is refused `operation-unavailable` naming the build that replaces it. Any other name, such as `scope-approve`, and a call with no `operation` string, is refused `unknown-operation` (`crates/baley/src/mcp/operations.rs`, `QUERY_OPERATIONS`, `APPLY_OPERATIONS`, `lookup`, `operation_unavailable` and `unknown_operation`).
 - **Arguments.** Each operation parses with serde and refuses unknown fields. `request_id` must be a lowercase hyphenated UUID, and so must a `work_order` id (`crates/baley/src/mcp/work_order.rs:1130-1142`). Capture text, a project brief and a failure reason must not be blank. Error echoes are capped at 128 bytes.
   - A brief holds at most 65,536 bytes and a failure reason at most 4,096 (`crates/baley/src/mcp/work_order.rs:63, 381`). Capture text, scope-submit fields and the change operations' fields have no length or count limit beyond the frame. Capture text over 4,096 bytes is stored as a payload.
+  - A `questions-answer` item's question id, answer and reason, and a question set's ids, question texts and recommended answers, hold at most 4,096 bytes each, and a longer one is refused `typed-content` (`crates/baley-core/src/questions/answer.rs`, `judge_call`; `crates/baley-core/src/questions/set.rs`, `judge_set`). The number of items in a call, and of questions in a set, is bounded only by the frame. A `set` id is not judged for form: one the project's `questions` view does not hold is refused `no-such-question-set`, which echoes none of it.
   - No argument supplies a path or a working directory.
 - **Writes.** Every apply operation first records `checkout.seen` and `policy.effective`, and needs the project already in the ledger (`crates/baley/src/mcp/prepare.rs:372-388, 761-804`). Write preparation runs git in the project with no output cap (`process.rs:109`).
 
@@ -256,7 +258,8 @@ What the owner would not notice:
 
 Parsed by clap.
 
-- `baley scope approve` takes a digest of exactly 64 lowercase hex characters (`scope/command.rs:298-306`).
+- `baley scope approve` takes a digest of exactly 64 lowercase hex characters (`crates/baley/src/scope/command.rs`, `approve`).
+- `baley questions answer` takes a set id and repeatable `--take`, `--answer` and `--defer` values, a text or reason allowed to begin with a hyphen, and judges them as the items a session sends (`crates/baley/src/questions/command.rs`, `terminal_items`).
 - `purge` validates its hashes and reason (`crates/baley/src/ledger/args.rs:68-80`).
 - `models import` checks its trailer strictly. Model ids only have to be non-empty (`crates/baley-core/src/catalog/detection/parse.rs:38-51`).
 
@@ -356,7 +359,7 @@ Design 0010 states these. They are not new findings:
 
 **Where they can end up:**
 
-- **The ledger and the model's context.** Capture text and scope drafts are stored unredacted in the ledger and returned unredacted by the MCP `document` operation. The remedy is `baley purge`, which reminds the owner to rotate the secret (`crates/baley/src/ledger/display.rs:20`), with `secure_delete = ON`.
+- **The ledger and the model's context.** Capture text and scope drafts are stored unredacted in the ledger and returned unredacted by the MCP `document` operation. The remedy is `baley purge`, which reminds the owner to rotate the secret (`crates/baley/src/ledger/display.rs:20`), with `secure_delete = ON`. Question texts, recommended answers, answers and deferral reasons are inline in their events, never payloads, so `baley purge` cannot remove them, and `document` returns them too: a secret written into one stays in the hash-chained record.
 - **Remote URLs.** They are recorded with userinfo stripped. A secret in a query string is kept.
 - **Process arguments.** The anchor push URL, including any `user:token@`, is passed in git's arguments and is visible in the process list. Only the timeout text is redacted (`crates/baley/src/ledger/forge.rs:167-175, 872-892`).
 - **The terminal.** An update failure prints the `updates.source` address in full, including any userinfo (`crates/baley/src/update/command.rs:277`). Recorded update events hold codes only.

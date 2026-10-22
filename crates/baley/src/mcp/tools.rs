@@ -349,17 +349,18 @@ mod tests {
         let schema = input_schema(Tool::Query);
         let identity = alternative_of_type(&schema["properties"]["identity"], "object");
         let objects = leaves(&identity);
-        assert_eq!(objects.len(), 5, "{identity}");
+        assert_eq!(objects.len(), 6, "{identity}");
         let object = &objects[0];
         assert_eq!(object["properties"]["kind"]["const"], "capture");
         assert_eq!(object["properties"]["id"]["type"], "string");
         assert_eq!(object["required"], json!(["kind", "id"]));
         assert_eq!(object["additionalProperties"], false);
-        // The scope and work-order kinds are objects with their own typed
+        // The scope, work-order and question-set kinds are objects with their own typed
         // fields too, so no identity leaves room for loose text.
-        for (object, kind) in objects[1..]
-            .iter()
-            .zip(["draft", "roadmap", "story", "work_order"])
+        for (object, kind) in
+            objects[1..]
+                .iter()
+                .zip(["draft", "roadmap", "story", "work_order", "questions"])
         {
             assert_eq!(object["type"], "object", "{object}");
             assert_eq!(object["properties"]["kind"]["const"], kind, "{object}");
@@ -367,6 +368,7 @@ mod tests {
         }
         assert_eq!(objects[3]["properties"]["id"]["type"], "integer");
         assert_eq!(objects[4]["properties"]["id"]["type"], "string");
+        assert_eq!(objects[5]["properties"]["set"]["type"], "string");
         let parts = alternatives(&schema["properties"]["part"]);
         assert!(!parts.is_empty(), "no part in {schema}");
         for part in parts {
@@ -386,6 +388,7 @@ mod tests {
         // project-start takes request_id, brief and instruction,
         // work-order-fail takes request_id, work_order, reason and instruction,
         // work-order-retry takes request_id, work_order and instruction,
+        // questions-answer takes request_id, set and items,
         // and route takes role or work_order.
         let names = |tool| {
             let schema = input_schema(tool);
@@ -416,11 +419,13 @@ mod tests {
             [
                 "brief",
                 "instruction",
+                "items",
                 "kind",
                 "operation",
                 "phase",
                 "reason",
                 "request_id",
+                "set",
                 "submission",
                 "text",
                 "work_order"

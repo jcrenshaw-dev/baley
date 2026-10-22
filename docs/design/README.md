@@ -34,6 +34,8 @@ The pull request that builds part of a design edits the document to match what w
 
 A document describes the design. It never tracks work: no task lists, no next steps, no schedule. Deciding what happens next is Baley's job.
 
+A design document cites code by file and item name, such as `crates/baley/src/scope/command.rs` (`escaped`), never by line number, because line numbers move with every edit to the file while an item's name stays. A change that would move an existing line citation converts it to that form instead of re-pointing it to the new lines. Decision records keep theirs, since their bodies are never edited.
+
 Decision records are the one kind of history kept on purpose. An accepted record's body is never edited; a new record supersedes it, and the old record's status then reads "Superseded by NNNN" or "Accepted, superseded in part by NNNN". Records follow Michael Nygard's format through the [MADR](https://adr.github.io/madr/) template. Design documents list the decisions they produce, and each decision links back to its design document.
 
 ## The form of an area document

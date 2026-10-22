@@ -8,12 +8,16 @@
 //! by its id comes from the `work_order` view with its inputs, its accepted
 //! result and a fixed sentence sending the worker to the instructions it
 //! lists; an input this project purged answers its tombstone and is never
-//! rebuilt (design 0012, D-16).
+//! rebuilt (design 0012, D-16). A question set by its id comes from the
+//! `questions` view with its round worked out when read, in the shape an
+//! answer's receipt carries, and a sentence naming the rounds relay
+//! instruction (design 0005 `questions round`).
 
 use std::io::Read;
 use std::path::Path;
 
 use baley_core::capture::{CAPTURE_ID_INDEX, CAPTURE_VIEW, NO_SUCH_PHASE};
+use baley_core::questions::UnreadableSet;
 use baley_core::scope::UNKNOWN_DRAFT;
 use baley_core::work_order::NO_SUCH_WORK_ORDER;
 use baley_store::{
@@ -29,6 +33,7 @@ use crate::mcp::capture::{PLACE_LEDGER, failed, store_failed};
 use crate::mcp::handler::Preparation;
 use crate::mcp::parts::{Cut, PART_BOUND, cut};
 use crate::mcp::prepare::{LEDGER_UNAVAILABLE, prepare};
+use crate::questions::read::{self as questions, SetRead};
 use crate::scope::read::{
     self as scope, Draft, NO_SUCH_STORY, PreviewError, ReadError, Roadmap, Story,
 };
@@ -80,6 +85,12 @@ pub enum Identity {
     WorkOrder {
         /// The work order id the session gave the worker.
         id: String,
+    },
+    /// A question set with its current round, as the owner is asked it.
+    #[serde(rename = "questions")]
+    Questions {
+        /// The set id a round or a receipt gave.
+        set: String,
     },
 }
 
@@ -243,8 +254,8 @@ const SCOPE_NOT_READ_BUSY: &str = "the ledger is busy, so the scope was not read
 /// Reads the record `shape` names from `project` in `store`. A capture is
 /// read from its view document by id, then its body only when the view says
 /// this project still holds it; a draft, the roadmap and a story through
-/// `scope::read`; a work order through `work_order::read`. Nothing is
-/// appended.
+/// `scope::read`; a work order through `work_order::read`; a question set
+/// through `questions::read`. Nothing is appended.
 pub fn read<S: Ledger + Views + Payloads + ?Sized>(
     store: &S,
     project: &ProjectId,
@@ -272,6 +283,7 @@ pub fn read<S: Ledger + Views + Payloads + ?Sized>(
             story_answer(identity, scope::story(store, project, *id), shape.part)
         }
         Identity::WorkOrder { id } => work_order_answer(store, project, identity, id, shape.part),
+        Identity::Questions { set } => questions_answer(store, project, identity, set, shape.part),
     }
 }
 
@@ -408,6 +420,38 @@ fn work_order_answer<S: Ledger + Views + Payloads + ?Sized>(
             "follow": FOLLOW, "inputs": inputs}),
         part,
     )
+}
+
+/// A busy ledger's reason when a question set was not read.
+const SET_NOT_READ_BUSY: &str =
+    "the ledger is busy, so the question set was not read. Try it again";
+
+/// The answer for question set `set` in `project`: the identity and the
+/// set's round in `questions::read`'s shape, in parts when large. A set the
+/// project does not hold is `no-such-question-set`, echoing none of the id.
+fn questions_answer<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    identity: &Identity,
+    set: &str,
+    part: Option<usize>,
+) -> Value {
+    match questions::read(store, project, set) {
+        Ok(SetRead::Held(held)) => {
+            let mut answer = json!({"status": "ok", "identity": identity});
+            if let (Some(answer), Value::Object(round)) =
+                (answer.as_object_mut(), questions::round_value(&held.round))
+            {
+                answer.extend(round);
+            }
+            in_parts(answer, part)
+        }
+        Ok(SetRead::NotHeld) => questions::no_such_question_set("identity"),
+        Ok(SetRead::Unreadable(UnreadableSet(reason))) => {
+            failed(LEDGER_UNAVAILABLE, reason, PLACE_LEDGER)
+        }
+        Err(error) => store_failed(&error, SET_NOT_READ_BUSY),
+    }
 }
 
 /// Each input of `order` with its name, hash and size, and its text, the
@@ -767,6 +811,8 @@ mod tests {
             json!({"operation": "document", "identity": {"kind": "capture", "id": ID,
                 "phase": 1}}),
             json!({"operation": "document", "identity": {"kind": "plan", "id": ID}}),
+            json!({"operation": "document", "identity": {"kind": "questions",
+                "set": "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "id": "x"}}),
             json!({"operation": "document", "identity": {"kind": "capture", "id": ID},
                 "part": -1}),
         ] {
@@ -1356,6 +1402,183 @@ mod tests {
                 let arguments = json!({"operation": "document", "identity": identity});
                 let refusal = judge_arguments(&arguments).expect_err("refused");
                 assert_eq!(refusal["code"], "invalid-arguments", "{refusal}");
+            }
+        }
+    }
+
+    mod question_sets {
+        //! Sets are opened with `questions::record` over the real store and
+        //! their answers appended as an answer call leaves them; expected
+        //! answers are written out from design 0005 `questions round` and
+        //! the plan's set R2.
+
+        use baley_core::questions::{
+            QUESTION_ANSWERED, QUESTION_ANSWERED_VERSION, QUESTION_DEFERRED,
+            QUESTION_DEFERRED_VERSION, QuestionSet, answered_payload, deferred_payload, judge_set,
+        };
+        use baley_store::{NewEvent, StreamName};
+        use baley_store_sqlite::SqliteStore;
+        use serde_json::{Value, json};
+
+        use super::super::*;
+        use crate::questions::record::tests::{open_set, story};
+        use crate::scope::fixtures::*;
+
+        const OWNER: &str = "Ada Lovelace";
+
+        /// Set R2 as the plan writes it out, accepted.
+        fn r2() -> QuestionSet {
+            judge_set(&json!([
+                {"id": "q1", "question": "Which store backs the ledger?",
+                    "recommended": "SQLite", "depends_on": []},
+                {"id": "q2", "question": "Do sessions share one ledger?",
+                    "recommended": "Yes, one per user", "depends_on": []},
+                {"id": "q3", "question": "Where does the ledger live?",
+                    "recommended": "Outside the checkout", "depends_on": ["q1"]}
+            ]))
+            .unwrap()
+        }
+
+        fn on_roadmap(type_name: &str, type_version: u32, payload: Value) -> NewEvent {
+            NewEvent {
+                stream: StreamName("roadmap".into()),
+                type_name: type_name.into(),
+                type_version,
+                git: None,
+                payload,
+                attachments: Vec::new(),
+            }
+        }
+
+        fn read_set(store: &SqliteStore, set: &str, part: Option<usize>) -> Value {
+            let shape = DocumentShape {
+                identity: Identity::Questions { set: set.into() },
+                part,
+            };
+            read(store, &project(), &shape)
+        }
+
+        #[test]
+        fn a_questions_read_without_its_round_or_the_relay_or_appending_is_caught() {
+            let (_dir, store) = store();
+            let set = open_set(&store, R1, &r2(), &story(1));
+            append(
+                &store,
+                R2,
+                T2,
+                vec![on_roadmap(
+                    QUESTION_ANSWERED,
+                    QUESTION_ANSWERED_VERSION,
+                    answered_payload(&set, "q1", 1, "SQLite", true, OWNER, T2),
+                )],
+            );
+            let before = head(&store);
+            let mut answer = read_set(&store, &set, None);
+            assert_eq!(head(&store), before, "a read appended");
+            let relay = answer["relay"].take();
+            assert!(relay.as_str().unwrap().contains("`bal-rounds`"), "{relay}");
+            assert_eq!(
+                answer,
+                json!({"status": "ok", "identity": {"kind": "questions", "set": set},
+                    "state": "open", "round": 2,
+                    "current": [
+                        {"id": "q2", "question": "Do sessions share one ledger?",
+                            "recommended": "Yes, one per user"},
+                        {"id": "q3", "question": "Where does the ledger live?",
+                            "recommended": "Outside the checkout"}],
+                    "waiting": [],
+                    "answered": [{"id": "q1", "answer": "SQLite", "accepted": true, "round": 1,
+                        "owner": OWNER, "at": T2}],
+                    "deferred": [], "abandoned": null, "relay": null})
+            );
+
+            let second = open_set(&store, R3, &r2(), &story(1));
+            append(
+                &store,
+                R4,
+                T3,
+                vec![on_roadmap(
+                    QUESTION_DEFERRED,
+                    QUESTION_DEFERRED_VERSION,
+                    deferred_payload(&second, "q1", 1, "after the spike", OWNER, T3),
+                )],
+            );
+            let before = head(&store);
+            let answer = read_set(&store, &second, None);
+            assert_eq!(head(&store), before, "a read appended");
+            assert_eq!(answer["state"], "open");
+            assert_eq!(answer["round"], 2);
+            assert_eq!(
+                answer["current"],
+                json!([{"id": "q2", "question": "Do sessions share one ledger?",
+                    "recommended": "Yes, one per user"}])
+            );
+            assert_eq!(
+                answer["waiting"],
+                json!([{"id": "q3", "question": "Where does the ledger live?",
+                    "waits_on": [{"id": "q1", "state": "deferred"}]}])
+            );
+            assert_eq!(
+                answer["deferred"],
+                json!([{"id": "q1", "reason": "after the spike", "round": 1, "owner": OWNER,
+                    "at": T3}])
+            );
+            assert_eq!(answer["answered"], json!([]));
+        }
+
+        #[test]
+        fn an_unknown_set_answered_as_anything_but_no_such_question_set_is_caught() {
+            let (_dir, store) = store();
+            open_set(&store, R1, &r2(), &story(1));
+            let unknown = "7f3e4d5c-6071-4c8d-8e9f-1a2b3c4d5e6f";
+            let long = "s".repeat(300);
+            for set in [unknown, long.as_str()] {
+                let answer = read_set(&store, set, None);
+                assert_eq!(answer["status"], "refused", "{answer}");
+                assert_eq!(answer["code"], "no-such-question-set");
+                assert_eq!(answer["slot"], "identity");
+                assert!(!answer.to_string().contains(set), "{answer}");
+            }
+        }
+
+        #[test]
+        fn a_long_round_not_cut_into_parts_is_caught() {
+            let (_dir, store) = store();
+            let text = "x".repeat(4096);
+            let questions: Vec<Value> = (1..=10)
+                .map(|n| {
+                    json!({"id": format!("q{n}"), "question": text, "recommended": "Yes",
+                        "depends_on": []})
+                })
+                .collect();
+            let set = open_set(
+                &store,
+                R1,
+                &judge_set(&Value::Array(questions)).unwrap(),
+                &story(1),
+            );
+            let first = read_set(&store, &set, Some(1));
+            assert_eq!(first["status"], "ok", "{first}");
+            assert_eq!(first["bound"], 24_576);
+            assert_eq!(first["part"], 1);
+            assert_eq!(first["next"], 2);
+            let mut joined = first["body"].as_str().unwrap().to_owned();
+            let mut next = first["next"].as_u64();
+            while let Some(part) = next {
+                let value = read_set(&store, &set, Some(usize::try_from(part).unwrap()));
+                assert_eq!(value["part"], part);
+                joined.push_str(value["body"].as_str().unwrap());
+                next = value["next"].as_u64();
+            }
+            let whole: Value = serde_json::from_str(&joined).unwrap();
+            assert_eq!(whole["status"], "ok");
+            assert_eq!(whole["identity"], json!({"kind": "questions", "set": set}));
+            assert_eq!(whole["round"], 1);
+            let current = whole["current"].as_array().unwrap();
+            assert_eq!(current.len(), 10);
+            for (n, asked) in (1..=10).zip(current) {
+                assert_eq!(asked["id"], format!("q{n}"));
+                assert_eq!(asked["question"], text);
             }
         }
     }

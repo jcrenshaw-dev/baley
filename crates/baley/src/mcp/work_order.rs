@@ -554,7 +554,7 @@ pub fn serve_fail(arguments: &Value, preparation: &Preparation) -> Value {
 /// as its own check, asked against the session's ledger. It gives the
 /// ledger, the command to record under and what the write's steps found, or
 /// the answer preparation ended with.
-fn prepared_write<'a>(
+pub(crate) fn prepared_write<'a>(
     preparation: &'a Preparation,
     caller: &ServerCaller,
     request: &WriteRequest,
@@ -1100,7 +1100,7 @@ pub fn serve_route(arguments: &Value, preparation: &Preparation) -> Value {
 }
 
 /// The `invalid-arguments` answer for a shape fault, at slot `arguments`.
-fn shape_fault(error: &serde_json::Error) -> Value {
+pub(crate) fn shape_fault(error: &serde_json::Error) -> Value {
     Refusal::new("invalid-arguments", bounded(error.to_string()))
         .slot("arguments")
         .value()
@@ -1113,7 +1113,7 @@ fn lowercase_uuid(text: &str) -> bool {
 
 /// Refuses a request id that is not a lowercase UUID, so a retry of the same
 /// `call` cannot miss its replay by changing case or wrapping.
-fn judge_request_id(request_id: &str, call: &str) -> Result<(), Value> {
+pub(crate) fn judge_request_id(request_id: &str, call: &str) -> Result<(), Value> {
     if lowercase_uuid(request_id) {
         return Ok(());
     }

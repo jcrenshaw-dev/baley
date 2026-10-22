@@ -145,7 +145,7 @@ The architecture is in [0002: System design](../0002-system-design.md); the stor
 - **Outside models are called by the host session, never by Baley.** Baley decides the review and builds its prompt and material. Release 1 uses provider APIs. The session supplies the owner's environment key and returns the raw response for Baley to parse and check. Model-list requests follow the same boundary. Baley never reads keys and scrubs no command output ([ADR 0039](../../adr/0039-session-owned-provider-credentials.md)).
 - **Installation and updates.** One installer command puts the binary behind `~/.local/bin/baley`; `baley install` writes all host wiring without npm or a plugin. Updates are off by default and opt-in, checked at most daily by a detached process started by `baley serve`, verified before staging and used by new session servers. Running servers keep their version; the next hook call uses the stable path and must work beside an older server and ledger state. Manual `baley update` is always available ([ADR 0038](../../adr/0038-installer-and-opt-in-updates.md)).
 - **Settings are TOML.** One global file and one project file that overrides it. Branch, forge and repository settings live only in the project file. Settings that differ per host sit in a section for each host. Baley writes the files; the model is never told about them.
-- **Nothing is required to work the way Cadence did.** The familiar working loop (project, plan, milestone, land) is kept; everything underneath is designed afresh.
+- **What Cadence hands its agents carries over.** The familiar working loop (project, plan, milestone, land) is kept. So is what Cadence hands its agents to write plans, run executions and run reviews, and the checks it runs on what they return: Baley ports that text and logic into the binary ([ADR 0048](../../adr/0048-port-what-cadence-hands-agents.md)). The records and storage underneath are designed afresh.
 
 ## Testing Decisions
 
@@ -171,5 +171,5 @@ The architecture is in [0002: System design](../0002-system-design.md); the stor
 
 ## Further Notes
 
-- Baley grew out of Cadence, a planning and gate system for Claude Code. Its working loop is Baley's heritage; its code and records are not carried over.
+- Baley grew out of Cadence, a planning and gate system for Claude Code. Its working loop and what it hands its agents are Baley's heritage, ported into the binary; its records are not carried over.
 - The area-by-area design is written as a set of living design documents that follow this PRD and the system design.

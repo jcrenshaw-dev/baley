@@ -218,7 +218,7 @@ pub fn run_story(args: StoryArgs) -> ExitCode {
     })
 }
 
-fn emit(result: Result<Render, Render>) -> ExitCode {
+pub(crate) fn emit(result: Result<Render, Render>) -> ExitCode {
     ExitCode::from(display::emit(
         &result.unwrap_or_else(|e| e),
         &mut std::io::stdout().lock(),
@@ -229,7 +229,9 @@ fn emit(result: Result<Render, Render>) -> ExitCode {
 /// Finds the project and opens the ledger only to read: no checkout
 /// admission, no policy step and nothing recorded, as `document` records
 /// nothing.
-fn reading(render: impl FnOnce(&SqliteStore, &ProjectId) -> Render) -> Result<Render, Render> {
+pub(crate) fn reading(
+    render: impl FnOnce(&SqliteStore, &ProjectId) -> Render,
+) -> Result<Render, Render> {
     let checkout = checkout()?;
     let store = open(&checkout)?;
     Ok(render(&store, &checkout.project))
@@ -237,16 +239,16 @@ fn reading(render: impl FnOnce(&SqliteStore, &ProjectId) -> Render) -> Result<Re
 
 /// The checkout a command runs in: its project, repository root and
 /// working-tree `baley.toml`, with Baley's folders.
-struct Checkout {
+pub(crate) struct Checkout {
     folders: Folders,
-    project: ProjectId,
+    pub(crate) project: ProjectId,
     root: PathBuf,
     working: Option<SettingsFile>,
 }
 
 /// Finds the project from the working directory through its `baley.toml`.
 /// Outside a project the command is refused, naming `baley init`.
-fn checkout() -> Result<Checkout, Render> {
+pub(crate) fn checkout() -> Result<Checkout, Render> {
     let folders = Folders::resolve(Platform::current(), &Environment::read())
         .map_err(|e| Render::refusal(e.to_string()))?;
     let unavailable = |e: std::io::Error| {
@@ -256,7 +258,7 @@ fn checkout() -> Result<Checkout, Render> {
     let ancestors = discovery::ancestors(&cwd).map_err(unavailable)?;
     let Discovery::Managed { folder, root } = discovery::discover(&ancestors) else {
         return Err(Render::refusal(format!(
-            "{NOT_A_PROJECT}: scope commands run in a checkout of a project, and no {PROJECT_FILE} was found in this repository; baley init creates one"
+            "{NOT_A_PROJECT}: project commands run in a checkout of a project, and no {PROJECT_FILE} was found in this repository; baley init creates one"
         )));
     };
     let path = folder.join(PROJECT_FILE);
@@ -280,7 +282,7 @@ fn checkout() -> Result<Checkout, Render> {
 }
 
 /// Opens the ledger and checks it lists the checkout's project.
-fn open(checkout: &Checkout) -> Result<SqliteStore, Render> {
+pub(crate) fn open(checkout: &Checkout) -> Result<SqliteStore, Render> {
     let store = crate::ledger::open::store(
         &checkout.folders.home,
         &SystemClock::now(),
@@ -357,7 +359,10 @@ fn submit_change(words: &ChangeWords) -> Result<Render, Render> {
 /// command that records scope runs them, so approvals and submissions cannot
 /// drift apart. It gives the policy built with no host, which names the
 /// owner, and the version the step returned.
-fn admitted(store: &SqliteStore, checkout: &Checkout) -> Result<(EffectivePolicy, u64), Render> {
+pub(crate) fn admitted(
+    store: &SqliteStore,
+    checkout: &Checkout,
+) -> Result<(EffectivePolicy, u64), Render> {
     let project = &checkout.project;
     let reads = policy_step::gather(
         &checkout.folders.config,
@@ -449,8 +454,9 @@ pub(crate) fn submit_command(
     )
 }
 
-/// The owner's command of `kind` over the draft `digest`.
-fn owner_command(
+/// The owner's command of `kind` over `digest`, a draft's or an answer
+/// call's.
+pub(crate) fn owner_command(
     kind: &str,
     project: &ProjectId,
     policy_version: u64,
@@ -553,7 +559,7 @@ pub(crate) fn submission_render(answer: &Value) -> Render {
 /// Text from the ledger as `escape_debug` writes it, quotes left plain, so a
 /// recorded line break or terminal escape cannot forge or rewrite a line of
 /// output.
-fn escaped(text: &str) -> String {
+pub(crate) fn escaped(text: &str) -> String {
     // The output is not a literal, so a quote needs no backslash. Every
     // backslash `escape_debug` writes starts an escape, so `\'` and `\"`
     // match only an escaped quote.
