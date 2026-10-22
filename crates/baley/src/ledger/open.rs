@@ -14,6 +14,7 @@ use baley_core::scope::{
     BacklogProjector, DraftProjector, PhaseDetailProjector, PhaseProjector, RoadmapProjector,
     register_scope_events,
 };
+use baley_core::truth::{TruthsProjector, register_truth_events};
 use baley_core::work_order::{WorkOrderProjector, register_work_order_events};
 use baley_core::{Registry, register_anchor_events, register_project_events};
 use baley_store_sqlite::Options;
@@ -31,14 +32,17 @@ use crate::update::events::register_update_events;
 /// `story.declared`, `story.corrected`, `story.reassigned`,
 /// `story.reprioritized`, `story.dropped`, `phase.declared`,
 /// `phase.reordered` and `phase.withdrawn`, `work_order.issued` and
-/// `work_order.failed`, and the four question types `questions.opened`,
-/// `question.answered`, `question.deferred` and `questions.abandoned`
-/// understood by the CLI, and declares view set version 12: `backlog capture
-/// checkout claim_scope draft guard guard_policy install model_catalog phase
-/// phase_detail policy questions request roadmap work_order`. The install
-/// view holds only install records. Update outcomes and provider
-/// acknowledgements are read from their streams and have no projector.
-/// A project brought to view set 12 is read-only for older binaries.
+/// `work_order.failed`, the four question types `questions.opened`,
+/// `question.answered`, `question.deferred` and `questions.abandoned`, and
+/// `story.refined` understood by the CLI, and declares view set version 13
+/// over seventeen views, the sixteen of view set 12 and `truths`: `backlog
+/// capture checkout claim_scope draft guard guard_policy install
+/// model_catalog phase phase_detail policy questions request roadmap truths
+/// work_order`. View set 13 also covers the `work_order` view's version 2,
+/// the `roadmap` view's version 3 and the `backlog` view's version 3. The
+/// install view holds only install records. Update outcomes and provider
+/// acknowledgements are read from their streams and have no projector. A
+/// project brought to view set 13 is read-only for older binaries.
 /// The startup `quick_check` is off for command-line callers.
 pub(crate) fn options() -> Options {
     let mut registry = Registry::new();
@@ -55,6 +59,7 @@ pub(crate) fn options() -> Options {
     register_scope_events(&mut registry).expect("unique scope types");
     register_work_order_events(&mut registry).expect("unique work order types");
     register_question_events(&mut registry).expect("unique question types");
+    register_truth_events(&mut registry).expect("unique truth types");
     Options {
         schema: Box::new(registry),
         projectors: vec![
@@ -72,8 +77,9 @@ pub(crate) fn options() -> Options {
             Box::new(BacklogProjector::new()),
             Box::new(WorkOrderProjector::new()),
             Box::new(QuestionsProjector::new()),
+            Box::new(TruthsProjector::new()),
         ],
-        view_set_version: NonZeroU32::new(12).expect("nonzero"),
+        view_set_version: NonZeroU32::new(13).expect("nonzero"),
         ..Options::default()
     }
 }
@@ -292,9 +298,33 @@ pub(crate) mod tests {
         }
     }
 
-    /// The domain views of view set 12, sorted: the thirteen of view set 11
-    /// and `questions`.
-    const VIEW_SET_12: [&str; 14] = [
+    /// The options as they stood at view set 12, before `story.refined` and
+    /// the `truths` view.
+    fn view_set_12() -> Options {
+        let mut options = view_set_11();
+        let mut registry = Registry::new();
+        register_anchor_events(&mut registry).unwrap();
+        register_project_events(&mut registry).unwrap();
+        register_model_events(&mut registry).unwrap();
+        register_policy_events(&mut registry).unwrap();
+        register_checkout_events(&mut registry).unwrap();
+        register_capture_events(&mut registry).unwrap();
+        register_guard_events(&mut registry).unwrap();
+        register_install_events(&mut registry).unwrap();
+        register_update_events(&mut registry).unwrap();
+        register_provider_events(&mut registry).unwrap();
+        register_scope_events(&mut registry).unwrap();
+        register_work_order_events(&mut registry).unwrap();
+        register_question_events(&mut registry).unwrap();
+        options.schema = Box::new(registry);
+        options.projectors.push(Box::new(QuestionsProjector::new()));
+        options.view_set_version = NonZeroU32::new(12).unwrap();
+        options
+    }
+
+    /// The domain views of view set 13, sorted: the fourteen of view set 12
+    /// and `truths`.
+    const VIEW_SET_13: [&str; 15] = [
         "backlog",
         "capture",
         "checkout",
@@ -308,6 +338,7 @@ pub(crate) mod tests {
         "policy",
         "questions",
         "roadmap",
+        "truths",
         "work_order",
     ];
 
@@ -600,10 +631,10 @@ pub(crate) mod tests {
                     "{name}"
                 );
             }
-            assert_eq!(opened.view_set_version, NonZeroU32::new(12).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(13).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_12);
+            assert_eq!(names, VIEW_SET_13);
         }
     }
 
@@ -628,10 +659,10 @@ pub(crate) mod tests {
                     .schema
                     .reads(PROVIDERS_ACKNOWLEDGED, PROVIDERS_ACKNOWLEDGED_VERSION + 1)
             );
-            assert_eq!(opened.view_set_version, NonZeroU32::new(12).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(13).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_12);
+            assert_eq!(names, VIEW_SET_13);
         }
     }
 
@@ -662,10 +693,10 @@ pub(crate) mod tests {
             assert!(opened.schema.reads("scope.submitted", 1));
             assert!(opened.schema.reads("scope.submitted", 2));
             assert!(!opened.schema.reads("scope.submitted", 3));
-            assert_eq!(opened.view_set_version, NonZeroU32::new(12).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(13).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_12);
+            assert_eq!(names, VIEW_SET_13);
         }
     }
 
@@ -682,10 +713,10 @@ pub(crate) mod tests {
                 assert!(opened.schema.reads(name, 1), "{name}");
                 assert!(!opened.schema.reads(name, 2), "{name}");
             }
-            assert_eq!(opened.view_set_version, NonZeroU32::new(12).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(13).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_12);
+            assert_eq!(names, VIEW_SET_13);
         }
     }
 
@@ -707,10 +738,10 @@ pub(crate) mod tests {
                 assert!(opened.schema.reads(name, 1), "{name}");
                 assert!(!opened.schema.reads(name, 2), "{name}");
             }
-            assert_eq!(opened.view_set_version, NonZeroU32::new(12).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(13).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_12);
+            assert_eq!(names, VIEW_SET_13);
         }
     }
 
@@ -1061,5 +1092,156 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(found.items.len(), 1);
         assert_eq!(found.items[0].body["text"], "second");
+    }
+
+    // Catches the truths view declared without raising the view set, or left
+    // out of the command line, server or guard open.
+    #[test]
+    fn a_view_set_left_at_12_or_missing_the_truths_view_is_caught() {
+        for opened in [
+            options(),
+            server_options(),
+            guard_options(Duration::from_millis(1_500)),
+        ] {
+            assert!(opened.schema.reads("story.refined", 1));
+            assert!(!opened.schema.reads("story.refined", 2));
+            assert_eq!(opened.view_set_version, NonZeroU32::new(13).unwrap());
+            let mut names = view_names(&opened);
+            names.sort();
+            assert_eq!(names, VIEW_SET_13);
+        }
+    }
+
+    /// Appends one `roadmap` event to `project` under a test command.
+    fn append_roadmap(
+        store: &baley_store_sqlite::SqliteStore,
+        project: &baley_store::ProjectId,
+        request: &str,
+        type_name: &str,
+        payload: serde_json::Value,
+        at: &str,
+    ) {
+        use baley_core::scope::ROADMAP_STREAM;
+        use baley_store::{
+            Actor, Command, CommandKind, Decision, Hash, NewEvent, Observed, OutcomeKind, Recorded,
+            RequestId, StreamName,
+        };
+
+        let command = Command {
+            project: project.clone(),
+            kind: CommandKind("test.append".into()),
+            request_id: RequestId(request.into()),
+            digest: Hash([0x33; 32]),
+            scope: vec![],
+            policy_version: 0,
+            recorded_at: at.into(),
+            actor: Actor::Owner,
+            caller: None,
+        };
+        let mut payload = Some(payload);
+        let recorded = store
+            .transact(&command, &mut |tx| {
+                if let Some(payload) = payload.take() {
+                    tx.append(NewEvent {
+                        stream: StreamName(ROADMAP_STREAM.into()),
+                        type_name: type_name.into(),
+                        type_version: 1,
+                        git: None,
+                        payload,
+                        attachments: vec![],
+                    })?;
+                }
+                Ok(Decision {
+                    kind: OutcomeKind::Done,
+                    answer: serde_json::json!({}),
+                    sensitive: false,
+                    observed: Observed::default(),
+                    git: None,
+                })
+            })
+            .unwrap();
+        assert!(matches!(recorded, Recorded::New { .. }), "{recorded:?}");
+    }
+
+    // Catches a raise that fences the previous binary's ledger, or the truths
+    // view or the roadmap's truth count not built forward for it.
+    #[test]
+    fn a_ledger_at_view_set_12_not_reopening_with_the_truths_view_is_caught() {
+        use baley_core::scope::{StoryStatus, roadmap_key, story_declared_payload};
+        use baley_core::truth::{Truth, refined_payload, truths_key};
+        use baley_store::{Admin, Hash, ProjectId, Views};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = ProjectId("6f1c2a4e-8b1d-4c3a-9e2f-0a5b7c9d1e3f".into());
+        let older = store(&home, T0, view_set_12()).unwrap();
+        older.create_project(&project, "sample", T0).unwrap();
+        let declared = story_declared_payload(
+            1,
+            "Every step is recorded",
+            StoryStatus::Active,
+            None,
+            Hash([0x5c; 32]),
+        );
+        append_roadmap(
+            &older,
+            &project,
+            "4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f71",
+            "story.declared",
+            declared,
+            T0,
+        );
+        drop(older);
+
+        let reopened = store(&home, T1, options()).unwrap();
+        let t1 = Truth {
+            id: "t1".into(),
+            form: "when".into(),
+            trigger: "the owner approves a draft by a stale digest".into(),
+            observer: "the owner".into(),
+            verb: "is refused".into(),
+            outcome: "stale-draft naming the first differing part".into(),
+            kind: "literal".into(),
+            human_verify: None,
+        };
+        let t2 = Truth {
+            id: "t2".into(),
+            form: "for-any".into(),
+            trigger: "order the answers of a set are recorded in".into(),
+            observer: "a ledger reader".into(),
+            verb: "gets".into(),
+            outcome: "the same round".into(),
+            kind: "property".into(),
+            human_verify: None,
+        };
+        let refined = refined_payload(
+            1,
+            "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+            Hash([0x6d; 32]),
+            "Ada Owner",
+            T1,
+            &[(t1, 1), (t2, 1)],
+        );
+        append_roadmap(
+            &reopened,
+            &project,
+            "4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f72",
+            "story.refined",
+            refined,
+            T1,
+        );
+
+        let truths = reopened
+            .get(&project, "truths", &truths_key(1))
+            .unwrap()
+            .expect("story 1's truths");
+        assert_eq!(truths.body["story"], 1);
+        assert_eq!(truths.body["truths"].as_array().map(Vec::len), Some(2));
+        let roadmap = reopened
+            .get(&project, "roadmap", &roadmap_key())
+            .unwrap()
+            .expect("the roadmap");
+        assert_eq!(roadmap.body["stories"][0]["id"], 1);
+        assert_eq!(roadmap.body["stories"][0]["truths"], 2);
     }
 }
