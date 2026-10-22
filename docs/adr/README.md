@@ -53,3 +53,4 @@ Start a new record from [TEMPLATE.md](TEMPLATE.md) with the next free four-digit
 | [0044](0044-owner-acts-on-the-command-line.md) | Give the owner's acts and reads command-line forms, and serve approvals only there | Accepted |
 | [0045](0045-project-start-from-a-session.md) | Start a project from a session, with the brief sent as text | Accepted |
 | [0046](0046-agent-stubs-per-role-and-rung.md) | Carry a route's effort in one agent stub per role and rung | Accepted |
+| [0047](0047-owner-acts-relayed-by-a-session.md) | Record an owner's act a session relays as Baley's, naming the session | Accepted |
