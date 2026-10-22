@@ -1,7 +1,7 @@
 //! Truths' pure half (design 0005 sections 5 and 6, PLN-R2 to PLN-R5): the
 //! judgement of one truth submission and the refusal codes it answers with,
-//! the versions a revision's truths get at approval, and the
-//! `story.refined` event that records an approved revision.
+//! the versions a revision's truths get at approval, the `story.refined`
+//! event that records an approved revision, and the `truths` view.
 //!
 //! Nothing here reads a store, a file or a clock: the binary supplies every
 //! value it judges.
@@ -9,6 +9,7 @@
 mod event;
 mod submission;
 mod version;
+mod view;
 
 pub use event::{STORY_REFINED, STORY_REFINED_VERSION, refined_payload, register_truth_events};
 pub use submission::{
@@ -16,3 +17,4 @@ pub use submission::{
     Truth, TruthRefusal, TruthSubmission, judge_truths,
 };
 pub use version::{Mark, Versioned, Versions, VersionsExhausted, versions};
+pub use view::{TRUTHS_VIEW, TruthsProjector, truths_key, truths_spec};

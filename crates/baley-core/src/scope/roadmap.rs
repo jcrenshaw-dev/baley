@@ -10,6 +10,7 @@ use super::event::{
     PHASE_DECLARED, PHASE_REORDERED, PHASE_WITHDRAWN, PROJECT_DESCRIBED, STORY_CORRECTED,
     STORY_DECLARED, STORY_DROPPED, STORY_REASSIGNED, STORY_REPRIORITIZED,
 };
+use crate::truth::STORY_REFINED;
 
 /// The view's name.
 pub const ROADMAP_VIEW: &str = "roadmap";
@@ -24,7 +25,7 @@ const PROJECT_KEY: &str = "project";
 pub fn roadmap_spec() -> ViewSpec {
     ViewSpec {
         name: ROADMAP_VIEW.into(),
-        version: 2,
+        version: 3,
         key: vec![FieldSpec {
             name: KEY_FIELD.into(),
             kind: FieldKind::Text,
@@ -56,6 +57,10 @@ pub fn roadmap_key() -> DocKey {
 /// dropped story keeps its entry with status `dropped` and no phase, and a
 /// reprioritization puts the stories it lists first and every other story
 /// after them in its current relative order.
+///
+/// A story's `truths` is 0 when it is declared and, once refined, the
+/// length of the truth list of its latest `story.refined`, which replaces
+/// the count before it. A refinement of a story not held is refused.
 pub struct RoadmapProjector {
     spec: ViewSpec,
 }
@@ -91,6 +96,7 @@ impl Projector for RoadmapProjector {
             STORY_REASSIGNED,
             STORY_DROPPED,
             STORY_REPRIORITIZED,
+            STORY_REFINED,
         ]
     }
 
@@ -232,6 +238,15 @@ impl Projector for RoadmapProjector {
                 let order = wholes(payload, "order").ok_or_else(fault)?;
                 let stories = entries(&mut document, "stories").ok_or_else(fault)?;
                 *stories = reprioritized(std::mem::take(stories), &order).ok_or_else(no_story)?;
+            }
+            STORY_REFINED => {
+                let id = whole(payload, "story").ok_or_else(fault)?;
+                let Some(Value::Array(truths)) = payload.get("truths") else {
+                    return Err(fault());
+                };
+                let count = truths.len();
+                let story = story_mut(&mut document, id).ok_or_else(no_story)?;
+                story["truths"] = json!(count);
             }
             _ => return Err(refuse("not a roadmap event")),
         }
@@ -543,7 +558,8 @@ mod tests {
                 "story.corrected",
                 "story.reassigned",
                 "story.dropped",
-                "story.reprioritized"
+                "story.reprioritized",
+                "story.refined"
             ]
         );
     }
@@ -782,5 +798,46 @@ mod tests {
         assert_eq!(story_ids(&declared), [1, 2, 3, 4]);
         assert_eq!(story_entry(&declared, 4)["phase"], 2);
         assert_eq!(phase_entry(&declared, 2)["stories"], json!([4]));
+    }
+
+    /// A `story.refined` for story `id` carrying `truths`.
+    fn refined(seq: u64, id: u32, truths: &[Value]) -> Event {
+        event(
+            "story.refined",
+            seq,
+            json!({"story": id, "set": "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+                "submission": "5c".repeat(32), "owner": "Ada Owner",
+                "at": "2026-10-22T09:00:00Z", "truths": truths}),
+        )
+    }
+
+    #[test]
+    fn a_story_truth_count_left_at_zero_or_summed_across_revisions_is_caught() {
+        assert_eq!(roadmap_spec().version, 3);
+        let t1 = json!({"id": "t1", "form": "when",
+            "trigger": "the owner approves a draft by a stale digest",
+            "observer": "the owner", "verb": "is refused",
+            "outcome": "stale-draft naming the first differing part", "kind": "literal",
+            "observable": true, "fixed_oracle": true, "version": 1});
+        let t2 = json!({"id": "t2", "form": "for-any",
+            "trigger": "order the answers of a set are recorded in",
+            "observer": "a ledger reader", "verb": "gets", "outcome": "the same round",
+            "kind": "property", "observable": true, "fixed_oracle": true, "version": 1});
+        let mut events = vec![refined(17, 1, &[t1.clone(), t2])];
+        let first = after_s1(events.clone());
+        assert_eq!(story_entry(&first, 1)["truths"], 2);
+        assert_eq!(story_entry(&first, 2)["truths"], 0);
+        assert_eq!(story_entry(&first, 3)["truths"], 0);
+
+        events.push(refined(18, 1, std::slice::from_ref(&t1)));
+        let second = after_s1(events);
+        assert_eq!(story_entry(&second, 1)["truths"], 1);
+
+        let undeclared = refined(19, 9, &[t1]);
+        assert!(
+            RoadmapProjector::new()
+                .apply(&undeclared, &[(roadmap_key(), second)])
+                .is_err()
+        );
     }
 }
