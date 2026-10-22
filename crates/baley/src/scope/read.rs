@@ -509,27 +509,69 @@ fn detail_text<P: Payloads + ?Sized>(payloads: &P, hash: &str) -> Result<String,
     })
 }
 
+/// How many times `backlog` reads the pair before a disagreement is a
+/// fault. Each read again follows a write that landed between the two
+/// reads, so a few cover any real interleaving.
+const BACKLOG_READS: usize = 3;
+
 /// Reads `project`'s backlog from its `backlog` document, in priority order,
 /// each story's refinement state worked out from its latest set's
-/// `questions` document, all those documents read in one `get_many`. No
-/// document is an empty backlog.
+/// `questions` document, all those documents read in one `get_many`. The two
+/// reads are separate snapshots, so when they disagree, because another
+/// command replaced a story's set between them, both are read again, up to
+/// `BACKLOG_READS` times. No document is an empty backlog.
 pub fn backlog<S: Views + ?Sized>(
     store: &S,
     project: &ProjectId,
 ) -> Result<Vec<BacklogStory>, ReadError> {
-    let Some(document) = read::<BacklogDocument, _>(store, project, BACKLOG_VIEW, &backlog_key())?
-    else {
-        return Ok(Vec::new());
-    };
-    let keys: Vec<DocKey> = document
-        .stories
-        .iter()
-        .filter_map(|story| story.set.as_deref().map(questions_key))
-        .collect();
-    let mut sets = store
-        .get_many(project, QUESTIONS_VIEW, &keys)
-        .map_err(ReadError::Store)?
-        .into_iter();
+    for _ in 0..BACKLOG_READS {
+        let Some(document) =
+            read::<BacklogDocument, _>(store, project, BACKLOG_VIEW, &backlog_key())?
+        else {
+            return Ok(Vec::new());
+        };
+        let keys: Vec<DocKey> = document
+            .stories
+            .iter()
+            .filter_map(|story| story.set.as_deref().map(questions_key))
+            .collect();
+        let sets = store
+            .get_many(project, QUESTIONS_VIEW, &keys)
+            .map_err(ReadError::Store)?
+            .into_iter()
+            .map(|set| set.map(|set| set.body))
+            .collect();
+        if let BacklogPair::Agreed(stories) = backlog_of(document, sets)? {
+            return Ok(stories);
+        }
+    }
+    Err(ReadError::Unreadable(format!(
+        "the {BACKLOG_VIEW} view document and its question sets disagreed on {BACKLOG_READS} reads"
+    )))
+}
+
+/// What a `backlog` document and its latest sets' documents, read one after
+/// the other, say together.
+#[derive(Debug, PartialEq, Eq)]
+enum BacklogPair {
+    /// The reads agree, so this is the backlog.
+    Agreed(Vec<BacklogStory>),
+    /// A story's latest set came back abandoned. Only a later set abandons
+    /// a story's set, and that set would be the latest, so the backlog
+    /// moved between the reads.
+    Moved,
+}
+
+/// Judges a `backlog` document against the bodies of its stories' latest
+/// sets, in the order the stories name them, none for a set the view does
+/// not hold. A missing or unreadable set is a fault, never a moved backlog:
+/// the `backlog` and `questions` views change in one transaction, so a set
+/// the backlog names is already held when the sets are read.
+fn backlog_of(
+    document: BacklogDocument,
+    sets: Vec<Option<Value>>,
+) -> Result<BacklogPair, ReadError> {
+    let mut sets = sets.into_iter();
     let mut stories = Vec::with_capacity(document.stories.len());
     for story in document.stories {
         let round = match &story.set {
@@ -539,14 +581,15 @@ pub fn backlog<S: Views + ?Sized>(
                     .flatten()
                     .ok_or_else(|| unreadable(QUESTIONS_VIEW))?;
                 Some(round_of(
-                    &set_facts(&set.body).map_err(|_| unreadable(QUESTIONS_VIEW))?,
+                    &set_facts(&set).map_err(|_| unreadable(QUESTIONS_VIEW))?,
                 ))
             }
             None => None,
         };
         let latest = story.set.as_deref().zip(round.as_ref());
-        let state =
-            refinement(latest, story.refined.as_deref()).map_err(|_| unreadable(QUESTIONS_VIEW))?;
+        let Ok(state) = refinement(latest, story.refined.as_deref()) else {
+            return Ok(BacklogPair::Moved);
+        };
         stories.push(BacklogStory {
             id: story.id,
             sentence: story.sentence,
@@ -561,7 +604,7 @@ pub fn backlog<S: Views + ?Sized>(
             size: story.size,
         });
     }
-    Ok(stories)
+    Ok(BacklogPair::Agreed(stories))
 }
 
 /// Reads accepted story `id` from the roadmap.
@@ -1256,5 +1299,67 @@ mod tests {
             )],
         );
         assert_eq!(states(&store)[0], (1, text("questions-open"), Some(2), 0));
+    }
+
+    #[test]
+    fn a_backlog_read_across_a_replaced_set_answered_unreadable_or_a_missing_set_read_again_is_caught()
+     {
+        use serde_json::json;
+
+        const S1: &str = "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+        let backlog = || -> BacklogDocument {
+            serde_json::from_value(json!({"stories": [
+                {"id": 1, "sentence": "Every step is recorded", "status": "active", "phase": 1,
+                    "set": S1, "refined": null, "truths": 0, "size": null},
+                {"id": 2, "sentence": "The owner approves scope", "status": "active",
+                    "phase": 2, "set": null, "refined": null, "truths": 0, "size": null}
+            ]}))
+            .unwrap()
+        };
+        let set = |abandoned: Value| {
+            json!({"questions": [{"id": "q1", "question": "Which store backs the ledger?",
+                "recommended": "SQLite", "depends_on": []}],
+                "answers": [], "deferrals": [], "abandoned": abandoned})
+        };
+        let superseded = json!({"cause": "superseded", "at": T4});
+
+        // Set S1 replaced between the reads: the backlog moved, read again.
+        assert_eq!(
+            backlog_of(backlog(), vec![Some(set(superseded))]),
+            Ok(BacklogPair::Moved)
+        );
+        assert_eq!(
+            backlog_of(backlog(), vec![Some(set(Value::Null))]),
+            Ok(BacklogPair::Agreed(vec![
+                BacklogStory {
+                    id: 1,
+                    sentence: text("Every step is recorded"),
+                    status: text("active"),
+                    phase: Some(1),
+                    refinement: text("questions-open"),
+                    round: Some(1),
+                    truths: 0,
+                    size: None,
+                },
+                BacklogStory {
+                    id: 2,
+                    sentence: text("The owner approves scope"),
+                    status: text("active"),
+                    phase: Some(2),
+                    refinement: text("unrefined"),
+                    round: None,
+                    truths: 0,
+                    size: None,
+                },
+            ]))
+        );
+        // A set the backlog names is held by the same transaction, so its
+        // absence is a fault, never a reason to read again.
+        assert_eq!(
+            backlog_of(backlog(), vec![None]),
+            Err(ReadError::Unreadable(text(
+                "the questions view document cannot be read"
+            )))
+        );
     }
 }
