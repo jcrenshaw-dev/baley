@@ -218,7 +218,7 @@ pub fn run_story(args: StoryArgs) -> ExitCode {
     })
 }
 
-fn emit(result: Result<Render, Render>) -> ExitCode {
+pub(crate) fn emit(result: Result<Render, Render>) -> ExitCode {
     ExitCode::from(display::emit(
         &result.unwrap_or_else(|e| e),
         &mut std::io::stdout().lock(),
@@ -229,7 +229,9 @@ fn emit(result: Result<Render, Render>) -> ExitCode {
 /// Finds the project and opens the ledger only to read: no checkout
 /// admission, no policy step and nothing recorded, as `document` records
 /// nothing.
-fn reading(render: impl FnOnce(&SqliteStore, &ProjectId) -> Render) -> Result<Render, Render> {
+pub(crate) fn reading(
+    render: impl FnOnce(&SqliteStore, &ProjectId) -> Render,
+) -> Result<Render, Render> {
     let checkout = checkout()?;
     let store = open(&checkout)?;
     Ok(render(&store, &checkout.project))
@@ -256,7 +258,7 @@ fn checkout() -> Result<Checkout, Render> {
     let ancestors = discovery::ancestors(&cwd).map_err(unavailable)?;
     let Discovery::Managed { folder, root } = discovery::discover(&ancestors) else {
         return Err(Render::refusal(format!(
-            "{NOT_A_PROJECT}: scope commands run in a checkout of a project, and no {PROJECT_FILE} was found in this repository; baley init creates one"
+            "{NOT_A_PROJECT}: project commands run in a checkout of a project, and no {PROJECT_FILE} was found in this repository; baley init creates one"
         )));
     };
     let path = folder.join(PROJECT_FILE);
@@ -553,7 +555,7 @@ pub(crate) fn submission_render(answer: &Value) -> Render {
 /// Text from the ledger as `escape_debug` writes it, quotes left plain, so a
 /// recorded line break or terminal escape cannot forge or rewrite a line of
 /// output.
-fn escaped(text: &str) -> String {
+pub(crate) fn escaped(text: &str) -> String {
     // The output is not a literal, so a quote needs no backslash. Every
     // backslash `escape_debug` writes starts an escape, so `\'` and `\"`
     // match only an escaped quote.

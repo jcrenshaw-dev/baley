@@ -12,3 +12,6 @@ pub mod read;
 
 /// Checks and records one answer call, for both surfaces.
 pub mod answer;
+
+/// The owner's `baley questions` commands.
+pub mod command;
