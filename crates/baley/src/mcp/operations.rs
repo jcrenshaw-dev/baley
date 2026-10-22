@@ -209,6 +209,7 @@ pub const APPLY_OPERATIONS: &[Operation] = &[
     with_project("project-start"),
     with_project("work-order-fail"),
     with_project("work-order-retry"),
+    with_project("questions-answer"),
 ];
 
 /// A spelling served only from a project, which its call prepares.
@@ -372,6 +373,9 @@ enum RequestShape {
     // `work-order-retry` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "work-order-retry")]
     WorkOrderRetry(#[allow(dead_code)] crate::mcp::work_order::RetryShape),
+    // `questions-answer` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "questions-answer")]
+    QuestionsAnswer(#[allow(dead_code)] crate::mcp::questions::AnswerShape),
     // `route` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "route")]
     Route(#[allow(dead_code)] crate::mcp::work_order::RouteShape),
@@ -653,6 +657,7 @@ pub(crate) mod expected {
         "project-start",
         "work-order-fail",
         "work-order-retry",
+        "questions-answer",
     ];
 }
 
@@ -719,6 +724,7 @@ mod tests {
                     "project-start",
                     "work-order-fail",
                     "work-order-retry",
+                    "questions-answer",
                     "route",
                 ]
                 .contains(n)
@@ -759,6 +765,7 @@ mod tests {
             "project-start",
             "work-order-fail",
             "work-order-retry",
+            "questions-answer",
         ] {
             assert_eq!(
                 lookup(Tool::Apply, Some(name)),
@@ -1281,7 +1288,11 @@ mod tests {
     fn the_work_order_operations_out_of_the_baseline_order_or_unserved_are_caught() {
         let names: Vec<&str> = APPLY_OPERATIONS.iter().map(|op| op.name).collect();
         let served = ["project-start", "work-order-fail", "work-order-retry"];
-        assert_eq!(names[names.len().saturating_sub(3)..], served);
+        // The three directly precede `questions-answer`, appended after them.
+        assert_eq!(
+            names[names.len().saturating_sub(4)..names.len().saturating_sub(1)],
+            served
+        );
         for name in served {
             assert_eq!(
                 lookup(Tool::Apply, Some(name)),
@@ -1307,6 +1318,31 @@ mod tests {
             }
             assert!(!listed.contains(&json!("instruction")), "{answer}");
         }
+    }
+
+    #[test]
+    fn a_questions_answer_spelling_left_unserved_or_out_of_the_baseline_order_is_caught() {
+        let names: Vec<&str> = APPLY_OPERATIONS.iter().map(|op| op.name).collect();
+        assert_eq!(names.last(), Some(&"questions-answer"));
+        assert_eq!(names[names.len() - 2], "work-order-retry");
+        assert_eq!(
+            lookup(Tool::Apply, Some("questions-answer")),
+            Lookup::Available {
+                needs_project: true
+            }
+        );
+        let answer = schema_answer(
+            &json!({"operation": "schema", "tool": "apply", "for": "questions-answer"}),
+        );
+        assert_eq!(answer["status"], "ok", "{answer}");
+        let listed = answer["schema"]["required"].as_array().unwrap();
+        for field in ["request_id", "set", "items"] {
+            assert!(listed.contains(&json!(field)), "{field} in {answer}");
+        }
+        assert!(
+            answer["schema"]["properties"].get("instruction").is_none(),
+            "{answer}"
+        );
     }
 
     #[test]
