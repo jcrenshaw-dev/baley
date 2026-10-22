@@ -9,6 +9,7 @@ use baley_core::catalog::{ModelCatalogProjector, register_model_events};
 use baley_core::checkout::{CheckoutProjector, register_checkout_events};
 use baley_core::guard::{GuardPolicyProjector, GuardProjector, register_guard_events};
 use baley_core::policy::recorded::{PolicyProjector, register_policy_events};
+use baley_core::questions::{QuestionsProjector, register_question_events};
 use baley_core::scope::{
     BacklogProjector, DraftProjector, PhaseDetailProjector, PhaseProjector, RoadmapProjector,
     register_scope_events,
@@ -29,14 +30,15 @@ use crate::update::events::register_update_events;
 /// scope types `scope.submitted`, `project.described`, `scope.approved`,
 /// `story.declared`, `story.corrected`, `story.reassigned`,
 /// `story.reprioritized`, `story.dropped`, `phase.declared`,
-/// `phase.reordered` and `phase.withdrawn`, and `work_order.issued` and
-/// `work_order.failed` understood by the CLI, and declares view set version
-/// 11: `backlog capture checkout claim_scope draft guard guard_policy
-/// install model_catalog phase phase_detail policy request roadmap
-/// work_order`. The install view holds only install records. Update
-/// outcomes and provider acknowledgements are read from their streams and
-/// have no projector.
-/// A project brought to view set 11 is read-only for older binaries.
+/// `phase.reordered` and `phase.withdrawn`, `work_order.issued` and
+/// `work_order.failed`, and the four question types `questions.opened`,
+/// `question.answered`, `question.deferred` and `questions.abandoned`
+/// understood by the CLI, and declares view set version 12: `backlog capture
+/// checkout claim_scope draft guard guard_policy install model_catalog phase
+/// phase_detail policy questions request roadmap work_order`. The install
+/// view holds only install records. Update outcomes and provider
+/// acknowledgements are read from their streams and have no projector.
+/// A project brought to view set 12 is read-only for older binaries.
 /// The startup `quick_check` is off for command-line callers.
 pub(crate) fn options() -> Options {
     let mut registry = Registry::new();
@@ -52,6 +54,7 @@ pub(crate) fn options() -> Options {
     register_provider_events(&mut registry).expect("unique provider types");
     register_scope_events(&mut registry).expect("unique scope types");
     register_work_order_events(&mut registry).expect("unique work order types");
+    register_question_events(&mut registry).expect("unique question types");
     Options {
         schema: Box::new(registry),
         projectors: vec![
@@ -68,8 +71,9 @@ pub(crate) fn options() -> Options {
             Box::new(PhaseDetailProjector::new()),
             Box::new(BacklogProjector::new()),
             Box::new(WorkOrderProjector::new()),
+            Box::new(QuestionsProjector::new()),
         ],
-        view_set_version: NonZeroU32::new(11).expect("nonzero"),
+        view_set_version: NonZeroU32::new(12).expect("nonzero"),
         ..Options::default()
     }
 }
@@ -250,9 +254,47 @@ pub(crate) mod tests {
         }
     }
 
-    /// The domain views of view set 11, sorted: the twelve of view set 10
-    /// and `work_order`.
-    const VIEW_SET_11: [&str; 13] = [
+    /// The options as they stood at view set 11, before the question
+    /// records.
+    fn view_set_11() -> Options {
+        let mut registry = Registry::new();
+        register_anchor_events(&mut registry).unwrap();
+        register_project_events(&mut registry).unwrap();
+        register_model_events(&mut registry).unwrap();
+        register_policy_events(&mut registry).unwrap();
+        register_checkout_events(&mut registry).unwrap();
+        register_capture_events(&mut registry).unwrap();
+        register_guard_events(&mut registry).unwrap();
+        register_install_events(&mut registry).unwrap();
+        register_update_events(&mut registry).unwrap();
+        register_provider_events(&mut registry).unwrap();
+        register_scope_events(&mut registry).unwrap();
+        register_work_order_events(&mut registry).unwrap();
+        Options {
+            schema: Box::new(registry),
+            projectors: vec![
+                Box::new(ModelCatalogProjector::new()),
+                Box::new(PolicyProjector::new()),
+                Box::new(CheckoutProjector::new()),
+                Box::new(CaptureProjector::new()),
+                Box::new(GuardProjector::new()),
+                Box::new(GuardPolicyProjector::new()),
+                Box::new(InstallProjector::new()),
+                Box::new(DraftProjector::new()),
+                Box::new(RoadmapProjector::new()),
+                Box::new(PhaseProjector::new()),
+                Box::new(PhaseDetailProjector::new()),
+                Box::new(BacklogProjector::new()),
+                Box::new(WorkOrderProjector::new()),
+            ],
+            view_set_version: NonZeroU32::new(11).unwrap(),
+            ..Options::default()
+        }
+    }
+
+    /// The domain views of view set 12, sorted: the thirteen of view set 11
+    /// and `questions`.
+    const VIEW_SET_12: [&str; 14] = [
         "backlog",
         "capture",
         "checkout",
@@ -264,6 +306,7 @@ pub(crate) mod tests {
         "phase",
         "phase_detail",
         "policy",
+        "questions",
         "roadmap",
         "work_order",
     ];
@@ -557,10 +600,10 @@ pub(crate) mod tests {
                     "{name}"
                 );
             }
-            assert_eq!(opened.view_set_version, NonZeroU32::new(11).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(12).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_11);
+            assert_eq!(names, VIEW_SET_12);
         }
     }
 
@@ -585,10 +628,10 @@ pub(crate) mod tests {
                     .schema
                     .reads(PROVIDERS_ACKNOWLEDGED, PROVIDERS_ACKNOWLEDGED_VERSION + 1)
             );
-            assert_eq!(opened.view_set_version, NonZeroU32::new(11).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(12).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_11);
+            assert_eq!(names, VIEW_SET_12);
         }
     }
 
@@ -619,10 +662,10 @@ pub(crate) mod tests {
             assert!(opened.schema.reads("scope.submitted", 1));
             assert!(opened.schema.reads("scope.submitted", 2));
             assert!(!opened.schema.reads("scope.submitted", 3));
-            assert_eq!(opened.view_set_version, NonZeroU32::new(11).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(12).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_11);
+            assert_eq!(names, VIEW_SET_12);
         }
     }
 
@@ -639,11 +682,55 @@ pub(crate) mod tests {
                 assert!(opened.schema.reads(name, 1), "{name}");
                 assert!(!opened.schema.reads(name, 2), "{name}");
             }
-            assert_eq!(opened.view_set_version, NonZeroU32::new(11).unwrap());
+            assert_eq!(opened.view_set_version, NonZeroU32::new(12).unwrap());
             let mut names = view_names(&opened);
             names.sort();
-            assert_eq!(names, VIEW_SET_11);
+            assert_eq!(names, VIEW_SET_12);
         }
+    }
+
+    // Catches a question record the store would refuse at append, or the
+    // questions view added without raising the set version.
+    #[test]
+    fn a_question_type_left_unregistered_or_the_view_set_left_at_11_is_caught() {
+        for opened in [
+            options(),
+            server_options(),
+            guard_options(Duration::from_millis(1_500)),
+        ] {
+            for name in [
+                "questions.opened",
+                "question.answered",
+                "question.deferred",
+                "questions.abandoned",
+            ] {
+                assert!(opened.schema.reads(name, 1), "{name}");
+                assert!(!opened.schema.reads(name, 2), "{name}");
+            }
+            assert_eq!(opened.view_set_version, NonZeroU32::new(12).unwrap());
+            let mut names = view_names(&opened);
+            names.sort();
+            assert_eq!(names, VIEW_SET_12);
+        }
+    }
+
+    // Catches a raise that fences the previous binary's ledger, or the
+    // questions view not built forward for it.
+    #[test]
+    fn a_ledger_written_at_view_set_11_refused_or_left_without_the_questions_view_is_caught() {
+        use baley_core::questions::questions_key;
+        use baley_store::{Admin, ProjectId, Views};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = ProjectId("6f1c2a4e-8b1d-4c3a-9e2f-0a5b7c9d1e3f".into());
+        let older = store(&home, T0, view_set_11()).unwrap();
+        older.create_project(&project, "sample", T0).unwrap();
+        drop(older);
+
+        let reopened = store(&home, T1, options()).unwrap();
+        let key = questions_key("5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d");
+        assert_eq!(reopened.get(&project, "questions", &key), Ok(None));
     }
 
     // Catches a version-1 start draft upcast without the start's target, so
