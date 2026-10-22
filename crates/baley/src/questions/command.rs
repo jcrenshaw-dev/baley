@@ -59,12 +59,23 @@ pub enum QuestionsCommand {
         #[arg(long = "take", value_name = "QUESTION")]
         take: Vec<String>,
         // Each occurrence takes exactly two values, kept in pairs in order.
+        // A value may begin with a hyphen, as a session's text may.
         /// Answer QUESTION in the owner's own words, TEXT.
-        #[arg(long = "answer", num_args = 2, value_names = ["QUESTION", "TEXT"])]
+        #[arg(
+            long = "answer",
+            num_args = 2,
+            value_names = ["QUESTION", "TEXT"],
+            allow_hyphen_values = true
+        )]
         answer: Vec<String>,
         /// Leave QUESTION undecided for REASON; a waiting question may be
         /// deferred too.
-        #[arg(long = "defer", num_args = 2, value_names = ["QUESTION", "REASON"])]
+        #[arg(
+            long = "defer",
+            num_args = 2,
+            value_names = ["QUESTION", "REASON"],
+            allow_hyphen_values = true
+        )]
         defer: Vec<String>,
     },
 }
@@ -481,6 +492,32 @@ mod tests {
             let fault = judge_call(&items).expect_err("refused");
             assert_eq!(call_fault(fault)["code"], "typed-content", "{items}");
         }
+    }
+
+    /// Parses `baley questions` words through the derived arguments alone.
+    fn parsed(words: &[&str]) -> Result<QuestionsCommand, clap::Error> {
+        use clap::{Args, FromArgMatches};
+        let matches = QuestionsArgs::augment_args(clap::Command::new("questions"))
+            .try_get_matches_from(std::iter::once("questions").chain(words.iter().copied()))?;
+        Ok(QuestionsArgs::from_arg_matches(&matches)?.command)
+    }
+
+    #[test]
+    fn an_answer_or_reason_beginning_with_a_hyphen_refused_at_the_terminal_is_caught() {
+        // A session may send these texts over MCP, so the terminal must take them.
+        let command = parsed(&[
+            "answer", SET, "--answer", "q1", "-O2", "--defer", "q2", "--later",
+        ])
+        .expect("hyphen-led texts parsed");
+        assert_eq!(
+            command,
+            QuestionsCommand::Answer {
+                set: SET.into(),
+                take: Vec::new(),
+                answer: words(&["q1", "-O2"]),
+                defer: words(&["q2", "--later"]),
+            }
+        );
     }
 
     #[test]
