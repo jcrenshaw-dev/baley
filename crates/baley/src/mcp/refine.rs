@@ -181,6 +181,10 @@ mod tests {
         assert_eq!(refusal["code"], "unknown-instruction");
         assert_eq!(refusal["slot"], "instruction");
 
+        // A retry sends the identical call, which must replay, while the
+        // same request id for another story is a reused id.
+        let again = judge_arguments(&refine(R1, 1)).expect("accepted");
+        assert_eq!(again.request.digest, first.request.digest);
         let other = judge_arguments(&refine(R1, 2)).expect("accepted");
         assert_ne!(other.request.digest, first.request.digest);
     }
