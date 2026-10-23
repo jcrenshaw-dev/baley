@@ -7,16 +7,17 @@
 //! plan's own members, task by task within `tasks` and item by item within
 //! `evidence_map`; (2) the `questions` member through the question set
 //! judge; (3) each task file inside the lease; (4) no check field with a
-//! code blank. The judge trusts the facts and judges the plan. Nothing here
-//! records anything.
+//! code blank; (5) a committed story holding a truth; (6) every story the
+//! plan serves committed to the phase. The judge trusts the facts and
+//! judges the plan. Nothing here records anything.
 
 use std::num::NonZeroU32;
 
 use serde_json::Value;
 
-use super::content;
 use super::evidence::{self, EvidenceItem};
 use super::task::{self, Task};
+use super::{content, stories};
 use crate::questions::{QuestionSet, SetRefusal};
 
 /// The refusal code for a plan out of its grammar: not an object, or a
@@ -34,6 +35,11 @@ pub const CHECK_TEST_FILE: &str = "check-test-file";
 /// The refusal code for a check whose boundary is blank, at either level
 /// (D-07).
 pub const CHECK_BOUNDARY: &str = "check-boundary";
+/// The refusal code for a plan for a phase none of whose committed stories
+/// holds a current truth.
+pub const NO_TRUTHS: &str = "no-truths";
+/// The refusal code for a plan serving a story not committed to the phase.
+pub const STORY_NOT_IN_PHASE: &str = "story-not-in-phase";
 
 /// Why a plan is refused. Positions count from 0 in the list as submitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +67,10 @@ pub enum PlanRefusal {
     CheckTestFile { position: usize, id: String },
     /// The check at `position`, whose id is `id`, has a blank boundary.
     CheckBoundary { position: usize, id: String },
+    /// No committed story of the phase holds a current truth.
+    NoTruths,
+    /// The plan serves `story`, which is not committed to the phase.
+    StoryNotInPhase { story: u32 },
 }
 
 impl PlanRefusal {
@@ -74,6 +84,8 @@ impl PlanRefusal {
             Self::CheckExpected { .. } => CHECK_EXPECTED,
             Self::CheckTestFile { .. } => CHECK_TEST_FILE,
             Self::CheckBoundary { .. } => CHECK_BOUNDARY,
+            Self::NoTruths => NO_TRUTHS,
+            Self::StoryNotInPhase { .. } => STORY_NOT_IN_PHASE,
         }
     }
 
@@ -236,11 +248,14 @@ impl Plan {
 /// Judges the submitted plan `plan` against the phase's `facts` in the
 /// fixed order, the first fault answering: (1) the plan's own members;
 /// (2) the `questions` member through `judge_set`; (3) `lease`, task by
-/// task and file by file; (4) the blank check fields, item by item.
-pub fn judge_plan(plan: &Value, _facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
+/// task and file by file; (4) the blank check fields, item by item;
+/// (5) `no-truths`; (6) `story-not-in-phase`, in the plan's story order.
+pub fn judge_plan(plan: &Value, facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
     let plan = content::read(plan)?;
     task::within_lease(&plan.tasks, &plan.files, &plan.directories)?;
     evidence::blank_fields(&plan.evidence_map)?;
+    stories::holds_truths(facts)?;
+    stories::committed(&plan.stories, facts)?;
     Ok(plan)
 }
 
@@ -252,7 +267,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::plan::fixtures::{accepted, f1, p1, qa, qb, refusal, with};
+    use crate::plan::fixtures::{accepted, f0, f1, p1, qa, qb, refusal, typed, with, without};
     use crate::questions::Question;
 
     #[test]
@@ -294,5 +309,146 @@ mod tests {
             })
         );
         assert_eq!(waiting.code(), "question-dependency");
+    }
+
+    fn lease(position: usize, id: &str, file: &str) -> PlanRefusal {
+        PlanRefusal::Lease {
+            position,
+            id: id.into(),
+            file: file.into(),
+        }
+    }
+
+    #[test]
+    fn a_plan_with_bad_content_a_bad_lease_or_an_uncommitted_story_accepted_or_named_wrongly_is_caught()
+     {
+        let facts = f1();
+        assert_eq!(accepted(&p1(), &facts).size(), 1);
+        let mut over = vec![json!("docs")];
+        over.extend((0..=254).map(|n| json!(format!("d/{n}"))));
+        let cases = [
+            (with(p1(), "", "plan", json!(1)), typed("plan")),
+            (
+                with(
+                    p1(),
+                    "",
+                    "question_set",
+                    json!("5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d"),
+                ),
+                typed("question_set"),
+            ),
+            (with(p1(), "", "size", json!(1)), typed("size")),
+            (with(p1(), "", "suite", json!("cargo test")), typed("suite")),
+            (with(p1(), "", "owner", json!("Ada")), typed("owner")),
+            (without(p1(), "", "goal"), typed("goal")),
+            (with(p1(), "", "phase", json!("8")), typed("phase")),
+            (
+                with(p1(), "", "stories", json!([1, 1])),
+                typed("stories[1]"),
+            ),
+            (
+                with(p1(), "", "directories", json!(["docs/"])),
+                typed("directories[0]"),
+            ),
+            (
+                with(p1(), "", "files", json!(["/src/judge.rs"])),
+                typed("files[0]"),
+            ),
+            (
+                with(p1(), "", "files", json!(["src/../judge.rs"])),
+                typed("files[0]"),
+            ),
+            (
+                with(p1(), "", "files", json!(["src/judge.rs", "src/judge.rs"])),
+                typed("files[1]"),
+            ),
+            (
+                with(
+                    with(p1(), "", "files", json!([])),
+                    "",
+                    "directories",
+                    json!([]),
+                ),
+                typed("files"),
+            ),
+            (
+                with(p1(), "", "directories", Value::Array(over)),
+                typed("directories[255]"),
+            ),
+            (
+                with(
+                    p1(),
+                    "/tasks/0",
+                    "files",
+                    json!(["src/judge.rs", "src/other.rs"]),
+                ),
+                lease(0, "k1", "src/other.rs"),
+            ),
+            (
+                with(p1(), "", "stories", json!([1, 4])),
+                PlanRefusal::StoryNotInPhase { story: 4 },
+            ),
+            (
+                with(
+                    p1(),
+                    "",
+                    "questions",
+                    json!([{"id": "q1", "question": "Which store backs the ledger?",
+                        "recommended": "SQLite", "depends_on": ["q9"]}]),
+                ),
+                PlanRefusal::Questions(SetRefusal::QuestionDependency {
+                    position: 0,
+                    id: "q1".into(),
+                }),
+            ),
+            (
+                with(p1(), "", "questions", json!("none")),
+                PlanRefusal::Questions(SetRefusal::TypedContent { position: None }),
+            ),
+        ];
+        for (plan, refused) in cases {
+            assert_eq!(refusal(&plan, &facts), refused, "{plan}");
+        }
+        assert_eq!(refusal(&p1(), &f0()), PlanRefusal::NoTruths);
+    }
+
+    #[test]
+    fn faults_judged_in_another_order_are_caught() {
+        let facts = f1();
+        let other = |plan| with(plan, "/tasks/0", "files", json!(["src/other.rs"]));
+        let blank = |plan| with(plan, "/evidence_map/0/spec", "command", json!(""));
+        let waiting = |plan| with(plan, "", "questions", json!([qb()]));
+        let owner = with(p1(), "", "owner", json!("Ada"));
+        let cases = [
+            (
+                with(owner, "", "directories", json!(["docs/"])),
+                &facts,
+                typed("owner"),
+            ),
+            (waiting(without(p1(), "", "goal")), &facts, typed("goal")),
+            (
+                waiting(other(p1())),
+                &facts,
+                PlanRefusal::Questions(SetRefusal::QuestionDependency {
+                    position: 0,
+                    id: "q2".into(),
+                }),
+            ),
+            (blank(other(p1())), &facts, lease(0, "k1", "src/other.rs")),
+        ];
+        for (plan, facts, refused) in cases {
+            assert_eq!(refusal(&plan, facts), refused, "{plan}");
+        }
+        assert_eq!(
+            refusal(&blank(p1()), &f0()),
+            PlanRefusal::CheckCommand {
+                position: 0,
+                id: "c1".into()
+            }
+        );
+        assert_eq!(
+            refusal(&with(p1(), "", "stories", json!([1, 4])), &f0()),
+            PlanRefusal::NoTruths
+        );
     }
 }

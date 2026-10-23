@@ -2,9 +2,6 @@
 //! decisions, never from running the judge: one copy every test of the
 //! module reads.
 
-// Later tasks of the plan read the builders this one does not.
-#![allow(dead_code)]
-
 use serde_json::{Value, json};
 
 use super::{CommittedStory, CurrentTruth, Plan, PlanFacts, PlanRefusal, judge_plan};
