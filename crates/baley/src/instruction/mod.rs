@@ -17,6 +17,7 @@ use crate::help::front_door;
 pub mod analyzer;
 pub mod capture;
 pub mod context;
+pub mod plan;
 pub mod planner;
 pub mod read_contract;
 pub mod rounds;

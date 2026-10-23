@@ -965,3 +965,53 @@ fn a_planner_text_naming_cadence_files_or_markers_is_caught() {
         assert!(!body.contains(name), "the planner text names {name}");
     }
 }
+
+#[test]
+fn a_plan_door_missing_a_step_it_owns_is_caught() {
+    // The steps D-17 keeps: the planner order, its launch, failure and
+    // retry, the submit, the rounds, the split and the terminal approval.
+    for needle in [
+        "phase-plan",
+        r#""instruction":"bal-plan""#,
+        "launch",
+        "prompt",
+        "work-order-fail",
+        "work-order-retry",
+        "plan-submit",
+        "bal-rounds",
+        "Proposed split:",
+        "over-capacity",
+        "question-open",
+        "baley scope preview",
+        "baley plan approve",
+        "Nothing is approved over MCP",
+    ] {
+        assert!(
+            plan::TEXT.contains(needle),
+            "the plan front door lacks {needle}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_door_naming_cadence_state_or_a_later_tasks_step_is_caught() {
+    for name in CADENCE_NAMES.iter().chain(&[
+        "STATE",
+        "cursor",
+        "PLAN.md",
+        "checker",
+        "plan_check",
+        "--gaps",
+        "--inline",
+        "--skip-check",
+        "seed-reqs",
+        "cite-count",
+        "lease-check",
+        "max_plan_tasks",
+    ]) {
+        assert!(
+            !plan::TEXT.contains(name),
+            "the plan front door names {name}"
+        );
+    }
+}
