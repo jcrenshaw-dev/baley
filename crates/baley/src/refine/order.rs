@@ -1006,14 +1006,14 @@ pub(crate) mod tests {
         )
     }
 
-    fn issued(store: &SqliteStore) -> Vec<baley_store::Event> {
+    pub(crate) fn issued(store: &SqliteStore) -> Vec<baley_store::Event> {
         of_type(&history(store), WORK_ORDER_ISSUED)
             .into_iter()
             .cloned()
             .collect()
     }
 
-    fn input_names(event: &baley_store::Event) -> Vec<&str> {
+    pub(crate) fn input_names(event: &baley_store::Event) -> Vec<&str> {
         event.payload["inputs"]
             .as_array()
             .unwrap()
@@ -1055,7 +1055,7 @@ pub(crate) mod tests {
     }
 
     /// The body of the input `name` an issued order holds.
-    fn input_body(store: &SqliteStore, event: &baley_store::Event, name: &str) -> Value {
+    pub(crate) fn input_body(store: &SqliteStore, event: &baley_store::Event, name: &str) -> Value {
         use std::io::Read;
 
         use baley_store::{PayloadBody, Payloads};

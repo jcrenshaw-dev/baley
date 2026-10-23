@@ -100,7 +100,9 @@ pub fn run(args: QuestionsArgs) -> ExitCode {
 /// the policy step, so a refused call records nothing at all; the owner is
 /// read over the policy the step recorded; and the call is recorded as the
 /// owner under the version in force, through the same library function as
-/// `questions-answer`.
+/// `questions-answer`. It passes no drafting order: a close here records the
+/// answers and says the set is closed, and the session's next `story-refine`
+/// issues the drafting order (D-08).
 fn record_answers(
     set: &str,
     take: &[String],
@@ -127,7 +129,7 @@ fn record_answers(
         &SystemClock::now(),
     )
     .map_err(|e| Render::refusal(e.to_string()))?;
-    let recorded = answers::record(&store, &command, &owner, Some(&checked));
+    let recorded = answers::record(&store, &command, &owner, Some(&checked), None);
     Ok(receipt_render(&answers::answer(recorded, &store), set))
 }
 
@@ -668,7 +670,7 @@ mod tests {
             let command = prepared_command(&project(), &judged.request, 0, at, &caller);
             match answers::check(store, &project(), set, &judged.call) {
                 Ok(checked) => answers::answer(
-                    answers::record(store, &command, OWNER, Some(&checked)),
+                    answers::record(store, &command, OWNER, Some(&checked), None),
                     store,
                 ),
                 Err(refusal) => refusal,
@@ -697,7 +699,7 @@ mod tests {
             .unwrap();
             match answers::check(store, &project(), set, &call) {
                 Ok(checked) => answers::answer(
-                    answers::record(store, &command, OWNER, Some(&checked)),
+                    answers::record(store, &command, OWNER, Some(&checked), None),
                     store,
                 ),
                 Err(refusal) => refusal,

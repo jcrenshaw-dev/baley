@@ -12,8 +12,8 @@
 //! nothing recorded.
 
 use baley_core::questions::{
-    AnswerRefusal, Call, CallFault, QUESTIONS_VIEW, Round, SetState, Settled, TYPED_CONTENT,
-    judge_answers, questions_key,
+    AnswerRefusal, Call, CallFault, QUESTIONS_VIEW, Question, Round, SetFacts, SetState, Settled,
+    TYPED_CONTENT, judge_answers, questions_key,
 };
 use baley_store::{
     Command, Decision, Ledger, NewEvent, Observed, ObservedDocument, OutcomeKind, Payloads,
@@ -26,6 +26,7 @@ use crate::mcp::capture::{PLACE_LEDGER, failed, store_failed};
 use crate::mcp::parts::PART_BOUND;
 use crate::mcp::prepare::LEDGER_UNAVAILABLE;
 use crate::questions::read::{RELAY, SetRead, no_such_question_set, read as read_set, round_value};
+use crate::refine::order::{PreparedOrder, analyzer_absences};
 
 /// The command kind an answer call is recorded under, on either surface.
 pub const ANSWER_COMMAND: &str = "questions.answer";
@@ -45,6 +46,26 @@ pub struct Checked {
     pub produced_seq: u64,
     /// The call judged against the set.
     pub settled: Settled,
+    /// The story whose set this is, or none for a plan draft's set.
+    pub story: Option<u32>,
+    /// The set's questions as submitted.
+    pub questions: Vec<Question>,
+}
+
+impl Checked {
+    /// The set's facts once this call is recorded by `owner` at `at`, when
+    /// the call closes the set: its questions with every answer and
+    /// deferral, the call's own at its round. None while a question stays
+    /// open.
+    pub fn closed_facts(&self, owner: &str, at: &str) -> Option<SetFacts> {
+        let after = self.settled.round_after(owner, at);
+        (after.state == SetState::Closed).then(|| SetFacts {
+            questions: self.questions.clone(),
+            answers: after.answered,
+            deferrals: after.deferred,
+            abandoned: None,
+        })
+    }
 }
 
 /// The `typed-content` refusal for a call whose grammar is refused, naming
@@ -113,20 +134,29 @@ pub fn check<V: Views + ?Sized>(
         stream: held.stream,
         produced_seq: held.produced_seq,
         settled,
+        story: held.story,
+        questions: held.facts.questions,
     })
 }
 
 /// Records the call `checked` holds under `command`, every answer and
 /// deferral in one transaction on the set's stream, each carrying the
 /// call's round, `owner` and the command's time. The command's actor and
-/// caller are recorded as the caller built them. A request the store
-/// already holds is replayed from its record before any decision runs; a
-/// decision asked to run without the check's read records nothing.
+/// caller are recorded as the caller built them. `drafting`, the analyzer's
+/// drafting order prepared for a call over MCP that closes a story's set, is
+/// issued in the same transaction (D-08), its decision declaring that no
+/// analyzer order of the story is pending (D-09) and observing the documents
+/// its inputs were read from beside the set's; `baley questions answer`
+/// passes none, since an owner command issues no work order (ADR 0044). A
+/// request the store already holds is replayed from its record before any
+/// decision runs; a decision asked to run without the check's read records
+/// nothing.
 pub fn record<L: Ledger + ?Sized>(
     store: &L,
     command: &Command,
     owner: &str,
     checked: Option<&Checked>,
+    drafting: Option<&PreparedOrder>,
 ) -> Result<Recorded, StoreError> {
     store.transact(command, &mut |tx| {
         let Some(checked) = checked else {
@@ -145,19 +175,29 @@ pub fn record<L: Ledger + ?Sized>(
                 attachments: Vec::new(),
             })?;
         }
+        let mut observed = Observed {
+            documents: vec![ObservedDocument {
+                view: QUESTIONS_VIEW.into(),
+                key: questions_key(&checked.set),
+                produced_seq: Some(checked.produced_seq),
+            }],
+            ..Observed::default()
+        };
+        let drafted = match drafting {
+            Some(order) => {
+                let members = order.issue_within(tx, &checked.set, &command.recorded_at)?;
+                observed.documents.extend(order.documents().iter().cloned());
+                observed.absences = analyzer_absences(order.story());
+                Some(members)
+            }
+            None => None,
+        };
         let after = checked.settled.round_after(owner, &command.recorded_at);
         Ok(Decision {
             kind: OutcomeKind::Done,
-            answer: receipt_value(&checked.set, round, &command.recorded_at, &after),
+            answer: receipt_value(&checked.set, round, &command.recorded_at, &after, drafted),
             sensitive: false,
-            observed: Observed {
-                documents: vec![ObservedDocument {
-                    view: QUESTIONS_VIEW.into(),
-                    key: questions_key(&checked.set),
-                    produced_seq: Some(checked.produced_seq),
-                }],
-                ..Observed::default()
-            },
+            observed,
             git: None,
         })
     })
@@ -165,20 +205,30 @@ pub fn record<L: Ledger + ?Sized>(
 
 /// The receipt of a call recorded in `round` at `at`: the set, the round
 /// recorded, the time, and in `now` the set's round as it stands after the
-/// call. A receipt cannot be cut into parts, so when that round would pass
-/// the part bound `now` names the `document` read instead.
-fn receipt_value(set: &str, round: u32, at: &str, after: &Round) -> Value {
-    if after.state == SetState::Closed {
-        // Every question is answered or deferred. The close-time outputs, the
-        // analyzer's drafting order for a story's set and `ready` or the
-        // planner's revision order for a plan draft's, are T7's and T9's and
-        // plug in here; until then the receipt only says `closed`.
-    }
+/// call. A call that closed a story's set over MCP adds `drafting`, the
+/// analyzer's drafting order it issued (D-08). A receipt cannot be cut into
+/// parts, so when that round would pass the part bound `now` names the
+/// `document` read instead.
+fn receipt_value(
+    set: &str,
+    round: u32,
+    at: &str,
+    after: &Round,
+    drafting: Option<Map<String, Value>>,
+) -> Value {
     let mut receipt = Map::new();
     receipt.insert("status".into(), json!("ok"));
     receipt.insert("set".into(), json!(set));
     receipt.insert("round".into(), json!(round));
     receipt.insert("recorded_at".into(), json!(at));
+    if after.state == SetState::Closed {
+        // Every question is answered or deferred. A plan draft's close
+        // outputs, `ready` or the planner's revision order, are T9's and plug
+        // in here; until then a plan draft's receipt only says `closed`.
+        if let Some(drafting) = drafting {
+            receipt.insert("drafting".into(), Value::Object(drafting));
+        }
+    }
     with_now(receipt, set, after)
 }
 
@@ -272,7 +322,7 @@ pub(crate) mod tests {
             Err(fault) => return call_fault(fault),
         };
         match check(store, &project(), set, &call) {
-            Ok(checked) => answer(record(store, command, owner, Some(&checked)), store),
+            Ok(checked) => answer(record(store, command, owner, Some(&checked), None), store),
             Err(refusal) => refusal,
         }
     }
@@ -401,6 +451,7 @@ pub(crate) mod tests {
                 &command(ANSWER_COMMAND, R3, 3, T3),
                 OWNER,
                 Some(&first),
+                None,
             ),
             &store,
         );
@@ -556,8 +607,8 @@ pub(crate) mod tests {
         let set = open_set(&store, R1, &r2(), &story(1));
         let kept = checked(&store, &set, &json!([take("q1")]));
         let command = command(ANSWER_COMMAND, R2, 2, T2);
-        let first = answer(record(&store, &command, OWNER, Some(&kept)), &store);
-        let again = answer(record(&store, &command, OWNER, Some(&kept)), &store);
+        let first = answer(record(&store, &command, OWNER, Some(&kept), None), &store);
+        let again = answer(record(&store, &command, OWNER, Some(&kept), None), &store);
         assert_eq!(first["status"], "ok", "{first}");
         assert_eq!(again, first);
         assert_eq!(on_stream(&store, "roadmap").len(), 1);
@@ -569,7 +620,13 @@ pub(crate) mod tests {
         declare(&store, &project(), 1);
         open_set(&store, R1, &r2(), &story(1));
         let before = head(&store);
-        let unchecked = record(&store, &command(ANSWER_COMMAND, R2, 2, T2), OWNER, None);
+        let unchecked = record(
+            &store,
+            &command(ANSWER_COMMAND, R2, 2, T2),
+            OWNER,
+            None,
+            None,
+        );
         assert!(unchecked.is_err(), "{unchecked:?}");
         assert_eq!(head(&store), before);
     }
@@ -587,5 +644,251 @@ pub(crate) mod tests {
         assert_eq!(refusal["code"], "no-such-question-set");
         assert!(!refusal.to_string().contains(unknown), "{refusal}");
         assert_eq!(head(&store), before);
+    }
+
+    /// The drafting order a closing call issues in these tests.
+    pub(crate) const D1: &str = "4f5a6b7c-8d9e-4f0a-9b1c-3d4e5f6a7b8c";
+    /// The owner the plan's data names.
+    pub(crate) const ADA: &str = "Ada Owner";
+
+    /// Runs one call as `questions-answer` runs it below the session: the
+    /// grammar, the relayed check and the relayed recording under `request`
+    /// at `at` as [`ADA`], with the default policy, which sets nothing for
+    /// the analyzer, and an empty catalog; a drafting order is issued as
+    /// [`D1`].
+    pub(crate) fn relay(
+        store: &SqliteStore,
+        set: &str,
+        items: &Value,
+        request: &str,
+        at: &str,
+    ) -> Value {
+        use std::collections::BTreeSet;
+
+        use baley_core::policy::{AcceptedNames, Host, Schema, effective_policy};
+
+        use crate::mcp::questions::{relay_check, relay_record};
+
+        let call = match judge_call(items) {
+            Ok(call) => call,
+            Err(fault) => return call_fault(fault),
+        };
+        let relayed = match relay_check(store, &project(), set, &call) {
+            Ok(relayed) => relayed,
+            Err(refusal) => return refusal,
+        };
+        let policy =
+            effective_policy(Schema::standard(), Some(Host::ClaudeCode), None, None).unwrap();
+        let names = AcceptedNames {
+            names: BTreeSet::new(),
+            version: 0,
+        };
+        relay_record(
+            store,
+            &command(ANSWER_COMMAND, request, 2, at),
+            ADA,
+            &relayed,
+            &policy,
+            Host::ClaudeCode,
+            &names,
+            D1,
+        )
+    }
+
+    /// The `work_order.issued` events naming `subject` whose instructions
+    /// include `identity`.
+    fn issued_for(store: &SqliteStore, subject: &str, identity: &str) -> Vec<Event> {
+        history(store)
+            .into_iter()
+            .filter(|event| {
+                event.type_name == "work_order.issued"
+                    && event.payload["subject"] == subject
+                    && event.payload["instructions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|entry| entry["identity"] == identity)
+            })
+            .collect()
+    }
+
+    fn order(store: &SqliteStore, id: &str) -> Value {
+        crate::work_order::read::order(store, &project(), id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("order {id} is held"))
+    }
+
+    #[test]
+    fn a_drafting_order_issued_with_a_question_open_or_a_second_analyzer_order_recorded_is_caught()
+    {
+        use crate::questions::record::tests::q1;
+        use crate::refine::order::check as refine_check;
+        use crate::refine::order::tests::{approved, input_body, input_names, issue_checked};
+        use crate::refine::questions::tests::{D, Q, Q2, submitted};
+
+        let (_dir, store) = approved();
+        let checked = refine_check(&store, &project(), 1).unwrap();
+        let questions_order = issue_checked(&store, &checked, Q, R1, T1);
+        assert_eq!(
+            questions_order["analyzer"], "questions",
+            "{questions_order}"
+        );
+        assert_eq!(
+            order(&store, Q)["instructions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["identity"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["bal-analyzer-questions"]
+        );
+        let before = head(&store);
+        let pending = refine_check(&store, &project(), 1).expect_err("one live order");
+        assert_eq!(pending["status"], "refused", "{pending}");
+        assert_eq!(pending["code"], "analyzer-order-pending");
+        assert_eq!(pending["details"], json!({"work_order": Q}));
+        assert_eq!(head(&store), before);
+
+        let opened = submitted(&store, 1, Q, &q1(), R2, T2);
+        assert_eq!(opened["status"], "ok", "{opened}");
+        assert_eq!(opened["now"]["round"], 1);
+        assert_eq!(ids(&opened["now"]["current"]), ["q1"]);
+        assert!(opened.get("drafting").is_none(), "{opened}");
+        assert_eq!(order(&store, Q)["state"], "answered");
+        let set = opened["set"].as_str().unwrap().to_owned();
+
+        let first = relay(&store, &set, &json!([take("q1")]), R3, T3);
+        assert_eq!(first["status"], "ok", "{first}");
+        assert_eq!(first["now"]["state"], "open");
+        assert_eq!(first["now"]["round"], 2);
+        assert!(first.get("drafting").is_none(), "{first}");
+        assert!(issued_for(&store, "story/1", "bal-analyzer-drafting").is_empty());
+        let before = head(&store);
+        let open = refine_check(&store, &project(), 1).expect_err("a question is open");
+        assert_eq!(open["code"], "question-open", "{open}");
+        assert_eq!(open["details"], json!({"set": set, "question": "q2"}));
+        assert_eq!(head(&store), before);
+
+        let close = relay(
+            &store,
+            &set,
+            &json!([own("q2", "In the owner's data folder")]),
+            R4,
+            T4,
+        );
+        assert_eq!(close["status"], "ok", "{close}");
+        assert_eq!(close["now"]["state"], "closed", "{close}");
+        assert_eq!(close["drafting"]["work_order"], D1, "{close}");
+        let drafting = order(&store, D1);
+        assert_eq!(drafting["state"], "pending", "{drafting}");
+        assert_eq!(drafting["role"], "analyzer");
+        assert_eq!(drafting["subject"], "story/1");
+        assert_eq!(
+            drafting["instructions"][0]["identity"],
+            "bal-analyzer-drafting"
+        );
+        assert_eq!(drafting["instructions"].as_array().unwrap().len(), 1);
+        let issued = issued_for(&store, "story/1", "bal-analyzer-drafting");
+        assert_eq!(issued.len(), 1);
+        assert_eq!(
+            input_names(&issued[0]),
+            ["story", "description", "roadmap", "questions"]
+        );
+        assert_eq!(
+            input_body(&store, &issued[0], "questions")["answers"],
+            json!([
+                {"question": "q1", "answer": "SQLite", "accepted": true, "round": 1,
+                    "owner": ADA, "at": T3},
+                {"question": "q2", "answer": "In the owner's data folder", "accepted": false,
+                    "round": 2, "owner": ADA, "at": T4}])
+        );
+
+        let checked = refine_check(&store, &project(), 2).unwrap();
+        let story_two = issue_checked(&store, &checked, Q2, R5, T5);
+        assert_eq!(story_two["analyzer"], "questions", "{story_two}");
+        let empty = submitted(&store, 2, Q2, &judge_set(&json!([])).unwrap(), R6, T6);
+        assert_eq!(empty["status"], "ok", "{empty}");
+        assert_eq!(empty["now"]["state"], "closed", "{empty}");
+        assert_eq!(empty["drafting"]["work_order"], D, "{empty}");
+        let drafting = order(&store, D);
+        assert_eq!(drafting["state"], "pending", "{drafting}");
+        assert_eq!(drafting["subject"], "story/2");
+        assert_eq!(
+            drafting["instructions"][0]["identity"],
+            "bal-analyzer-drafting"
+        );
+        assert_eq!(order(&store, Q2)["state"], "answered");
+    }
+
+    #[test]
+    fn a_close_at_the_terminal_issuing_an_order_is_caught() {
+        use crate::questions::record::tests::q1;
+        use crate::refine::order::tests::approved;
+        use crate::refine::order::{OrderKind, check as refine_check};
+
+        let (_dir, store) = approved();
+        let set = open_set(&store, R1, &q1(), &story(1));
+        let first = run(
+            &store,
+            &set,
+            &json!([take("q1")]),
+            &command(ANSWER_COMMAND, R2, 2, T2),
+            ADA,
+        );
+        assert_eq!(first["status"], "ok", "{first}");
+        let close = run(
+            &store,
+            &set,
+            &json!([take("q2")]),
+            &command(ANSWER_COMMAND, R3, 3, T3),
+            ADA,
+        );
+        assert_eq!(close["status"], "ok", "{close}");
+        assert_eq!(close["now"]["state"], "closed", "{close}");
+        assert!(close.get("drafting").is_none(), "{close}");
+        assert!(of_type(&history(&store), "work_order.issued").is_empty());
+        let next = refine_check(&store, &project(), 1).expect("the story can be refined");
+        assert_eq!(next.kind, OrderKind::Drafting);
+    }
+
+    #[test]
+    fn a_close_beside_a_pending_analyzer_order_issuing_a_second_is_caught() {
+        use crate::questions::record::tests::q1;
+        use crate::refine::order::pending_analyzer;
+        use crate::refine::order::tests::{approved, issue_by_hand};
+        use crate::refine::questions::tests::Q;
+
+        let (_dir, store) = approved();
+        let set = open_set(&store, R1, &q1(), &story(1));
+        issue_by_hand(&store, Q, 1, R2);
+        let first = relay(&store, &set, &json!([take("q1")]), R3, T3);
+        assert_eq!(first["status"], "ok", "{first}");
+        let close = relay(&store, &set, &json!([take("q2")]), R4, T4);
+        assert_eq!(close["status"], "ok", "{close}");
+        assert_eq!(close["now"]["state"], "closed", "{close}");
+        assert!(close.get("drafting").is_none(), "{close}");
+        assert!(issued_for(&store, "story/1", "bal-analyzer-drafting").is_empty());
+        assert_eq!(
+            pending_analyzer(&store, &project(), 1).unwrap().as_deref(),
+            Some(Q)
+        );
+    }
+
+    #[test]
+    fn a_plan_set_close_issuing_a_drafting_order_is_caught() {
+        use crate::refine::order::tests::approved;
+        use crate::refine::questions::tests::q3;
+
+        let (_dir, store) = approved();
+        let plan = baley_core::questions::Subject::Plan {
+            phase: 1,
+            plan_digest: baley_store::Hash([0x5c; 32]),
+        };
+        let set = open_set(&store, R1, &q3(), &plan);
+        let close = relay(&store, &set, &json!([take("q3")]), R2, T2);
+        assert_eq!(close["status"], "ok", "{close}");
+        assert_eq!(close["now"]["state"], "closed", "{close}");
+        assert!(close.get("drafting").is_none(), "{close}");
+        assert!(of_type(&history(&store), "work_order.issued").is_empty());
     }
 }

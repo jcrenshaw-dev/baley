@@ -103,6 +103,9 @@ pub struct HeldSet {
     pub facts: SetFacts,
     /// The stream the set and every record on it go on.
     pub stream: String,
+    /// The story whose set this is, read from the set's subject, or none for
+    /// a plan draft's set.
+    pub story: Option<u32>,
 }
 
 /// What a read of one set found.
@@ -136,12 +139,34 @@ pub fn read<V: Views + ?Sized>(
             "the set's stream cannot be read".into(),
         )));
     };
+    let Some(story) = story_of(&document.body) else {
+        return Ok(SetRead::Unreadable(UnreadableSet(
+            "the set's subject cannot be read".into(),
+        )));
+    };
     Ok(SetRead::Held(Box::new(HeldSet {
         round: round_of(&facts),
         produced_seq: document.produced_seq,
         facts,
         stream: stream.into(),
+        story,
     })))
+}
+
+/// The story a set's document names as its subject: `Some(Some(id))` for a
+/// story's set, `Some(None)` for a plan draft's, and `None` for a subject
+/// that cannot be read.
+fn story_of(document: &Value) -> Option<Option<u32>> {
+    let subject = document.get("subject")?;
+    match subject.get("kind").and_then(Value::as_str)? {
+        "story" => subject
+            .get("story")
+            .and_then(Value::as_u64)
+            .and_then(|story| u32::try_from(story).ok())
+            .map(Some),
+        "plan" => Some(None),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
