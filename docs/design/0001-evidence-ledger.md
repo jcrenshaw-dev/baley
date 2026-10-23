@@ -1118,7 +1118,7 @@ Agents may not edit the project file; the guard refuses writes to it.
 | `ROADMAP.md` phase list, read by every status query | `roadmap` stream and view. The commands of [0004](0004-starting-a-project-and-changing-scope.md) declare, edit, reorder and withdraw phases. |
 | `REQUIREMENTS.md` traceability rows | `story.declared`, `story.corrected`, `story.reassigned` and `story.dropped` events ([0004](0004-starting-a-project-and-changing-scope.md)) and the `roadmap` view. Completion and undo record events instead of editing rows. |
 | `PROJECT.md` milestone version | The `milestone` view. |
-| `phases/<n>/CONTEXT.md` | `story.refined` events on the stories a phase commits ([0005](0005-context-plans-and-acceptance.md)). Each carries the id of the question set its truths were drafted from; the answers and deferrals are that set's own `question.answered` and `question.deferred` records (0005 section 6). |
+| `phases/<n>/CONTEXT.md` | `story.refined` events on the `roadmap` stream for the stories a phase commits ([0005](0005-context-plans-and-acceptance.md)). Each carries the id of the question set its truths were drafted from, the approved draft's digest, the owner, the time and the story's whole truth list, each truth with its version; the answers and deferrals are that set's own `question.answered` and `question.deferred` records (0005 section 6). The `truths` view holds each story's current truths and every kept version. |
 | `phases/<n>/PLAN-k.md`, parsed by execution | `plan.approved` event carrying the approval binding; execution reads the typed plan from the `plan` view, never parses Markdown. |
 | `phases/<n>/SUMMARY.md` | A query over the `dispatch` and `run` views. Git source accounting no longer needs an exemption for Baley's own files, because Baley writes none. |
 | `phases/<n>/UAT.md` | `observation.recorded` events ([0007](0007-verification.md)). |
@@ -1579,7 +1579,7 @@ None. The benchmark and the host matrix, the two acceptance gates, are answered 
 
 | Current namespace or file | Becomes |
 |---|---|
-| `context` | `roadmap` stream, `story.refined`; `backlog` and `phase` views ([0005](0005-context-plans-and-acceptance.md)) |
+| `context` | `roadmap` stream, `story.refined`; `backlog`, `phase` and `truths` views ([0005](0005-context-plans-and-acceptance.md)) |
 | `plan_publications` (publications, receipts) | `phase/<n>` stream; `plan` view; receipts replaced by `command.completed` and the `request` view |
 | `acceptance_maps` | `plan.approved` payload; `evidence_map` view |
 | `native_admissions` | `plan.admitted` on `phase/<n>`; `admission` view |
@@ -1610,7 +1610,7 @@ Found unused in the current code and not carried forward: the store operations `
 
 ## Appendix B: Reads mapped to views
 
-The reads the inherited server served, with the view and key that will serve each. `help`, `schema` and `instruction` read no store. `document` is served for six identity kinds: a capture by id, read through the `capture` view; a draft by digest, read through the `draft` view and its body; the roadmap, read through the `roadmap` view; a story by id, read through the same view; a work order by id, read through the `work_order` view, with its accepted result from the start approval, its inputs' purges from this project's `retention` stream and its input bodies; and a question set's round by the set's id, read through the `questions` view, with the round worked out when read. It refuses any other identity kind as invalid arguments until the build that records it. `route` is served and records nothing. Every other read answers operation-unavailable until the build that replaces it. All queries page with a cursor and are bounded; lists are ordered as stated.
+The reads the inherited server served, with the view and key that will serve each. `help`, `schema` and `instruction` read no store. `document` is served for seven identity kinds: a capture by id, read through the `capture` view; a draft by digest, read through the `draft` view and its body; the roadmap, read through the `roadmap` view; a story by id, read through the same view; a work order by id, read through the `work_order` view, with its accepted result from the start approval, its inputs' purges from this project's `retention` stream and its input bodies; a question set's round by the set's id, read through the `questions` view, with the round worked out when read; and a story's refinement, `{"kind":"refinement","story":<id>}`, read as `context-intake` reads it. It refuses any other identity kind as invalid arguments until the build that records it. `context-intake` and `route` are served and record nothing. Every other read answers operation-unavailable until the build that replaces it. All queries page with a cursor and are bounded; lists are ordered as stated.
 
 | Query operation | View and key | Order |
 |---|---|---|
@@ -1622,8 +1622,8 @@ The reads the inherited server served, with the view and key that will serve eac
 | `execution-history` | `dispatch` by phase; `run` (project, run id) with a payload stream for output | Sequence |
 | `evidence-read` | `evidence_map` (project, phase, plan); evidence events for the plan | Sequence |
 | `plan-read` | `plan` by phase; `evidence_map` | Plan number |
-| `context-intake` | `phase` (project, phase); `roadmap` | |
-| `document` | By identity, as served: `capture` by capture id for a note or story; `draft` by digest; `roadmap` (project) for the accepted roadmap and for a story by id; `work_order` (project, order id) for a work order; `questions` (project, set id) for a question set's round, worked out when read; each cut into parts of at most 24,576 bytes. Later builds: `phase` for phase context; `plan` for a phase plan; `dispatch` for a dispatch; `verification` for an attempt; `run` for run output; `review` for a review entry; `task`, `debug`, `spike` by slug | |
+| `context-intake` | Keyed by story, with an optional `part`: `roadmap` (project) for the approved description and the story's entry; the `phase` document of the phase the story's entry commits it to, none for a backlog story; `truths` (project, story) for its current truths and every kept version, none before its first refinement. It records nothing and issues no order (`crates/baley/src/refine/read.rs`, `read`) | |
+| `document` | By identity, as served: `capture` by capture id for a note or story; `draft` by digest; `roadmap` (project) for the accepted roadmap and for a story by id; `work_order` (project, order id) for a work order; `questions` (project, set id) for a question set's round, worked out when read; `roadmap`, `phase` and `truths` for a story's refinement, as `context-intake` reads them; each cut into parts of at most 24,576 bytes. Later builds: `phase` for phase context; `plan` for a phase plan; `dispatch` for a dispatch; `verification` for an attempt; `run` for run output; `review` for a review entry; `task`, `debug`, `spike` by slug | |
 | `document-search` | `Search` scoped to (project, phase), returning identities and parts | Relevance |
 | `recall` | `Search` scoped to the project, optionally a phase | Relevance |
 | `why` | `event(project_id, git_commit)` index, then the events' streams | Sequence |
