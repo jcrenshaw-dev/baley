@@ -18,8 +18,10 @@ use std::collections::BTreeSet;
 
 use baley_core::policy::{AcceptedNames, EffectivePolicy, Host};
 use baley_core::questions::{Call, SetFacts, judge_call};
+use baley_core::work_order::WORK_ORDER_VIEW;
 use baley_store::{
-    Command, CommandKind, Ledger, Payloads, ProjectId, RequestId, Views, request_digest,
+    Command, CommandKind, Ledger, ObservedDocument, Payloads, ProjectId, RequestId, Views,
+    request_digest,
 };
 use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
@@ -32,8 +34,8 @@ use crate::mcp::handler::Preparation;
 use crate::mcp::prepare::WriteRequest;
 use crate::mcp::work_order::{judge_request_id, prepared_write, shape_fault};
 use crate::providers::identity::{self, OWNER_IDENTITY_MISSING};
-use crate::questions::answer::{self, ANSWER_COMMAND};
-use crate::refine::order::{pending_analyzer, prepare_drafting};
+use crate::questions::answer::{self, ANSWER_COMMAND, Drafting};
+use crate::refine::order::{pending_analyzer_order, prepare_drafting};
 use crate::scope::submit::NOT_RECORDED_BUSY;
 use crate::work_order::route::host_names;
 
@@ -109,14 +111,14 @@ pub fn judge_arguments(arguments: &Value) -> Result<JudgedAnswer, Value> {
 }
 
 /// What a relayed answer call's check read: the answer check's read of the
-/// set and, for a story's set, whether an analyzer order of the story was
-/// pending.
+/// set and, for a story's set, the story's pending analyzer order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Relayed {
     /// The answer check's read.
     pub checked: answer::Checked,
-    /// Whether an analyzer order of the set's story was pending at the check.
-    pub analyzer_pending: bool,
+    /// The `work_order` document of the set's story's analyzer order pending
+    /// at the check, at the sequence that produced it, or none.
+    pub pending: Option<ObservedDocument>,
 }
 
 impl Relayed {
@@ -128,16 +130,26 @@ impl Relayed {
     /// follows once it is settled, and a plan draft's set gets T9's outputs.
     pub(crate) fn closing(&self, owner: &str, at: &str) -> Option<(u32, SetFacts)> {
         let story = self.checked.story?;
-        if self.analyzer_pending {
+        if self.pending.is_some() {
             return None;
         }
         Some((story, self.checked.closed_facts(owner, at)?))
+    }
+
+    /// The pending analyzer order's document when the call, recorded by
+    /// `owner` at `at`, closes a story's set beside it, so that order alone
+    /// keeps the call from issuing the drafting order. None otherwise.
+    fn held_by(&self, owner: &str, at: &str) -> Option<&ObservedDocument> {
+        self.checked.story?;
+        self.checked.closed_facts(owner, at)?;
+        self.pending.as_ref()
     }
 }
 
 /// A relayed answer call's check, run before admission and recording
 /// nothing: the answer check, then for a story's set the story's pending
-/// analyzer order. A refusal or a read fault is the answer to give.
+/// analyzer order with the document it was read from. A refusal or a read
+/// fault is the answer to give.
 pub(crate) fn relay_check<S: Views + ?Sized>(
     store: &S,
     project: &ProjectId,
@@ -145,16 +157,17 @@ pub(crate) fn relay_check<S: Views + ?Sized>(
     call: &Call,
 ) -> Result<Relayed, Value> {
     let checked = answer::check(store, project, set, call)?;
-    let analyzer_pending = match checked.story {
-        Some(story) => pending_analyzer(store, project, story)
+    let pending = match checked.story {
+        Some(story) => pending_analyzer_order(store, project, story)
             .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?
-            .is_some(),
-        None => false,
+            .map(|document| ObservedDocument {
+                view: WORK_ORDER_VIEW.into(),
+                key: document.key,
+                produced_seq: Some(document.produced_seq),
+            }),
+        None => None,
     };
-    Ok(Relayed {
-        checked,
-        analyzer_pending,
-    })
+    Ok(Relayed { checked, pending })
 }
 
 /// Records a relayed call `relayed` under `command` as `owner` once the write
@@ -162,7 +175,10 @@ pub(crate) fn relay_check<S: Views + ?Sized>(
 /// the story pending, the drafting order is prepared as `drafting_id` under
 /// `policy`, the write's effective policy, for `host` with the catalog
 /// `names`, its `questions` input holding the set's answers and deferrals
-/// with this call's own, and is issued with the answers. The answer is the
+/// with this call's own, and is issued with the answers. When a pending
+/// analyzer order held the drafting order back, the recording observes that
+/// order's document, so an order settled since the check makes the call
+/// `ledger-busy` and the session's retry checks again. The answer is the
 /// receipt, or why nothing was recorded.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn relay_record<S: Ledger + Views + Payloads>(
@@ -175,7 +191,8 @@ pub(crate) fn relay_record<S: Ledger + Views + Payloads>(
     names: &AcceptedNames,
     drafting_id: &str,
 ) -> Value {
-    let drafting = match relayed.closing(owner, &command.recorded_at) {
+    let at = &command.recorded_at;
+    let prepared = match relayed.closing(owner, at) {
         Some((story, facts)) => {
             match prepare_drafting(
                 store,
@@ -193,14 +210,13 @@ pub(crate) fn relay_record<S: Ledger + Views + Payloads>(
         }
         None => None,
     };
+    let drafting = match (&prepared, relayed.held_by(owner, at)) {
+        (Some(order), _) => Drafting::Issue(order),
+        (None, Some(pending)) => Drafting::HeldBy(pending),
+        (None, None) => Drafting::None,
+    };
     answer::answer(
-        answer::record(
-            store,
-            command,
-            owner,
-            Some(&relayed.checked),
-            drafting.as_ref(),
-        ),
+        answer::record(store, command, owner, Some(&relayed.checked), drafting),
         store,
     )
 }
@@ -232,7 +248,10 @@ pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
     // A replay ran no steps and is answered from its record, so it needs no
     // owner.
     let (Some(stepped), Some(relayed)) = (stepped, kept.as_ref()) else {
-        return answer::answer(answer::record(store, &command, "", None, None), store);
+        return answer::answer(
+            answer::record(store, &command, "", None, Drafting::None),
+            store,
+        );
     };
     let owner = match identity::owner(
         identity::owner_name(&stepped.policy),

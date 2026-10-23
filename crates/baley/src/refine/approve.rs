@@ -59,8 +59,9 @@ pub struct Judged {
     set: String,
     /// Every truth of the draft with the version approval gives it.
     truths: Vec<(Truth, u32)>,
-    /// The `backlog`, latest set, committed phase and `truths` documents, at
-    /// the sequence that produced each.
+    /// The `roadmap` document the story was judged on, then the `backlog`,
+    /// latest set, committed phase and `truths` documents, at the sequence
+    /// that produced each.
     documents: Vec<ObservedDocument>,
 }
 
@@ -74,17 +75,31 @@ struct Approval {
 /// The first step: reads the draft with `digest` (none, or one that is not a
 /// story's truth draft, is `unknown-draft`) and judges its body again, a body
 /// that no longer judges being a ledger fault; then its `scope.submitted` at
-/// its sequence, the newest truth draft of its story, every earlier
-/// `story.refined` naming it, the story, its latest set and that set's open
+/// its sequence, the newest truth draft of its story, the story with the
+/// `roadmap` document it was read from, its latest set and that set's open
 /// questions, whether a worker is dispatched on the phase it is committed to,
-/// and its current truths. It judges in D-17's order, each refusal at slot
-/// `digest`, and gives the truths with their versions against the current
-/// truths now (D-02, D-03). It runs outside any transaction, since a
-/// transaction has no payload read. Nothing is recorded.
+/// its current truths and, last, every earlier `story.refined` naming it. It
+/// judges in D-17's order, each refusal at slot `digest`, and gives the
+/// truths with their versions against the current truths now (D-02, D-03).
+/// It runs outside any transaction, since a transaction has no payload read.
+/// Nothing is recorded.
 pub fn judge<S: Ledger + Views + Payloads + ?Sized>(
     store: &S,
     project: &ProjectId,
     digest: Hash,
+) -> Result<Judged, Value> {
+    judge_reading(store, project, digest, || {
+        approvals_of(store, project, digest)
+    })
+}
+
+/// [`judge`] with the approvals of the digest read through `approvals`, the
+/// one read a concurrent approval is landed at in a test.
+fn judge_reading<S: Ledger + Views + Payloads + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    digest: Hash,
+    approvals: impl FnOnce() -> Result<Vec<Approval>, StoreError>,
 ) -> Result<Judged, Value> {
     let busy = |error: StoreError| store_failed(&error, NOT_RECORDED_BUSY);
     let (submission, seq) = match preview(store, project, digest) {
@@ -109,11 +124,9 @@ pub fn judge<S: Ledger + Views + Payloads + ?Sized>(
         Some(document) => Some(newest_of(store, &document)?),
         None => None,
     };
-    let approvals = approvals_of(store, project, digest).map_err(busy)?;
-    let prior = approvals.iter().find(|approval| approval.seq > seq);
     let story = submission.story();
-    let (held, _) = held_story(store, project, story)?;
-    let mut documents = Vec::new();
+    let (held, roadmap) = held_story(store, project, story)?;
+    let mut documents = vec![roadmap];
     let mut latest = None;
     let mut open = Vec::new();
     let mut dispatch_active = false;
@@ -136,6 +149,11 @@ pub fn judge<S: Ledger + Views + Payloads + ?Sized>(
     }
     let current = current_truths(store, project, story)?;
     documents.push(current.document.clone());
+    // Read after every document: an approval landing before this read is
+    // seen here, and one landing after it moves the `truths` document the
+    // second step observes.
+    let approvals = approvals().map_err(busy)?;
+    let prior = approvals.iter().find(|approval| approval.seq > seq);
     let facts = TruthApprovalFacts {
         target: Some(&submission),
         recorded,
@@ -185,9 +203,10 @@ pub fn judge<S: Ledger + Views + Payloads + ?Sized>(
 /// (D-06). Before it appends anything the decision confirms that the draft
 /// is at the sequence read with its `scope.submitted`, that the newest truth
 /// draft of the story is the one read, and that no `story.refined` naming the
-/// digest landed since; it observes the `backlog`, latest set, committed
-/// phase and `truths` documents the first step read, so anything moved since
-/// makes the call `ledger-busy` with nothing recorded (D-17). Then it appends
+/// digest landed since; it observes the `roadmap`, `backlog`, latest set,
+/// committed phase and `truths` documents the first step read, so anything
+/// moved since makes the call `ledger-busy` with nothing recorded (D-17).
+/// Then it appends
 /// one `story.refined` on `roadmap` with the story, the set, the digest, the
 /// owner, the time and the story's whole truth list with versions (D-04). No
 /// `scope.approved` is appended. A retry of a request the store holds is
@@ -216,7 +235,8 @@ pub fn record<L: Ledger + ?Sized>(
         confirm_draft(tx, judged)?;
         // A transaction cannot ask for an approval after a sequence, so when
         // one preceded the latest submission a second is left to the
-        // `truths` document, which every `story.refined` of the story moves.
+        // `truths` document, which every `story.refined` of the story moves
+        // and the first step read before the approvals.
         let approved = approval_of(judged.digest);
         if !judged.approved_before && tx.event_exists(&approved)? {
             return Err(StoreError::Stale(StaleInput::Absence(Absence::Event(
@@ -826,6 +846,105 @@ mod tests {
             assert_eq!(answer["code"], "ledger-busy", "{case}: {answer}");
             assert_eq!(head(&store), before, "{case}");
         }
+    }
+
+    #[test]
+    fn a_truth_approval_landing_while_another_is_judged_recorded_twice_is_caught() {
+        use crate::refine::submit::tests::drafting;
+
+        let (_dir, store, a) = drafting();
+        let x = truths_submitted(&store, 1, &a, &json!([t1(), t2()]), D, &rid(1), T4);
+        let x = text(&x["digest"]);
+        let first = approve(&store, &x, &rid(2), T5);
+        assert_eq!(first["status"], "ok", "{first}");
+        let again = truths_submitted(&store, 1, &a, &json!([t1(), t2()]), D, &rid(3), T6);
+        assert_eq!(again["digest"], x.as_str(), "{again}");
+        let resubmitted = head(&store);
+        let digest = Hash::from_hex(&x).unwrap();
+
+        // Approval B lands as soon as approval A has read the approvals,
+        // which showed only the one before the resubmission.
+        let judged = judge_reading(&store, &project(), digest, || {
+            let seen = approvals_of(&store, &project(), digest);
+            let landed = approve(&store, &x, &rid(4), T7);
+            assert_eq!(landed["status"], "ok", "{landed}");
+            seen
+        })
+        .expect("A saw no approval after the resubmission");
+        let command = approve_command(&project(), 0, digest, RequestId(rid(5)), T8).unwrap();
+        let late =
+            crate::scope::submit::answer(record(&store, &command, Some(&judged), ADA), &store);
+        assert_eq!(late["status"], "failed", "{late}");
+        assert_eq!(late["code"], "ledger-busy", "{late}");
+        assert_eq!(
+            of_type(&after(&store, resubmitted), "story.refined").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_truth_approval_judged_on_a_story_reassigned_since_is_caught() {
+        use baley_core::scope::ROADMAP_VIEW;
+
+        use crate::refine::submit::tests::drafting;
+        use crate::scope::approve::APPROVE_COMMAND;
+
+        let (_dir, store, a) = drafting();
+        let x = truths_submitted(&store, 1, &a, &json!([t1(), t2()]), D, &rid(1), T4);
+        let digest = Hash::from_hex(&text(&x["digest"])).unwrap();
+        let stale = judge(&store, &project(), digest).expect("X is approvable");
+        let reassign = receipt(
+            &submit_change(
+                &store,
+                ChangeKind::StoryReassign,
+                &json!({"story": 1, "phase": 2}),
+                &rid(2),
+                T5,
+            )
+            .unwrap(),
+        )["digest"]
+            .as_str()
+            .and_then(Hash::from_hex)
+            .unwrap();
+        let judged = crate::scope::approve::judge(&store, &project(), reassign).unwrap();
+        crate::scope::approve::record(
+            &store,
+            &command(APPROVE_COMMAND, &rid(3), 6, T5),
+            Some(&judged),
+            ADA,
+        )
+        .unwrap();
+
+        // The reassignment landed after the first step judged story 1 on the
+        // roadmap and before it read anything else, so every other document
+        // it observes is the one after the reassignment.
+        let raced = Judged {
+            documents: stale
+                .documents
+                .iter()
+                .map(|document| {
+                    if document.view == ROADMAP_VIEW {
+                        return document.clone();
+                    }
+                    let now = store
+                        .get(&project(), &document.view, &document.key)
+                        .unwrap()
+                        .map(|now| now.produced_seq);
+                    ObservedDocument {
+                        produced_seq: now,
+                        ..document.clone()
+                    }
+                })
+                .collect(),
+            ..stale
+        };
+        let before = head(&store);
+        let command = approve_command(&project(), 0, digest, RequestId(rid(4)), T6).unwrap();
+        let busy =
+            crate::scope::submit::answer(record(&store, &command, Some(&raced), ADA), &store);
+        assert_eq!(busy["status"], "failed", "{busy}");
+        assert_eq!(busy["code"], "ledger-busy", "{busy}");
+        assert_eq!(head(&store), before);
     }
 
     #[test]

@@ -22,8 +22,8 @@ use baley_core::work_order::{
     ANALYZER_ORDER_PENDING, PENDING, WORK_ORDER_LIVE_INDEX, WORK_ORDER_VIEW, story_subject,
 };
 use baley_store::{
-    Absence, Command, IndexQuery, InstructionEvidence, KeyValue, ObservedDocument, PageRequest,
-    ProjectId, StoreError, Transaction, Views,
+    Absence, Command, Document, IndexQuery, InstructionEvidence, KeyValue, ObservedDocument,
+    PageRequest, ProjectId, StoreError, Transaction, Views,
 };
 use baley_store_sqlite::SqliteStore;
 use serde_json::{Map, Value, json};
@@ -472,6 +472,25 @@ pub fn pending_analyzer<S: Views + ?Sized>(
     project: &ProjectId,
     story: u32,
 ) -> Result<Option<String>, StoreError> {
+    Ok(
+        pending_analyzer_order(store, project, story)?.map(|document| {
+            document
+                .body
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        }),
+    )
+}
+
+/// The `work_order` document of story `story`'s pending analyzer order, the
+/// one [`pending_analyzer`] names, or none.
+pub(crate) fn pending_analyzer_order<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    story: u32,
+) -> Result<Option<Document>, StoreError> {
     let text = |value: &str| KeyValue::Text(value.into());
     let query = IndexQuery {
         index: WORK_ORDER_LIVE_INDEX.into(),
@@ -485,15 +504,11 @@ pub fn pending_analyzer<S: Views + ?Sized>(
             after: None,
         },
     };
-    let page = store.find(project, WORK_ORDER_VIEW, &query)?;
-    Ok(page.items.into_iter().next().map(|document| {
-        document
-            .body
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    }))
+    Ok(store
+        .find(project, WORK_ORDER_VIEW, &query)?
+        .items
+        .into_iter()
+        .next())
 }
 
 /// The refusal for story `story`'s pending analyzer order `pending`, with

@@ -139,24 +139,40 @@ pub fn check<V: Views + ?Sized>(
     })
 }
 
+/// What an answer call's recording does about its story's drafting order.
+#[derive(Debug, Clone, Copy)]
+pub enum Drafting<'a> {
+    /// Nothing: the call leaves a question open, answers a plan draft's set,
+    /// or is given at the terminal, where an owner command issues no work
+    /// order (ADR 0044).
+    None,
+    /// The call closes a story's set over MCP, so this prepared drafting
+    /// order is issued with the answers (D-08).
+    Issue(&'a PreparedOrder),
+    /// The call closes a story's set over MCP beside the story's pending
+    /// analyzer order, read from this `work_order` document, so no order is
+    /// issued (D-09).
+    HeldBy(&'a ObservedDocument),
+}
+
 /// Records the call `checked` holds under `command`, every answer and
 /// deferral in one transaction on the set's stream, each carrying the
 /// call's round, `owner` and the command's time. The command's actor and
-/// caller are recorded as the caller built them. `drafting`, the analyzer's
-/// drafting order prepared for a call over MCP that closes a story's set, is
-/// issued in the same transaction (D-08), its decision declaring that no
+/// caller are recorded as the caller built them. A drafting order to issue
+/// is issued in the same transaction (D-08), its decision declaring that no
 /// analyzer order of the story is pending (D-09) and observing the documents
-/// its inputs were read from beside the set's; `baley questions answer`
-/// passes none, since an owner command issues no work order (ADR 0044). A
-/// request the store already holds is replayed from its record before any
-/// decision runs; a decision asked to run without the check's read records
-/// nothing.
+/// its inputs were read from beside the set's. A drafting order held back by
+/// a pending analyzer order observes that order's document instead, so an
+/// order settled since makes the call `ledger-busy` with nothing recorded
+/// rather than closing the set with no drafting order. A request the store
+/// already holds is replayed from its record before any decision runs; a
+/// decision asked to run without the check's read records nothing.
 pub fn record<L: Ledger + ?Sized>(
     store: &L,
     command: &Command,
     owner: &str,
     checked: Option<&Checked>,
-    drafting: Option<&PreparedOrder>,
+    drafting: Drafting<'_>,
 ) -> Result<Recorded, StoreError> {
     store.transact(command, &mut |tx| {
         let Some(checked) = checked else {
@@ -184,13 +200,17 @@ pub fn record<L: Ledger + ?Sized>(
             ..Observed::default()
         };
         let drafted = match drafting {
-            Some(order) => {
+            Drafting::Issue(order) => {
                 let members = order.issue_within(tx, &checked.set, &command.recorded_at)?;
                 observed.documents.extend(order.documents().iter().cloned());
                 observed.absences = analyzer_absences(order.story());
                 Some(members)
             }
-            None => None,
+            Drafting::HeldBy(pending) => {
+                observed.documents.push(pending.clone());
+                None
+            }
+            Drafting::None => None,
         };
         let after = checked.settled.round_after(owner, &command.recorded_at);
         Ok(Decision {
@@ -322,7 +342,10 @@ pub(crate) mod tests {
             Err(fault) => return call_fault(fault),
         };
         match check(store, &project(), set, &call) {
-            Ok(checked) => answer(record(store, command, owner, Some(&checked), None), store),
+            Ok(checked) => answer(
+                record(store, command, owner, Some(&checked), Drafting::None),
+                store,
+            ),
             Err(refusal) => refusal,
         }
     }
@@ -451,7 +474,7 @@ pub(crate) mod tests {
                 &command(ANSWER_COMMAND, R3, 3, T3),
                 OWNER,
                 Some(&first),
-                None,
+                Drafting::None,
             ),
             &store,
         );
@@ -607,8 +630,14 @@ pub(crate) mod tests {
         let set = open_set(&store, R1, &r2(), &story(1));
         let kept = checked(&store, &set, &json!([take("q1")]));
         let command = command(ANSWER_COMMAND, R2, 2, T2);
-        let first = answer(record(&store, &command, OWNER, Some(&kept), None), &store);
-        let again = answer(record(&store, &command, OWNER, Some(&kept), None), &store);
+        let first = answer(
+            record(&store, &command, OWNER, Some(&kept), Drafting::None),
+            &store,
+        );
+        let again = answer(
+            record(&store, &command, OWNER, Some(&kept), Drafting::None),
+            &store,
+        );
         assert_eq!(first["status"], "ok", "{first}");
         assert_eq!(again, first);
         assert_eq!(on_stream(&store, "roadmap").len(), 1);
@@ -625,7 +654,7 @@ pub(crate) mod tests {
             &command(ANSWER_COMMAND, R2, 2, T2),
             OWNER,
             None,
-            None,
+            Drafting::None,
         );
         assert!(unchecked.is_err(), "{unchecked:?}");
         assert_eq!(head(&store), before);
@@ -663,20 +692,31 @@ pub(crate) mod tests {
         request: &str,
         at: &str,
     ) -> Value {
-        use std::collections::BTreeSet;
-
-        use baley_core::policy::{AcceptedNames, Host, Schema, effective_policy};
-
-        use crate::mcp::questions::{relay_check, relay_record};
+        use crate::mcp::questions::relay_check;
 
         let call = match judge_call(items) {
             Ok(call) => call,
             Err(fault) => return call_fault(fault),
         };
-        let relayed = match relay_check(store, &project(), set, &call) {
-            Ok(relayed) => relayed,
-            Err(refusal) => return refusal,
-        };
+        match relay_check(store, &project(), set, &call) {
+            Ok(relayed) => relay_recorded(store, &relayed, request, at),
+            Err(refusal) => refusal,
+        }
+    }
+
+    /// The relayed recording [`relay`] runs after its check.
+    fn relay_recorded(
+        store: &SqliteStore,
+        relayed: &crate::mcp::questions::Relayed,
+        request: &str,
+        at: &str,
+    ) -> Value {
+        use std::collections::BTreeSet;
+
+        use baley_core::policy::{AcceptedNames, Host, Schema, effective_policy};
+
+        use crate::mcp::questions::relay_record;
+
         let policy =
             effective_policy(Schema::standard(), Some(Host::ClaudeCode), None, None).unwrap();
         let names = AcceptedNames {
@@ -687,7 +727,7 @@ pub(crate) mod tests {
             store,
             &command(ANSWER_COMMAND, request, 2, at),
             ADA,
-            &relayed,
+            relayed,
             &policy,
             Host::ClaudeCode,
             &names,
@@ -872,6 +912,39 @@ pub(crate) mod tests {
             pending_analyzer(&store, &project(), 1).unwrap().as_deref(),
             Some(Q)
         );
+    }
+
+    #[test]
+    fn a_close_held_back_by_an_analyzer_order_settled_since_its_check_recorded_is_caught() {
+        use crate::mcp::questions::relay_check;
+        use crate::mcp::work_order::tests::fail_order;
+        use crate::questions::record::tests::q1;
+        use crate::refine::order::tests::{approved, issue_by_hand};
+        use crate::refine::questions::tests::Q;
+
+        let (_dir, store) = approved();
+        let set = open_set(&store, R1, &q1(), &story(1));
+        issue_by_hand(&store, Q, 1, R2);
+        let first = relay(&store, &set, &json!([take("q1")]), R3, T3);
+        assert_eq!(first["status"], "ok", "{first}");
+
+        // The closing call's check sees Q pending, then Q is failed before
+        // the call is recorded.
+        let call = judge_call(&json!([take("q2")])).unwrap();
+        let relayed = relay_check(&store, &project(), &set, &call).unwrap();
+        fail_order(&store, &project(), Q, R4, T4);
+        let before = head(&store);
+        let late = relay_recorded(&store, &relayed, R5, T5);
+        assert_eq!(late["status"], "failed", "{late}");
+        assert_eq!(late["code"], "ledger-busy", "{late}");
+        assert_eq!(head(&store), before);
+
+        // The session's retry of the same call checks again and drafts.
+        let retry = relay(&store, &set, &json!([take("q2")]), R5, T5);
+        assert_eq!(retry["status"], "ok", "{retry}");
+        assert_eq!(retry["now"]["state"], "closed", "{retry}");
+        assert_eq!(retry["drafting"]["work_order"], D1, "{retry}");
+        assert_eq!(order(&store, D1)["state"], "pending");
     }
 
     #[test]
