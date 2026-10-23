@@ -132,6 +132,27 @@ impl<'a> Phase<'a> {
         }
         Ok(())
     }
+
+    /// Step (12): the first served truth a person must prove
+    /// (`human_verify`) whose items hold no observation is refused
+    /// `truth-without-observation` (D-04). Step (11) has already asked it
+    /// for its one check.
+    pub(super) fn observed(&self) -> Result<(), PlanRefusal> {
+        for &(story, truth) in &self.served {
+            if truth.human_verify.is_some()
+                && !self
+                    .kinds(story, truth)
+                    .contains(&EvidenceKind::Observation)
+            {
+                return Err(PlanRefusal::TruthWithoutObservation {
+                    story,
+                    truth: truth.id.clone(),
+                    version: truth.version,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -143,7 +164,8 @@ mod tests {
 
     use crate::plan::PlanRefusal;
     use crate::plan::fixtures::{
-        accepted, approved, ar, c1, c2, dropping, f1, f3, p1, p2, refusal, replacing, under, with,
+        accepted, approved, ar, c1, c2, dropping, f1, f3, o1, p1, p2, refusal, replacing, under,
+        with,
     };
 
     fn conflict(plan: u32) -> PlanRefusal {
@@ -234,5 +256,29 @@ mod tests {
             }
         );
         assert_eq!(refused.code(), "truth-without-check");
+    }
+
+    #[test]
+    fn an_observation_for_another_truth_or_in_an_approved_plan_judged_wrongly_is_caught() {
+        let unobserved = PlanRefusal::TruthWithoutObservation {
+            story: 1,
+            truth: "t2".into(),
+            version: 2,
+        };
+        let elsewhere = with(
+            with(p1(), "/evidence_map/2", "truth", json!("t1")),
+            "/evidence_map/2",
+            "truth_version",
+            json!(1),
+        );
+        assert_eq!(refusal(&elsewhere, &f1()), unobserved);
+        let unlisted = dropping(p1(), &["o1"]);
+        accepted(&unlisted, &under(vec![approved(1, o1())]));
+        let stale = with(o1(), "", "truth_version", json!(1));
+        assert_eq!(
+            refusal(&unlisted, &under(vec![approved(1, stale)])),
+            unobserved
+        );
+        assert_eq!(unobserved.code(), "truth-without-observation");
     }
 }
