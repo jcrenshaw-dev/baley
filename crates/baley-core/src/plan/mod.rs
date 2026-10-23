@@ -6,6 +6,7 @@
 //! Nothing here reads a store, a file or a clock: the binary supplies every
 //! value it judges.
 
+mod binding;
 mod content;
 mod evidence;
 #[cfg(test)]
@@ -20,8 +21,8 @@ pub use evidence::{
 };
 pub use judge::{
     ApprovedItem, CHECK_BOUNDARY, CHECK_COMMAND, CHECK_EXPECTED, CHECK_TEST_FILE, CommittedStory,
-    CurrentTruth, EvidenceKind, LEASE, NO_TRUTHS, Plan, PlanFacts, PlanRefusal, STORY_NOT_IN_PHASE,
-    TYPED_CONTENT, judge_plan,
+    CurrentTruth, EVIDENCE_ITEM_TRUTH, EvidenceKind, LEASE, NO_TRUTHS, Plan, PlanFacts,
+    PlanRefusal, STORY_NOT_IN_PHASE, TRUTH_VERSION_MISMATCH, TYPED_CONTENT, judge_plan,
 };
 pub use lease::{inside_lease, plain_relative_path};
 pub use task::Task;

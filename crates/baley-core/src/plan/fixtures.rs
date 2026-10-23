@@ -2,9 +2,17 @@
 //! decisions, never from running the judge: one copy every test of the
 //! module reads.
 
+// Builders the later steps' tests read; removed once every one is read.
+#![allow(dead_code)]
+
+use std::num::NonZeroU32;
+
 use serde_json::{Value, json};
 
-use super::{CommittedStory, CurrentTruth, Plan, PlanFacts, PlanRefusal, judge_plan};
+use super::{
+    ApprovedItem, CommittedStory, CurrentTruth, EvidenceKind, Plan, PlanFacts, PlanRefusal,
+    judge_plan,
+};
 
 fn truth(
     id: &str,
@@ -174,6 +182,136 @@ pub(super) fn p3() -> Value {
     let mut plan = p1();
     plan["stories"] = json!([2]);
     plan["evidence_map"] = json!([c4()]);
+    plan
+}
+
+/// F3: F1 with story 2's `t1` at version 1, so both stories hold a `t1` at
+/// version 1.
+pub(super) fn f3() -> PlanFacts {
+    let mut facts = f1();
+    facts.stories[1].truths[0].version = 1;
+    facts
+}
+
+/// F1 with `approved` as the approved plans' items.
+pub(super) fn under(approved: Vec<ApprovedItem>) -> PlanFacts {
+    let mut facts = f1();
+    facts.approved = approved;
+    facts
+}
+
+/// F1 with capacity `capacity` and current size `size`.
+pub(super) fn at(capacity: u32, size: u32) -> PlanFacts {
+    let mut facts = f1();
+    facts.capacity = Some(NonZeroU32::new(capacity).expect("a capacity above 0"));
+    facts.size = size;
+    facts
+}
+
+/// `item` as approved plan `plan` recorded it, its definition the item
+/// whole.
+pub(super) fn approved(plan: u32, item: Value) -> ApprovedItem {
+    let text = |member: &str| item[member].as_str().expect("a text").to_owned();
+    let number =
+        |member: &str| u32::try_from(item[member].as_u64().expect("a number")).expect("a counter");
+    let kind = match item["kind"].as_str() {
+        Some("artifact") => EvidenceKind::Artifact,
+        Some("link") => EvidenceKind::Link,
+        Some("check") => EvidenceKind::Check,
+        Some("observation") => EvidenceKind::Observation,
+        other => panic!("no kind {other:?}"),
+    };
+    ApprovedItem {
+        plan,
+        id: text("id"),
+        story: number("story"),
+        truth: text("truth"),
+        truth_version: number("truth_version"),
+        kind,
+        definition: item,
+    }
+}
+
+/// A1: plan 1's C1 with reason `another reason`.
+pub(super) fn a1() -> Vec<ApprovedItem> {
+    vec![approved(
+        1,
+        with(c1(), "", "reason", json!("another reason")),
+    )]
+}
+
+/// A2: plan 1's C1 exactly.
+pub(super) fn a2() -> Vec<ApprovedItem> {
+    vec![approved(1, c1())]
+}
+
+/// C3: C1 with id `c3`, a second check for story 1's `t1`.
+pub(super) fn c3() -> Value {
+    let mut item = c1();
+    item["id"] = json!("c3");
+    item["spec"]["command"] = json!("cargo test lease_again");
+    item
+}
+
+/// C5: C4 for version 1 of story 2's `t1`.
+pub(super) fn c5() -> Value {
+    with(c4(), "", "truth_version", json!(1))
+}
+
+/// C6: C1 with id `c6`, a third check for story 1's `t1`.
+pub(super) fn c6() -> Value {
+    let mut item = c1();
+    item["id"] = json!("c6");
+    item["spec"]["command"] = json!("cargo test lease_third");
+    item
+}
+
+/// K3: K1 with id `k3`.
+pub(super) fn k3() -> Value {
+    with(k1(), "", "id", json!("k3"))
+}
+
+/// P2: P1 for stories 1 and 2, proved by C1, C2, O1 and C4.
+pub(super) fn p2() -> Value {
+    let mut plan = p1();
+    plan["stories"] = json!([1, 2]);
+    plan["evidence_map"] = json!([c1(), c2(), o1(), c4()]);
+    plan
+}
+
+/// P4: P1 with tasks K1 and K3.
+pub(super) fn p4() -> Value {
+    with(p1(), "", "tasks", json!([k1(), k3()]))
+}
+
+/// `plan` with `item` added at the end of its evidence map.
+pub(super) fn plus(mut plan: Value, item: Value) -> Value {
+    plan["evidence_map"]
+        .as_array_mut()
+        .expect("an evidence map")
+        .push(item);
+    plan
+}
+
+/// `plan` without the evidence items whose ids are `ids`.
+pub(super) fn dropping(mut plan: Value, ids: &[&str]) -> Value {
+    plan["evidence_map"]
+        .as_array_mut()
+        .expect("an evidence map")
+        .retain(|item| !ids.contains(&item["id"].as_str().expect("an id")));
+    plan
+}
+
+/// `plan` with the evidence item whose id is `id` replaced by `item`.
+pub(super) fn replacing(mut plan: Value, id: &str, item: Value) -> Value {
+    let map = plan["evidence_map"]
+        .as_array_mut()
+        .expect("an evidence map");
+    let at = map
+        .iter()
+        .position(|entry| entry["id"] == id)
+        .expect("the item is present");
+    map[at] = item;
     plan
 }
 
