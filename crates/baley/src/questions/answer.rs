@@ -19,7 +19,7 @@ use baley_store::{
     Command, Decision, Ledger, NewEvent, Observed, ObservedDocument, OutcomeKind, Payloads,
     ProjectId, Recorded, StoreError, StreamName, Views,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::envelope::{LEDGER_BUSY, Refusal};
 use crate::mcp::capture::{PLACE_LEDGER, failed, store_failed};
@@ -174,15 +174,29 @@ fn receipt_value(set: &str, round: u32, at: &str, after: &Round) -> Value {
         // planner's revision order for a plan draft's, are T7's and T9's and
         // plug in here; until then the receipt only says `closed`.
     }
-    let whole = json!({"status": "ok", "set": set, "round": round, "recorded_at": at,
-        "now": round_value(after)});
-    let text = serde_json::to_string(&whole).expect("a receipt serializes");
-    if text.len() <= PART_BOUND {
-        return whole;
+    let mut receipt = Map::new();
+    receipt.insert("status".into(), json!("ok"));
+    receipt.insert("set".into(), json!(set));
+    receipt.insert("round".into(), json!(round));
+    receipt.insert("recorded_at".into(), json!(at));
+    with_now(receipt, set, after)
+}
+
+/// `receipt` with `now`, set `set`'s round `after` in [`round_value`]'s
+/// shape. A receipt cannot be cut into parts, so when the whole receipt would
+/// pass the part bound `now` gives the round's state and number and names
+/// the `document` read instead.
+pub(crate) fn with_now(mut receipt: Map<String, Value>, set: &str, after: &Round) -> Value {
+    receipt.insert("now".into(), round_value(after));
+    let text = serde_json::to_string(&receipt).expect("a receipt serializes");
+    if text.len() > PART_BOUND {
+        receipt.insert(
+            "now".into(),
+            json!({"state": after.state.as_str(), "round": after.number,
+                "read": {"kind": "questions", "set": set}, "relay": RELAY}),
+        );
     }
-    json!({"status": "ok", "set": set, "round": round, "recorded_at": at,
-        "now": {"state": after.state.as_str(), "round": after.number,
-            "read": {"kind": "questions", "set": set}, "relay": RELAY}})
+    Value::Object(receipt)
 }
 
 /// The answer for an answer call's transaction result: the recorded or

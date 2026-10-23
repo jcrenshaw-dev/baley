@@ -1,7 +1,9 @@
 //! A story's analyzer order (design 0005 `story refine`, PLN-R6, D-08,
 //! D-09, D-21): the check that chooses the questions order or the drafting
 //! order, judged before admission and recording nothing, and the issue of
-//! the order it chose on the `roadmap` stream.
+//! the order it chose on the `roadmap` stream. A drafting order is also
+//! prepared here for a closing answer or an empty set's submit, which issue
+//! it inside their own transactions.
 //!
 //! A story has one live analyzer order, and no order is chosen while a
 //! question of its latest set is open, so a set mid-answer is never
@@ -11,7 +13,7 @@
 use std::num::NonZeroU32;
 
 use baley_core::policy::{AcceptedNames, EffectivePolicy, Host, Role};
-use baley_core::questions::{SetFacts, questions_key};
+use baley_core::questions::{QUESTIONS_VIEW, SetFacts, questions_key};
 use baley_core::scope::{
     BACKLOG_VIEW, NO_SUCH_STORY, PHASE_VIEW, ROADMAP_VIEW, backlog_key, phase_key, roadmap_key,
 };
@@ -20,8 +22,8 @@ use baley_core::work_order::{
     ANALYZER_ORDER_PENDING, PENDING, WORK_ORDER_LIVE_INDEX, WORK_ORDER_VIEW, story_subject,
 };
 use baley_store::{
-    Absence, Command, IndexQuery, KeyValue, ObservedDocument, PageRequest, ProjectId, StoreError,
-    Views,
+    Absence, Command, IndexQuery, InstructionEvidence, KeyValue, ObservedDocument, PageRequest,
+    ProjectId, StoreError, Transaction, Views,
 };
 use baley_store_sqlite::SqliteStore;
 use serde_json::{Map, Value, json};
@@ -30,12 +32,12 @@ use crate::envelope::{LEDGER_BUSY, Refusal};
 use crate::instruction::analyzer::{DRAFTING_IDENTITY, QUESTIONS_IDENTITY};
 use crate::mcp::capture::{PLACE_LEDGER, failed, store_failed};
 use crate::mcp::prepare::LEDGER_UNAVAILABLE;
-use crate::questions::read::{SetRead, read as read_set};
+use crate::questions::read::{HeldSet, SetRead, read as read_set};
 use crate::refine::inputs::{self, QUESTIONS_INPUT, questions_body};
 use crate::scope::read::{ReadError, Story, story as read_story};
 use crate::scope::submit::{NOT_RECORDED_BUSY, scope_unread};
 use crate::work_order::issue::{self, Input, Issue};
-use crate::work_order::route::compose;
+use crate::work_order::route::{IssuedRoute, compose};
 
 /// The status a dropped story holds.
 const DROPPED: &str = "dropped";
@@ -107,6 +109,9 @@ pub struct Checked {
     pub documents: Vec<ObservedDocument>,
 }
 
+/// What an analyzer call did not do when a story's refinement refuses it.
+const NOT_ISSUED: &str = "no analyzer order was issued";
+
 /// `story-refine`'s check for story `story` in `project`, run before
 /// admission and recording nothing. In order: a story the roadmap does not
 /// hold, or a dropped one, is `no-such-story`, while a deferred or
@@ -122,17 +127,7 @@ pub fn check<S: Views + ?Sized>(
     project: &ProjectId,
     story: u32,
 ) -> Result<Checked, Value> {
-    // The sequence is read before the story, so a drop landing after the
-    // story was judged shows as a moved roadmap when the issue confirms it.
-    let roadmap_seq = store
-        .get(project, ROADMAP_VIEW, &roadmap_key())
-        .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?
-        .map(|document| document.produced_seq);
-    let entry = match read_story(store, project, story) {
-        Ok(entry) if entry.status != DROPPED => entry,
-        Ok(_) | Err(ReadError::NoSuchStory) => return Err(no_such_story(story)),
-        Err(error) => return Err(scope_unread(&error)),
-    };
+    let (entry, roadmap) = judged_story(store, project, story)?;
     let pending = pending_analyzer(store, project, story)
         .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?;
     if let Some(order) = pending {
@@ -142,29 +137,13 @@ pub fn check<S: Views + ?Sized>(
             "so no other analyzer order was issued",
         ));
     }
-    let state = refinement_state(store, project, story)?;
-    // A story in the backlog has no phase, so nothing is dispatched on it.
-    if let Some(phase) = entry.phase
-        && dispatched(store, project, phase)?
-    {
-        return Err(Refusal::new(
-            DISPATCH_ACTIVE,
-            format!(
-                "a worker is dispatched on phase {phase}, which story {story} is committed to, so no analyzer order was issued"
-            ),
-        )
-        .slot("operation")
-        .value());
-    }
+    let state = refinement_judged(store, project, story, NOT_ISSUED)?;
+    dispatch_refusal(store, project, &entry, NOT_ISSUED)?;
     let kind = match state.refinement {
         Refinement::Drafting => OrderKind::Drafting,
         _ => OrderKind::Questions,
     };
-    let mut documents = vec![ObservedDocument {
-        view: ROADMAP_VIEW.into(),
-        key: roadmap_key(),
-        produced_seq: roadmap_seq,
-    }];
+    let mut documents = vec![roadmap];
     documents.extend(state.documents);
     Ok(Checked {
         story: entry,
@@ -172,6 +151,60 @@ pub fn check<S: Views + ?Sized>(
         latest: state.latest,
         documents,
     })
+}
+
+/// Story `story` as an analyzer call judges it, with the `roadmap` document
+/// it was judged on: a story the roadmap does not hold, or a dropped one, is
+/// `no-such-story`, while a deferred or excluded story passes (D-09). A read
+/// fault is the `failed` answer.
+pub(crate) fn judged_story<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    story: u32,
+) -> Result<(Story, ObservedDocument), Value> {
+    // The sequence is read before the story, so a drop landing after the
+    // story was judged shows as a moved roadmap when the record confirms it.
+    let roadmap_seq = store
+        .get(project, ROADMAP_VIEW, &roadmap_key())
+        .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?
+        .map(|document| document.produced_seq);
+    let entry = match read_story(store, project, story) {
+        Ok(entry) if entry.status != DROPPED => entry,
+        Ok(_) | Err(ReadError::NoSuchStory) => return Err(no_such_story(story)),
+        Err(error) => return Err(scope_unread(&error)),
+    };
+    let roadmap = ObservedDocument {
+        view: ROADMAP_VIEW.into(),
+        key: roadmap_key(),
+        produced_seq: roadmap_seq,
+    };
+    Ok((entry, roadmap))
+}
+
+/// `dispatch-active` for `story` when a worker is dispatched on the phase
+/// it is committed to (PRJ-R16), saying `not_done`. A story in the backlog
+/// has no phase, so nothing is dispatched on it.
+pub(crate) fn dispatch_refusal<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    story: &Story,
+    not_done: &str,
+) -> Result<(), Value> {
+    let Some(phase) = story.phase else {
+        return Ok(());
+    };
+    if !dispatched(store, project, phase)? {
+        return Ok(());
+    }
+    Err(Refusal::new(
+        DISPATCH_ACTIVE,
+        format!(
+            "a worker is dispatched on phase {phase}, which story {} is committed to, so {not_done}",
+            story.id
+        ),
+    )
+    .slot("operation")
+    .value())
 }
 
 /// Issues the order `checked` chose as `id` under `command`, the command its
@@ -183,9 +216,9 @@ pub fn check<S: Views + ?Sized>(
 /// latest set's facts. The decision declares no pending analyzer order of the
 /// story and observes every document the check and the input read saw, so an
 /// order issued, a story dropped, a set answered, a description approved or
-/// a story refined since makes the call `ledger-busy` with nothing recorded. The id is also
-/// its request, and it has no parent. The receipt adds `analyzer`, the
-/// order's kind, so a session knows which return to expect.
+/// a story refined since makes the call `ledger-busy` with nothing recorded.
+/// The id is also its request, and it has no parent. The receipt adds
+/// `analyzer`, the order's kind, so a session knows which return to expect.
 pub fn issue(
     store: &SqliteStore,
     command: &Command,
@@ -196,69 +229,209 @@ pub fn issue(
     id: &str,
 ) -> Value {
     let story = checked.story.id;
-    let instructions = match crate::instruction::evidence(checked.kind.instruction()) {
-        Ok(evidence) => [evidence],
-        Err(refusal) => return refusal,
-    };
-    let route = match compose(
-        policy,
-        command.policy_version,
-        host,
-        Role::Analyzer,
-        NonZeroU32::MIN,
-        names,
-    ) {
-        Ok(route) => route,
-        Err(refusal) => return Refusal::new(refusal.code(), refusal.to_string()).value(),
-    };
-    let read = match inputs::read(store, &command.project, story) {
-        Ok(read) => read,
-        Err(error) => return scope_unread(&error),
-    };
-    let questions = match (checked.kind, &checked.latest) {
-        (OrderKind::Drafting, Some(set)) => {
-            match inputs::bytes(&questions_body(&set.id, &set.facts)) {
-                Ok(bytes) => Some(bytes),
-                Err(error) => return scope_unread(&error),
-            }
-        }
+    let latest = checked.latest.as_ref();
+    let questions = match (checked.kind, latest) {
+        (OrderKind::Drafting, Some(set)) => Some(set.facts.clone()),
         _ => None,
     };
-    let mut bound: Vec<Input<'_>> = read
-        .inputs
-        .iter()
-        .map(|(name, bytes)| Input::Bytes { name, bytes })
-        .collect();
-    if let Some(bytes) = &questions {
-        bound.push(Input::Bytes {
-            name: QUESTIONS_INPUT,
-            bytes,
-        });
-    }
-    let documents: Vec<ObservedDocument> = read
+    let prepared = match prepare(
+        store,
+        command,
+        story,
+        checked.kind,
+        questions,
+        policy,
+        host,
+        names,
+        id,
+    ) {
+        Ok(prepared) => prepared,
+        Err(answer) => return answer,
+    };
+    let bound = match prepared.bound(latest.map_or("", |set| set.id.as_str())) {
+        Ok(bound) => bound,
+        Err(error) => return scope_unread(&error),
+    };
+    let documents: Vec<ObservedDocument> = prepared
         .documents
         .iter()
         .chain(&checked.documents)
         .cloned()
         .collect();
     let absences = analyzer_absences(story);
-    let subject = story_subject(story);
-    let mut further = Map::new();
-    further.insert("analyzer".into(), json!(checked.kind.as_str()));
-    let issue = Issue {
+    prepared.with_issue(&bound, &absences, &documents, |issue| {
+        issue::answer(issue::record(store, command, Some(issue)), store)
+    })
+}
+
+/// An analyzer order prepared outside any transaction, for a caller that
+/// records it inside its own: everything it is issued with but its
+/// `questions` input, whose set id a set opened in the same transaction
+/// only gets there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedOrder {
+    /// The order's id, also its request.
+    id: String,
+    /// The story it is about.
+    story: u32,
+    /// Which of the analyzer's orders it is.
+    kind: OrderKind,
+    /// The route it runs under.
+    route: IssuedRoute,
+    /// The evidence of the text its worker reads.
+    instructions: Vec<InstructionEvidence>,
+    /// The inputs read from the ledger, in order.
+    inputs: Vec<(&'static str, Vec<u8>)>,
+    /// A drafting order's set facts, its `questions` input built from them.
+    questions: Option<SetFacts>,
+    /// The documents the inputs were read from, at the sequence that
+    /// produced each.
+    documents: Vec<ObservedDocument>,
+}
+
+impl PreparedOrder {
+    /// The story the order is about.
+    pub fn story(&self) -> u32 {
+        self.story
+    }
+
+    /// The documents its inputs were read from, which the recording's
+    /// decision observes.
+    pub fn documents(&self) -> &[ObservedDocument] {
+        &self.documents
+    }
+
+    /// Issues the order inside `tx`, a transaction its caller runs, recorded
+    /// at `recorded_at`, with `set` as its `questions` input's set. The
+    /// caller declares the order's absence and observes its documents. The
+    /// answer is its receipt's members other than `status`.
+    pub fn issue_within(
+        &self,
+        tx: &mut dyn Transaction,
+        set: &str,
+        recorded_at: &str,
+    ) -> Result<Map<String, Value>, StoreError> {
+        let bound = self.bound(set).map_err(|error| {
+            StoreError::Unavailable(format!("a drafting order's questions: {error:?}"))
+        })?;
+        self.with_issue(&bound, &[], &[], |issue| {
+            issue::issue_within(tx, issue, recorded_at)
+        })
+    }
+
+    /// Every input body, with a drafting order's `questions` last, built for
+    /// set `set`.
+    fn bound(&self, set: &str) -> Result<Vec<(&'static str, Vec<u8>)>, ReadError> {
+        let mut bound = self.inputs.clone();
+        if let Some(facts) = &self.questions {
+            bound.push((QUESTIONS_INPUT, inputs::bytes(&questions_body(set, facts))?));
+        }
+        Ok(bound)
+    }
+
+    /// Runs `then` over the order as `issue::record` takes it, with `bound`
+    /// as its inputs and `absences` and `documents` as its caller's.
+    fn with_issue<T>(
+        &self,
+        bound: &[(&'static str, Vec<u8>)],
+        absences: &[Absence],
+        documents: &[ObservedDocument],
+        then: impl FnOnce(&Issue<'_>) -> T,
+    ) -> T {
+        let inputs: Vec<Input<'_>> = bound
+            .iter()
+            .map(|(name, bytes)| Input::Bytes { name, bytes })
+            .collect();
+        let subject = story_subject(self.story);
+        let mut further = Map::new();
+        further.insert("analyzer".into(), json!(self.kind.as_str()));
+        then(&Issue {
+            id: &self.id,
+            request: &self.id,
+            parent: None,
+            subject: &subject,
+            route: &self.route,
+            instructions: &self.instructions,
+            inputs: &inputs,
+            absences,
+            streams: &[],
+            documents,
+            further: &further,
+        })
+    }
+}
+
+/// Prepares story `story`'s analyzer order of `kind` as `id` for `command`'s
+/// project: the route for `analyzer` at attempt 1 under `policy`, the host's
+/// effective policy, at the command's policy version, with the catalog
+/// `names`; the evidence of the order's text; and the inputs read now
+/// through `refine::inputs` (D-21) with the documents they were read from,
+/// and for a drafting order the set facts its `questions` input is built
+/// from. Nothing is recorded. A fault is the answer to give.
+#[allow(clippy::too_many_arguments)]
+fn prepare<S: Views + ?Sized>(
+    store: &S,
+    command: &Command,
+    story: u32,
+    kind: OrderKind,
+    questions: Option<SetFacts>,
+    policy: &EffectivePolicy,
+    host: Host,
+    names: &AcceptedNames,
+    id: &str,
+) -> Result<PreparedOrder, Value> {
+    let instructions = vec![crate::instruction::evidence(kind.instruction())?];
+    let route = compose(
+        policy,
+        command.policy_version,
+        host,
+        Role::Analyzer,
+        NonZeroU32::MIN,
+        names,
+    )
+    .map_err(|refusal| Refusal::new(refusal.code(), refusal.to_string()).value())?;
+    let read =
+        inputs::read(store, &command.project, story).map_err(|error| scope_unread(&error))?;
+    Ok(PreparedOrder {
+        id: id.into(),
+        story,
+        kind,
+        route,
+        instructions,
+        inputs: read.inputs,
+        questions,
+        documents: read.documents,
+    })
+}
+
+/// Prepares story `story`'s drafting order as `id` for a caller that issues
+/// it inside its own transaction with [`PreparedOrder::issue_within`]: a
+/// closing answer, or the submit of an empty set (D-08). Its `questions`
+/// input is built from `facts`, the closed set's questions with every answer
+/// and deferral, as `story-refine`'s drafting order builds it. The rest is
+/// as [`issue`] prepares an order.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_drafting<S: Views + ?Sized>(
+    store: &S,
+    command: &Command,
+    story: u32,
+    facts: &SetFacts,
+    policy: &EffectivePolicy,
+    host: Host,
+    names: &AcceptedNames,
+    id: &str,
+) -> Result<PreparedOrder, Value> {
+    prepare(
+        store,
+        command,
+        story,
+        OrderKind::Drafting,
+        Some(facts.clone()),
+        policy,
+        host,
+        names,
         id,
-        request: id,
-        parent: None,
-        subject: &subject,
-        route: &route,
-        instructions: &instructions,
-        inputs: &bound,
-        absences: &absences,
-        streams: &[],
-        documents: &documents,
-        further: &further,
-    };
-    issue::answer(issue::record(store, command, Some(&issue)), store)
+    )
 }
 
 /// The fact an analyzer order of story `story` relies on being absent: a
@@ -334,6 +507,77 @@ pub fn refinement_state<S: Views + ?Sized>(
     project: &ProjectId,
     story: u32,
 ) -> Result<RefinementState, Value> {
+    refinement_judged(store, project, story, NOT_ISSUED)
+}
+
+/// [`refinement_state`] for a call whose `question-open` refusal says
+/// `not_done`.
+pub(crate) fn refinement_judged<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    story: u32,
+    not_done: &str,
+) -> Result<RefinementState, Value> {
+    let read = backlog_read(store, project, story)?;
+    let latest = read
+        .latest
+        .as_ref()
+        .map(|(id, held)| (id.as_str(), &held.round));
+    let Ok(state) = refinement(latest, read.refined.as_deref()) else {
+        // Only a later set abandons a story's set, so the backlog moved
+        // between the two reads.
+        return Err(failed(
+            LEDGER_BUSY,
+            "the story's question sets moved while this call was prepared, so nothing was recorded. The same call can be sent again",
+            PLACE_LEDGER,
+        ));
+    };
+    let latest = read.latest.map(|(id, held)| LatestSet {
+        id,
+        facts: held.facts,
+    });
+    if let (Refinement::QuestionsOpen { .. }, Some(set)) = (state, &latest) {
+        let open = open_questions(&set.facts);
+        let open = open.first().copied().unwrap_or_default();
+        return Err(Refusal::new(
+            QUESTION_OPEN,
+            format!(
+                "question {open} of story {story}'s question set {} is open, so {not_done}. The owner answers the set's questions in rounds, or defers each open one with a reason",
+                set.id
+            ),
+        )
+        .slot("operation")
+        .details(json!({"set": set.id, "question": open}))
+        .value());
+    }
+    Ok(RefinementState {
+        refinement: state,
+        latest,
+        documents: read.documents,
+    })
+}
+
+/// A story's `backlog` entry as refinement reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BacklogRead {
+    /// The story's latest set by id, as held, or none before its first.
+    pub latest: Option<(String, HeldSet)>,
+    /// The set its latest `story.refined` names, or none.
+    pub refined: Option<String>,
+    /// The `backlog` document and the latest set's `questions` document, at
+    /// the sequence that produced each.
+    pub documents: Vec<ObservedDocument>,
+}
+
+/// Reads story `story`'s `backlog` entry and its latest set. A story the
+/// backlog does not list, or a set it names that is not held, is a ledger
+/// fault, since the backlog names a set only in the transaction that opens
+/// it. Nothing is judged here.
+pub(crate) fn backlog_read<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    story: u32,
+) -> Result<BacklogRead, Value> {
     let busy = |error: StoreError| store_failed(&error, NOT_RECORDED_BUSY);
     let backlog = store
         .get(project, BACKLOG_VIEW, &backlog_key())
@@ -356,71 +600,105 @@ pub fn refinement_state<S: Views + ?Sized>(
         key: backlog_key(),
         produced_seq: Some(backlog.produced_seq),
     }];
-    let held = match set {
+    let latest = match set {
         None => None,
         Some(id) => match read_set(store, project, id).map_err(busy)? {
             SetRead::Held(held) => {
                 documents.push(ObservedDocument {
-                    view: baley_core::questions::QUESTIONS_VIEW.into(),
+                    view: QUESTIONS_VIEW.into(),
                     key: questions_key(id),
                     produced_seq: Some(held.produced_seq),
                 });
-                Some((id, held))
+                Some((id.to_owned(), *held))
             }
-            // The backlog names a set only in the transaction that opens it.
             SetRead::NotHeld | SetRead::Unreadable(_) => {
-                return Err(unreadable(baley_core::questions::QUESTIONS_VIEW));
+                return Err(unreadable(QUESTIONS_VIEW));
             }
         },
     };
-    let latest = held.as_ref().map(|(id, held)| (*id, &held.round));
-    let Ok(state) = refinement(latest, refined) else {
-        // Only a later set abandons a story's set, so the backlog moved
-        // between the two reads.
-        return Err(failed(
-            LEDGER_BUSY,
-            "the story's question sets moved while this call was prepared, so nothing was recorded. The same call can be sent again",
-            PLACE_LEDGER,
-        ));
-    };
-    let latest = held.map(|(id, held)| LatestSet {
-        id: id.into(),
-        facts: held.facts,
-    });
-    if let (Refinement::QuestionsOpen { .. }, Some(set)) = (state, &latest) {
-        let open = first_open(&set.facts).unwrap_or_default();
-        return Err(Refusal::new(
-            QUESTION_OPEN,
-            format!(
-                "question {open} of story {story}'s question set {} is open, so no analyzer order was issued. The owner answers the set's questions in rounds, or defers each open one with a reason",
-                set.id
-            ),
-        )
-        .slot("operation")
-        .details(json!({"set": set.id, "question": open}))
-        .value());
-    }
-    Ok(RefinementState {
-        refinement: state,
+    Ok(BacklogRead {
         latest,
+        refined: refined.map(str::to_owned),
         documents,
     })
 }
 
-/// The first question of `facts` in submitted order that is neither
-/// answered nor deferred.
-fn first_open(facts: &SetFacts) -> Option<&str> {
+/// Whether the order `order`, a `work_order` document's body, is story
+/// `story`'s analyzer order of `kind`: role `analyzer`, the story's subject
+/// and the kind's text among its instructions (D-20).
+pub(crate) fn is_analyzer_order(order: &Value, story: u32, kind: OrderKind) -> bool {
+    let text = |field: &str| order.get(field).and_then(Value::as_str);
+    let carries = order
+        .get("instructions")
+        .and_then(Value::as_array)
+        .is_some_and(|instructions| {
+            instructions.iter().any(|entry| {
+                entry.get("identity").and_then(Value::as_str) == Some(kind.instruction())
+            })
+        });
+    text("role") == Some(Role::Analyzer.name())
+        && text("subject") == Some(story_subject(story).as_str())
+        && carries
+}
+
+/// Whether story `story` has a pending analyzer order other than `named`,
+/// read from the `live` index.
+pub(crate) fn other_pending<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    story: u32,
+    named: &str,
+) -> Result<bool, StoreError> {
+    let text = |value: &str| KeyValue::Text(value.into());
+    let query = IndexQuery {
+        index: WORK_ORDER_LIVE_INDEX.into(),
+        equals: vec![
+            text(Role::Analyzer.name()),
+            text(&story_subject(story)),
+            text(PENDING),
+        ],
+        // The named order is one, so a second one is enough to know.
+        page: PageRequest {
+            limit: 2,
+            after: None,
+        },
+    };
+    let page = store.find(project, WORK_ORDER_VIEW, &query)?;
+    Ok(page
+        .items
+        .iter()
+        .any(|document| document.body.get("id").and_then(Value::as_str) != Some(named)))
+}
+
+/// The instruction evidence a `work_order` document's body lists, in order,
+/// or none when an entry cannot be read.
+pub(crate) fn order_evidence(order: &Value) -> Option<Vec<InstructionEvidence>> {
+    order
+        .get("instructions")?
+        .as_array()?
+        .iter()
+        .map(|entry| {
+            let text = |field: &str| entry.get(field).and_then(Value::as_str);
+            InstructionEvidence::new(text("identity")?, text("version")?, text("hash")?).ok()
+        })
+        .collect()
+}
+
+/// The questions of `facts` in submitted order that are neither answered
+/// nor deferred.
+pub(crate) fn open_questions(facts: &SetFacts) -> Vec<&str> {
     facts
         .questions
         .iter()
         .map(|question| question.id.as_str())
-        .find(|id| {
+        .filter(|id| {
             !facts.answers.iter().any(|answer| answer.question == *id)
                 && !facts
                     .deferrals
                     .iter()
                     .any(|deferral| deferral.question == *id)
         })
+        .collect()
 }
 
 /// Whether a worker is dispatched on phase `phase`, read from its `phase`
@@ -825,6 +1103,61 @@ pub(crate) mod tests {
                     "owner": "Ada Owner", "at": T3},
                 {"question": "q2", "answer": "SQLite", "accepted": true, "round": 2,
                     "owner": "Ada Owner", "at": T3}])
+        );
+    }
+
+    #[test]
+    fn a_prepared_drafting_order_with_other_inputs_than_story_refines_is_caught() {
+        let (_dir, store) = approved();
+        let set = open_set(&store, R2, &q1(), &subject(1));
+        answer_by_hand(&store, &set, "q1", 1, R3);
+        answer_by_hand(&store, &set, "q2", 2, R4);
+        let SetRead::Held(held) = read_set(&store, &project(), &set).unwrap() else {
+            panic!("the set is held");
+        };
+        let policy =
+            effective_policy(Schema::standard(), Some(Host::ClaudeCode), None, None).unwrap();
+        let names = AcceptedNames {
+            names: BTreeSet::new(),
+            version: 0,
+        };
+        let prepared = prepare_drafting(
+            &store,
+            &command("story.questions.submit", R5, 7, T4),
+            1,
+            &held.facts,
+            &policy,
+            Host::ClaudeCode,
+            &names,
+            I3,
+        )
+        .unwrap();
+        let checked = check(&store, &project(), 1).unwrap();
+        let receipt = issue_checked(&store, &checked, I0, R1, T4);
+        assert_eq!(receipt["status"], "ok", "{receipt}");
+        let issued = issued(&store);
+
+        let identities: Vec<&str> = prepared
+            .instructions
+            .iter()
+            .map(InstructionEvidence::identity)
+            .collect();
+        assert_eq!(
+            identities,
+            [issued[0].payload["instructions"][0]["identity"]
+                .as_str()
+                .unwrap()]
+        );
+        let bound = prepared.bound(&set).unwrap();
+        let bound_names: Vec<&str> = bound.iter().map(|(name, _)| *name).collect();
+        assert_eq!(bound_names, input_names(&issued[0]));
+        let (_, questions) = bound
+            .iter()
+            .find(|(name, _)| *name == "questions")
+            .expect("the prepared order binds the answers");
+        assert_eq!(
+            serde_json::from_slice::<Value>(questions).unwrap(),
+            input_body(&store, &issued[0], "questions")
         );
     }
 

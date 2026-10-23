@@ -40,7 +40,9 @@ pub const START_ORDER_PENDING: &str = "start-order-pending";
 /// pending order, since a story has one live analyzer order.
 pub const ANALYZER_ORDER_PENDING: &str = "analyzer-order-pending";
 /// The code of a submission naming an order that is not this project's
-/// start planner order.
+/// start planner order, or, for a story's questions or truths, not the
+/// story's analyzer order of the kind the call answers: its questions order
+/// for its questions, its drafting order for its truths (D-20).
 pub const WRONG_WORK_ORDER: &str = "wrong-work-order";
 
 /// What a retry re-issues.
