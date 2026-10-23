@@ -216,8 +216,7 @@ pub(crate) fn refinement_render(read: Result<StoryRefinement, ReadError>) -> Ren
 }
 
 /// One truth's two lines: `truth <id> version <v>:` and its sentence, read
-/// as the owner approved it, then its kind, its attestations and, when it
-/// has one, the tool or service a person needs to prove it.
+/// as the owner approved it, then its detail line.
 pub(crate) fn truth_lines(lines: &mut Vec<String>, truth: &VersionedTruth) {
     lines.push(format!(
         "truth {} version {}: {}",
@@ -231,16 +230,30 @@ pub(crate) fn truth_lines(lines: &mut Vec<String>, truth: &VersionedTruth) {
             &truth.outcome
         )
     ));
-    let mut detail = format!(
-        "  kind: {}, observable: {}, fixed oracle: {}",
-        escaped(&truth.kind),
+    lines.push(truth_detail(
+        &truth.kind,
         truth.observable,
-        truth.fixed_oracle
+        truth.fixed_oracle,
+        truth.human_verify.as_deref(),
+    ));
+}
+
+/// A truth's detail line: its kind, its two attestations and, when it has
+/// one, the tool or service a person needs to prove it.
+pub(crate) fn truth_detail(
+    kind: &str,
+    observable: bool,
+    fixed_oracle: bool,
+    human_verify: Option<&str>,
+) -> String {
+    let mut detail = format!(
+        "  kind: {}, observable: {observable}, fixed oracle: {fixed_oracle}",
+        escaped(kind)
     );
-    if let Some(human_verify) = &truth.human_verify {
+    if let Some(human_verify) = human_verify {
         detail.push_str(&format!(", human verify: {}", escaped(human_verify)));
     }
-    lines.push(detail);
+    detail
 }
 
 /// A truth's sentence in its form: `When <trigger>, <observer> <verb>
