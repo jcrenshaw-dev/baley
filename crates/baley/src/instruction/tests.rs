@@ -707,3 +707,20 @@ fn a_context_door_keyed_by_phase_or_naming_cadence_state_is_caught() {
         assert!(!body.contains(name), "the context front door names {name}");
     }
 }
+
+#[test]
+fn a_default_test_style_missing_a_rule_of_its_design_row_is_caught() {
+    // The five rules of design 0005 section 10's Default test style row.
+    for rule in [
+        "Test a unit through what it exposes",
+        "Fake only the outside world",
+        "Never start a program",
+        "Skip trivial code",
+        "Write the expected value by hand",
+    ] {
+        assert!(
+            test_style::TEXT.contains(rule),
+            "the default test style lacks {rule}"
+        );
+    }
+}

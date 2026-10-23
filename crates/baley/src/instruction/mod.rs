@@ -21,6 +21,7 @@ pub mod read_contract;
 pub mod rounds;
 pub mod scope;
 pub mod start;
+pub mod test_style;
 
 /// The served text of one instruction, pinned in source.
 #[derive(Debug, PartialEq, Eq)]
