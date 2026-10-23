@@ -11,7 +11,8 @@ use crate::policy::{Role, Rung};
 use crate::registry::{Registry, RegistryError};
 use crate::scope::ROADMAP_STREAM;
 
-/// One work order issued, on its subject's stream (`roadmap` for the start):
+/// One work order issued, on its subject's stream (`roadmap` for the start
+/// and a story's analyzer orders):
 /// `{id, request, parent, role, subject, attempt, route, agent,
 /// instructions, inputs}`. `request` is the id of its chain's first order,
 /// `parent` the failed order it retries or null, `instructions` a list of
@@ -35,10 +36,32 @@ pub fn register_work_order_events(registry: &mut Registry) -> Result<(), Registr
     registry.register(WORK_ORDER_FAILED, WORK_ORDER_FAILED_VERSION, [])
 }
 
+/// What an analyzer order's subject starts with, before its story's id.
+const STORY_SUBJECT_PREFIX: &str = "story/";
+
+/// The subject of story `story`'s analyzer orders, `story/<id>`. Both the
+/// questions order and the drafting order carry it, so one look at the
+/// `live` index finds either one pending (D-09).
+pub fn story_subject(story: u32) -> String {
+    format!("{STORY_SUBJECT_PREFIX}{story}")
+}
+
+/// The story an analyzer order's subject names, or none for any other
+/// text. Only the spelling [`story_subject`] writes is read, decimal with
+/// no sign or leading zero, so one story never has two subjects.
+pub fn subject_story(subject: &str) -> Option<u32> {
+    let digits = subject.strip_prefix(STORY_SUBJECT_PREFIX)?;
+    let canonical = !digits.is_empty()
+        && !digits.starts_with('0')
+        && digits.bytes().all(|byte| byte.is_ascii_digit());
+    canonical.then(|| digits.parse().ok()).flatten()
+}
+
 /// The stream an order of `subject` is recorded on: `roadmap` for the
-/// start. Other subjects get theirs with the builds that issue them.
+/// start and for a story's analyzer orders. Other subjects get theirs with
+/// the builds that issue them.
 pub fn order_stream(subject: &str) -> Option<&'static str> {
-    (subject == START_SUBJECT).then_some(ROADMAP_STREAM)
+    (subject == START_SUBJECT || subject_story(subject).is_some()).then_some(ROADMAP_STREAM)
 }
 
 /// The agent stub a role runs at a rung, `bal-<role>-<rung>`. Install places
@@ -222,6 +245,17 @@ mod tests {
             "bal-reviewer-max",
         ] {
             assert!(names.contains(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_analyzer_order_off_the_roadmap_stream_or_misread_subject_is_caught() {
+        assert_eq!(story_subject(12), "story/12");
+        assert_eq!(order_stream("story/12"), Some("roadmap"));
+        assert_eq!(subject_story("story/12"), Some(12));
+        for other in ["story/012", "story/0", "story/", "story/x", "phase/12"] {
+            assert_eq!(subject_story(other), None, "{other}");
+            assert_eq!(order_stream(other), None, "{other}");
         }
     }
 }
