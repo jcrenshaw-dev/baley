@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use serde_json::{Map, Value};
 
 use super::judge::{Plan, PlanRefusal};
-use super::lease;
+use super::{lease, task};
 
 /// The plan's members, in the order they are judged. The plan number, the
 /// question set, the size and the suite are written by Baley at approval,
@@ -34,13 +34,8 @@ pub(super) fn read(value: &Value) -> Result<Plan, PlanRefusal> {
     let Value::Object(plan) = value else {
         return Err(PlanRefusal::TypedContent { path: None });
     };
-    // Key order depends on serde_json's features, so the first is chosen.
-    if let Some(unknown) = plan
-        .keys()
-        .filter(|name| !MEMBERS.contains(&name.as_str()))
-        .min()
-    {
-        return Err(PlanRefusal::typed(unknown.as_str()));
+    if let Some(unknown) = first_unknown(plan, &MEMBERS) {
+        return Err(PlanRefusal::typed(unknown));
     }
     let phase = counter(plan.get("phase")).ok_or_else(|| PlanRefusal::typed("phase"))?;
     // A repeated story is named at its later position.
@@ -60,7 +55,7 @@ pub(super) fn read(value: &Value) -> Result<Plan, PlanRefusal> {
     let goal = text(plan, "goal")?;
     let context = text(plan, "context")?;
     let notes = text(plan, "notes")?;
-    let tasks = list(plan, "tasks")?.clone();
+    let tasks = task::read(list(plan, "tasks")?)?;
     let evidence_map = list(plan, "evidence_map")?.clone();
     let questions = plan
         .get("questions")
@@ -78,6 +73,19 @@ pub(super) fn read(value: &Value) -> Result<Plan, PlanRefusal> {
         evidence_map,
         questions,
     })
+}
+
+/// The first member of `object`, by name, that is not among `members`.
+pub(super) fn first_unknown<'a>(
+    object: &'a Map<String, Value>,
+    members: &[&str],
+) -> Option<&'a str> {
+    // Key order depends on serde_json's features, so the first is chosen.
+    object
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !members.contains(name))
+        .min()
 }
 
 /// A whole number from 1 to `u32::MAX`, as phase and story counters run,

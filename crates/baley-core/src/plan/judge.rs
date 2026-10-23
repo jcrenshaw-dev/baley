@@ -4,7 +4,8 @@
 //! A plan arrives as plain JSON and the phase's facts as plain values the
 //! binary gathered from its views. The plan is judged in one fixed order,
 //! the first fault answering, so one plan always gets one answer: (1) the
-//! plan's own members. The judge trusts the facts and judges the plan.
+//! plan's own members, task by task within `tasks`; (3) each task file
+//! inside the lease. The judge trusts the facts and judges the plan.
 //! Nothing here records anything.
 
 use std::num::NonZeroU32;
@@ -12,11 +13,14 @@ use std::num::NonZeroU32;
 use serde_json::Value;
 
 use super::content;
+use super::task::{self, Task};
 
 /// The refusal code for a plan out of its grammar: not an object, or a
 /// member unknown, missing, of another type or out of range. It names the
 /// path of the first fault.
 pub const TYPED_CONTENT: &str = "typed-content";
+/// The refusal code for a task naming a file outside the plan's lease.
+pub const LEASE: &str = "lease";
 
 /// Why a plan is refused. Positions count from 0 in the list as submitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +29,13 @@ pub enum PlanRefusal {
     /// and a list position written `[<n>]`, such as `tasks[0].verify[1]`.
     /// `None` when the plan is not an object.
     TypedContent { path: Option<String> },
+    /// The task at `position`, whose id is `id`, names `file`, which lies
+    /// outside the plan's lease.
+    Lease {
+        position: usize,
+        id: String,
+        file: String,
+    },
 }
 
 impl PlanRefusal {
@@ -32,6 +43,7 @@ impl PlanRefusal {
     pub fn code(&self) -> &'static str {
         match self {
             Self::TypedContent { .. } => TYPED_CONTENT,
+            Self::Lease { .. } => LEASE,
         }
     }
 
@@ -129,7 +141,7 @@ pub struct Plan {
     pub(super) goal: String,
     pub(super) context: String,
     pub(super) notes: String,
-    pub(super) tasks: Vec<Value>,
+    pub(super) tasks: Vec<Task>,
     pub(super) evidence_map: Vec<Value>,
     pub(super) questions: Value,
 }
@@ -171,7 +183,7 @@ impl Plan {
     }
 
     /// The tasks, in submitted order.
-    pub fn tasks(&self) -> &[Value] {
+    pub fn tasks(&self) -> &[Task] {
         &self.tasks
     }
 
@@ -192,7 +204,10 @@ impl Plan {
 }
 
 /// Judges the submitted plan `plan` against the phase's `facts` in the
-/// fixed order, the first fault answering: (1) the plan's own members.
+/// fixed order, the first fault answering: (1) the plan's own members;
+/// (3) `lease`, task by task and file by file.
 pub fn judge_plan(plan: &Value, _facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
-    content::read(plan)
+    let plan = content::read(plan)?;
+    task::within_lease(&plan.tasks, &plan.files, &plan.directories)?;
+    Ok(plan)
 }
