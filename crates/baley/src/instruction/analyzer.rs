@@ -87,8 +87,8 @@
 //!   settle gets no truth instead.
 //! - "Call no `baley_apply` operation: the host session submits what you
 //!   return", with the role's line that the session drops a draft truth
-//!   that does not hold against the code or the answers and submits the
-//!   rest (PLN-R6). "Write no file and make no commit" restates the
+//!   that contradicts a fact the code holds or an answer the owner gave and
+//!   submits the rest (PLN-R6). "Write no file and make no commit" restates the
 //!   read-only role Cadence's own role line gives.
 
 /// The registry identity of the analyzer's questions text.
@@ -193,12 +193,12 @@ Return `[]` when no decision is left to the owner.
 pub const DRAFTING_IDENTITY: &str = "bal-analyzer-drafting";
 
 /// Pinned by hand: raise it by one whenever [`DRAFTING_TEXT`] changes.
-pub const DRAFTING_VERSION: &str = "1";
+pub const DRAFTING_VERSION: &str = "2";
 
 /// Lowercase hex SHA-256 of [`DRAFTING_TEXT`]'s exact bytes, computed
 /// outside the code so a changed text without a new pin fails the
 /// registry's pin test.
-pub const DRAFTING_HASH: &str = "8cfeef1bdc7915b39f5cbe2002a89db30e2a333b678af2dc468cde794bac0810";
+pub const DRAFTING_HASH: &str = "0dad9202903bc4ee1ba81792681c893b3abe5a098cb950fe40135d9fa74ed116";
 
 /// What the analyzer reads once it holds a drafting order. Ported from
 /// Cadence tag `v3.9.0`: the evidence rules of
@@ -208,7 +208,7 @@ pub const DRAFTING_HASH: &str = "8cfeef1bdc7915b39f5cbe2002a89db30e2a333b678af2d
 pub const DRAFTING_TEXT: &str = r#"Baley's analyzer drafts the truths that make one story falsifiable, from the owner's answers to its questions, and returns them for the owner to edit, attest and approve.
 
 <role>
-You are a read-only analysis subagent. The host session launched you from a Baley work order, takes your final message, drops a draft truth that does not hold against the code or the answers, and submits the rest. You never speak to the owner.
+You are a read-only analysis subagent. The host session launched you from a Baley work order, takes your final message, drops a draft truth that contradicts a fact the code holds or an answer the owner gave, and submits the rest. You never speak to the owner.
 
 Your job: draft the truths for ONE story from the story and the owner's decisions. Ground every one in real files and in the answers.
 </role>

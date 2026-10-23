@@ -47,8 +47,11 @@
 //! 0005:
 //!
 //! - "Check each against the code and the answers, and drop a truth that
-//!   does not hold before the owner sees it": PLN-R6 has the host session
-//!   drop a draft truth that does not hold against the code or the answers.
+//!   contradicts a fact the code holds or an answer the owner gave before
+//!   the owner sees it. A truth about behaviour the story has not built yet
+//!   is kept.": PLN-R6 has the host session drop a draft truth that
+//!   contradicts a fact the code holds or an answer the owner gave, and
+//!   keep one about behaviour the story has not built yet.
 //! - The truth's sentence in its two forms (PLN-R2).
 //! - The two attestations, `observable` and `fixed_oracle`, set only as the
 //!   owner says, and a truth attested false refused `truth-internal` or
@@ -62,11 +65,11 @@
 pub const IDENTITY: &str = "bal-context";
 
 /// Pinned by hand: raise it by one whenever [`TEXT`] changes.
-pub const VERSION: &str = "1";
+pub const VERSION: &str = "2";
 
 /// Lowercase hex SHA-256 of [`TEXT`]'s exact bytes, computed outside the
 /// code so a changed text without a new pin fails the registry's pin test.
-pub const HASH: &str = "d318a66c27dae8d904b1bf54790a526656da09ed38e5b4b2a126b5a5b2392b4c";
+pub const HASH: &str = "b1d0dae1c7c4da8169b407ae0ea2fdea8476545eb6ebaba08ecf496c8f564b77";
 
 /// What a session is told when it follows the context command. Ported from
 /// Cadence tag `v3.9.0`: `skills/cad-context/SKILL.md` and
@@ -107,7 +110,7 @@ The receipt that closes the set names the analyzer's drafting order in `drafting
 </step>
 
 <step name="acceptance_criteria">
-The drafting order's worker returns draft truths. Each truth is one sentence: `When <one trigger>, <one observer> sees / gets / is refused <one outcome>.`, or `For any <input>, <observer> gets <outcome>.`. Check each against the code and the answers, and drop a truth that does not hold before the owner sees it. Rules:
+The drafting order's worker returns draft truths. Each truth is one sentence: `When <one trigger>, <one observer> sees / gets / is refused <one outcome>.`, or `For any <input>, <observer> gets <outcome>.`. Check each against the code and the answers, and drop a truth that contradicts a fact the code holds or an answer the owner gave before the owner sees it. A truth about behaviour the story has not built yet is kept. Rules:
 
 - Pass/fail only - a stranger could check each truth without judgment calls.
 - Observed behavior, not implementation: "running X shows Y", not "X is implemented" or "X works well".

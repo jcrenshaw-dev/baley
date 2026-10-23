@@ -176,6 +176,16 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "1",
         "d318a66c27dae8d904b1bf54790a526656da09ed38e5b4b2a126b5a5b2392b4c",
     ),
+    (
+        "bal-context",
+        "2",
+        "b1d0dae1c7c4da8169b407ae0ea2fdea8476545eb6ebaba08ecf496c8f564b77",
+    ),
+    (
+        "bal-analyzer-drafting",
+        "2",
+        "0dad9202903bc4ee1ba81792681c893b3abe5a098cb950fe40135d9fa74ed116",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {
@@ -582,12 +592,15 @@ fn a_drafting_text_missing_the_form_refusals_or_human_verify_is_caught() {
 #[test]
 fn an_analyzer_text_given_a_help_row_or_a_skill_stub_is_caught() {
     let doors = crate::host_artifacts::stubs::front_doors();
-    for identity in ["bal-analyzer-questions", "bal-analyzer-drafting"] {
+    for (identity, version) in [
+        ("bal-analyzer-questions", "1"),
+        ("bal-analyzer-drafting", "2"),
+    ] {
         let Lookup::Served { entry, text } = lookup(identity) else {
             panic!("{identity} is served");
         };
         assert_eq!(entry.build, 4, "{identity}");
-        assert_eq!(text.version, "1", "{identity}");
+        assert_eq!(text.version, version, "{identity}");
         assert!(
             !crate::help::table::COMMANDS
                 .iter()
@@ -659,6 +672,28 @@ fn a_context_door_missing_an_operation_or_the_terminal_approval_is_caught() {
         );
     }
     assert!(!body.contains("scope-approve") && !body.contains("truths-approve"));
+}
+
+#[test]
+fn a_drafting_step_that_drops_truths_about_unbuilt_behaviour_is_caught() {
+    // A story is refined before it is built, so the drop rule names a
+    // contradiction, never a truth the code does not hold yet.
+    for identity in ["bal-context", "bal-analyzer-drafting"] {
+        let body = served_text(identity);
+        assert!(
+            body.contains("contradicts a fact the code holds or an answer the owner gave"),
+            "{identity} drops on something other than a contradiction"
+        );
+        assert!(
+            !body.contains("does not hold"),
+            "{identity} drops a truth that does not hold"
+        );
+    }
+    assert!(
+        served_text("bal-context")
+            .contains("A truth about behaviour the story has not built yet is kept."),
+        "the context front door does not keep a truth about unbuilt behaviour"
+    );
 }
 
 #[test]
