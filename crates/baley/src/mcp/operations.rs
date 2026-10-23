@@ -211,6 +211,7 @@ pub const APPLY_OPERATIONS: &[Operation] = &[
     with_project("work-order-retry"),
     with_project("questions-answer"),
     with_project("story-refine"),
+    with_project("story-questions-submit"),
 ];
 
 /// A spelling served only from a project, which its call prepares.
@@ -380,6 +381,9 @@ enum RequestShape {
     // `story-refine` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "story-refine")]
     StoryRefine(#[allow(dead_code)] crate::mcp::refine::RefineShape),
+    // `story-questions-submit` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "story-questions-submit")]
+    StoryQuestionsSubmit(#[allow(dead_code)] crate::mcp::refine::QuestionsShape),
     // `route` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "route")]
     Route(#[allow(dead_code)] crate::mcp::work_order::RouteShape),
@@ -663,6 +667,7 @@ pub(crate) mod expected {
         "work-order-retry",
         "questions-answer",
         "story-refine",
+        "story-questions-submit",
     ];
 }
 
@@ -731,6 +736,7 @@ mod tests {
                     "work-order-retry",
                     "questions-answer",
                     "story-refine",
+                    "story-questions-submit",
                     "route",
                 ]
                 .contains(n)
@@ -773,6 +779,7 @@ mod tests {
             "work-order-retry",
             "questions-answer",
             "story-refine",
+            "story-questions-submit",
         ] {
             assert_eq!(
                 lookup(Tool::Apply, Some(name)),
@@ -1295,10 +1302,10 @@ mod tests {
     fn the_work_order_operations_out_of_the_baseline_order_or_unserved_are_caught() {
         let names: Vec<&str> = APPLY_OPERATIONS.iter().map(|op| op.name).collect();
         let served = ["project-start", "work-order-fail", "work-order-retry"];
-        // The three directly precede `questions-answer` and `story-refine`,
-        // appended after them.
+        // The three directly precede `questions-answer`, `story-refine` and
+        // `story-questions-submit`, appended after them.
         assert_eq!(
-            names[names.len().saturating_sub(5)..names.len().saturating_sub(2)],
+            names[names.len().saturating_sub(6)..names.len().saturating_sub(3)],
             served
         );
         for name in served {
@@ -1332,7 +1339,7 @@ mod tests {
     fn a_questions_answer_spelling_left_unserved_or_out_of_the_baseline_order_is_caught() {
         let names: Vec<&str> = APPLY_OPERATIONS.iter().map(|op| op.name).collect();
         assert_eq!(
-            names[names.len() - 3..],
+            names[names.len() - 4..names.len() - 1],
             ["work-order-retry", "questions-answer", "story-refine"]
         );
         assert_eq!(

@@ -9,7 +9,8 @@
 //! call's host, the session's ledger and the server's time. `capture`,
 //! `scope-submit`, the ten change operations from `project-describe` to
 //! `backlog-reorder`, `project-start`, `work-order-fail`, `work-order-retry`,
-//! `questions-answer`, `story-refine`, `document` and `route` set
+//! `questions-answer`, `story-refine`, `story-questions-submit`, `document`
+//! and `route` set
 //! `needs_project`, and in their [`operate`] arms the writes prepare a write
 //! from it, `document` a read and `route` a read that also reads the
 //! settings.
@@ -202,6 +203,11 @@ pub(crate) fn operate(
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "story-refine" => {
             refine::serve(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation))
+            if spelling == "story-questions-submit" =>
+        {
+            refine::serve_questions(arguments_or_null, preparation)
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "route" => {
             work_order::serve_route(arguments_or_null, preparation)
