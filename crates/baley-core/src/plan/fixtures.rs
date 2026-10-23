@@ -2,9 +2,6 @@
 //! decisions, never from running the judge: one copy every test of the
 //! module reads.
 
-// Builders the later steps' tests read; removed once every one is read.
-#![allow(dead_code)]
-
 use std::num::NonZeroU32;
 
 use serde_json::{Value, json};

@@ -13,9 +13,9 @@
 //! across the phase; (9) each link's value named by its truth; (10) every
 //! truth the plan serves named by an item of the phase; (11) each such
 //! truth holding a check; (12) each such truth a person must prove holding
-//! an observation; (13) each such truth holding one check at most. The
-//! judge trusts the facts and judges the plan. Nothing here records
-//! anything.
+//! an observation; (13) each such truth holding one check at most;
+//! (14) the plan's tasks within the phase's capacity. The judge trusts the
+//! facts and judges the plan. Nothing here records anything.
 
 use std::num::NonZeroU32;
 
@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use super::evidence::{self, EvidenceItem};
 use super::task::{self, Task};
-use super::{binding, content, coverage, link, stories};
+use super::{binding, capacity, content, coverage, link, stories};
 use crate::questions::{QuestionSet, SetRefusal};
 
 /// The refusal code for a plan out of its grammar: not an object, or a
@@ -70,6 +70,8 @@ pub const TRUTH_WITHOUT_OBSERVATION: &str = "truth-without-observation";
 /// The refusal code for a truth the plan serves whose evidence items across
 /// the phase hold more than one distinct check for its current version.
 pub const TRUTH_CHECK_LIMIT: &str = "truth-check-limit";
+/// The refusal code for a plan that takes the phase over its capacity.
+pub const OVER_CAPACITY: &str = "over-capacity";
 
 /// Why a plan is refused. Positions count from 0 in the list as submitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +154,10 @@ pub enum PlanRefusal {
         version: u32,
         checks: Vec<String>,
     },
+    /// The plan, serving `stories` in its order, would take the phase to
+    /// `size` tasks, over its capacity. Which story waits is the owner's
+    /// choice (PLN-R10).
+    OverCapacity { stories: Vec<u32>, size: u64 },
 }
 
 impl PlanRefusal {
@@ -175,6 +181,7 @@ impl PlanRefusal {
             Self::TruthWithoutCheck { .. } => TRUTH_WITHOUT_CHECK,
             Self::TruthWithoutObservation { .. } => TRUTH_WITHOUT_OBSERVATION,
             Self::TruthCheckLimit { .. } => TRUTH_CHECK_LIMIT,
+            Self::OverCapacity { .. } => OVER_CAPACITY,
         }
     }
 
@@ -344,7 +351,7 @@ impl Plan {
 /// (9) `link-value-not-named`, link by link; then over the served truths
 /// in order, with the approved plans' items, (10) `uncovered-truth`,
 /// (11) `truth-without-check`, (12) `truth-without-observation` and
-/// (13) `truth-check-limit`.
+/// (13) `truth-check-limit`; last, (14) `over-capacity`.
 pub fn judge_plan(submitted: &Value, facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
     let plan = content::read(submitted)?;
     task::within_lease(&plan.tasks, &plan.files, &plan.directories)?;
@@ -363,6 +370,7 @@ pub fn judge_plan(submitted: &Value, facts: &PlanFacts) -> Result<Plan, PlanRefu
     phase.checked()?;
     phase.observed()?;
     phase.limited()?;
+    capacity::within(&plan.stories, plan.tasks.len(), facts)?;
     Ok(plan)
 }
 
@@ -375,7 +383,7 @@ mod tests {
 
     use super::*;
     use crate::plan::fixtures::{
-        a1, a2, accepted, c3, c5, dropping, f0, f1, f3, l1, p1, p2, plus, qa, qb, refusal,
+        a1, a2, accepted, ar, at, c3, c5, dropping, f0, f1, f3, l1, p1, p2, plus, qa, qb, refusal,
         replacing, typed, under, with, without,
     };
     use crate::questions::Question;
@@ -665,5 +673,73 @@ mod tests {
                 version
             }
         );
+    }
+
+    #[test]
+    fn phase_faults_judged_in_another_order_are_caught() {
+        let unnamed = || with(l1(), "/spec", "value", json!("id"));
+        let artifact = with(
+            with(with(ar(), "", "id", json!("a2")), "", "truth", json!("t2")),
+            "",
+            "truth_version",
+            json!(2),
+        );
+        let codes = [
+            (
+                with(p1(), "/evidence_map/0", "truth", json!("t9")),
+                under(a1()),
+                "evidence-item-truth",
+            ),
+            (plus(p1(), unnamed()), under(a1()), "evidence-item-conflict"),
+            (
+                plus(dropping(p1(), &["c2"]), unnamed()),
+                f1(),
+                "link-value-not-named",
+            ),
+            (
+                plus(dropping(p1(), &["c2", "o1"]), unnamed()),
+                f1(),
+                "link-value-not-named",
+            ),
+            (plus(p1(), c3()), at(1, 1), "truth-check-limit"),
+            (
+                with(p1(), "/evidence_map/0/spec", "command", json!("")),
+                at(1, 5),
+                "check-command",
+            ),
+        ];
+        for (plan, facts, code) in codes {
+            assert_eq!(refusal(&plan, &facts).code(), code, "{plan}");
+        }
+        let facts = f1();
+        let cases = [
+            (
+                dropping(p1(), &["c1", "c2"]),
+                PlanRefusal::UncoveredTruth {
+                    story: 1,
+                    truth: "t1".into(),
+                    version: 1,
+                },
+            ),
+            (
+                dropping(replacing(p1(), "c2", artifact), &["o1"]),
+                PlanRefusal::TruthWithoutCheck {
+                    story: 1,
+                    truth: "t2".into(),
+                    version: 2,
+                },
+            ),
+            (
+                dropping(plus(p1(), c3()), &["o1"]),
+                PlanRefusal::TruthWithoutObservation {
+                    story: 1,
+                    truth: "t2".into(),
+                    version: 2,
+                },
+            ),
+        ];
+        for (plan, refused) in cases {
+            assert_eq!(refusal(&plan, &facts), refused, "{plan}");
+        }
     }
 }
