@@ -2,10 +2,9 @@ use serde_json::json;
 
 use super::*;
 
-/// The nineteen front doors not served yet, with their owning builds, written out from the
+/// The eighteen front doors not served yet, with their owning builds, written out from the
 /// design rather than read from the table under test.
 const UNAVAILABLE: &[(&str, u32)] = &[
-    ("bal-context", 4),
     ("bal-plan", 4),
     ("bal-review", 4),
     ("bal-plan-review", 4),
@@ -28,7 +27,7 @@ const UNAVAILABLE: &[(&str, u32)] = &[
 
 #[test]
 fn an_unavailable_front_door_is_never_presented_as_usable_and_names_its_owning_build() {
-    assert_eq!(UNAVAILABLE.len(), 19);
+    assert_eq!(UNAVAILABLE.len(), 18);
     for (identity, build) in UNAVAILABLE {
         assert_eq!(
             lookup(identity),
@@ -171,6 +170,11 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "bal-rounds",
         "2",
         "420c5ece69f5f29e60337a0ab905db6a2c00439f77b7422290062a0fd358bb66",
+    ),
+    (
+        "bal-context",
+        "1",
+        "d318a66c27dae8d904b1bf54790a526656da09ed38e5b4b2a126b5a5b2392b4c",
     ),
 ];
 
@@ -624,4 +628,47 @@ fn a_rounds_text_without_its_submit_step_or_editing_questions_is_caught() {
     let submit = body.find("story-questions-submit").unwrap();
     let read = body.find(r#""operation":"document""#).unwrap();
     assert!(submit < read, "the submit step comes after the round read");
+}
+
+#[test]
+fn a_context_door_missing_an_operation_or_the_terminal_approval_is_caught() {
+    let body = served_text("bal-context");
+    for needle in [
+        "story-refine",
+        r#""instruction":"bal-context""#,
+        "bal-rounds",
+        "context-submit",
+        r#"{"kind":"refinement""#,
+        "work-order-fail",
+        "work-order-retry",
+        "analyzer-order-pending",
+        "question-open",
+        "deferring its open questions with a reason",
+        "a closed receipt with no drafting",
+        "observable",
+        "fixed_oracle",
+        "set only as the owner says",
+        "human_verify",
+        "baley scope preview",
+        "baley story truths approve",
+        "Nothing is approved over MCP",
+    ] {
+        assert!(
+            body.contains(needle),
+            "the context front door lacks {needle}"
+        );
+    }
+    assert!(!body.contains("scope-approve") && !body.contains("truths-approve"));
+}
+
+#[test]
+fn a_context_door_keyed_by_phase_or_naming_cadence_state_is_caught() {
+    let body = served_text("bal-context");
+    assert!(
+        body.contains("story's id"),
+        "the context front door names no story id"
+    );
+    for name in CADENCE_NAMES.iter().chain(&["STATE", "cursor"]) {
+        assert!(!body.contains(name), "the context front door names {name}");
+    }
 }

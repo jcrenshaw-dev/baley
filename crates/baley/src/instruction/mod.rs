@@ -16,6 +16,7 @@ use crate::help::front_door;
 
 pub mod analyzer;
 pub mod capture;
+pub mod context;
 pub mod read_contract;
 pub mod rounds;
 pub mod scope;
@@ -116,11 +117,16 @@ pub static ENTRIES: &[Entry] = &[
             body: scope::BACKLOG_TEXT,
         }),
     },
-    // Build 4 adds this text beside its operations.
+    // Build 4 serves the context front door beside `story-refine`,
+    // `story-questions-submit`, `context-submit` and the refinement read.
     Entry {
-        identity: "bal-context",
+        identity: context::IDENTITY,
         build: 4,
-        text: None,
+        text: Some(Text {
+            version: context::VERSION,
+            hash: context::HASH,
+            body: context::TEXT,
+        }),
     },
     // Build 4 adds this text beside its operations.
     Entry {

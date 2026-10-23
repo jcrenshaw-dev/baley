@@ -48,7 +48,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "bal-context",
         cluster: "Build spine",
-        description: "Discuss a phase's scope, decisions and truths with its owner, then publish only the exact approved set through Baley",
+        description: "Refine a story with its owner: the analyzer's questions in rounds, then drafted truths the owner approves at the terminal.",
     },
     Command {
         name: "bal-plan",
@@ -286,7 +286,7 @@ mod tests {
         ("bal-backlog", true, 4),
         ("bal-help", true, 3),
         ("bal-capture", true, 3),
-        ("bal-context", false, 4),
+        ("bal-context", true, 4),
         ("bal-plan", false, 4),
         ("bal-review", false, 4),
         ("bal-plan-review", false, 4),
@@ -444,5 +444,17 @@ mod tests {
                 assert!(!text.contains(word), "a help answer contains {word}");
             }
         }
+    }
+
+    #[test]
+    fn a_context_row_still_describing_a_phase_is_caught() {
+        let context = answer(Some("context"));
+        let rows = context["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{context}");
+        assert_eq!(triple(&rows[0]), ("bal-context".to_owned(), true, 4));
+        assert_eq!(
+            rows[0]["description"],
+            "Refine a story with its owner: the analyzer's questions in rounds, then drafted truths the owner approves at the terminal."
+        );
     }
 }

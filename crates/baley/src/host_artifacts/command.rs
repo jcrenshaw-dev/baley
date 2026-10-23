@@ -294,6 +294,7 @@ mod tests {
             [
                 "bal-backlog",
                 "bal-capture",
+                "bal-context",
                 "bal-help",
                 "bal-phase",
                 "bal-project",

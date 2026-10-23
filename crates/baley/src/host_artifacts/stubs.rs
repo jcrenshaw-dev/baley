@@ -117,10 +117,9 @@ mod tests {
 
     use super::*;
 
-    /// The nineteen front doors not served yet, written out by hand as
+    /// The eighteen front doors not served yet, written out by hand as
     /// `instruction/tests.rs` lists them.
     const UNAVAILABLE: &[&str] = &[
-        "bal-context",
         "bal-plan",
         "bal-review",
         "bal-plan-review",
@@ -163,11 +162,12 @@ mod tests {
                 "bal-phase",
                 "bal-story",
                 "bal-backlog",
+                "bal-context",
                 "bal-capture",
                 "bal-help",
             ]
         );
-        assert_eq!(UNAVAILABLE.len(), 19);
+        assert_eq!(UNAVAILABLE.len(), 18);
         for identity in UNAVAILABLE.iter().chain(&["bal-read-contract"]) {
             assert!(!identities.contains(identity), "{identity} has a stub");
         }
@@ -191,6 +191,7 @@ mod tests {
                 "bal-phase",
                 "bal-story",
                 "bal-backlog",
+                "bal-context",
                 "bal-capture",
                 "bal-help",
             ]
@@ -242,6 +243,7 @@ mod tests {
             [
                 "bal-backlog",
                 "bal-capture",
+                "bal-context",
                 "bal-help",
                 "bal-phase",
                 "bal-project",

@@ -232,6 +232,7 @@ mod tests {
             "/u/.claude/skills/bal-phase/SKILL.md",
             "/u/.claude/skills/bal-story/SKILL.md",
             "/u/.claude/skills/bal-backlog/SKILL.md",
+            "/u/.claude/skills/bal-context/SKILL.md",
             "/u/.claude/skills/bal-capture/SKILL.md",
             "/u/.claude/skills/bal-help/SKILL.md",
             "/u/.claude.json",
@@ -403,7 +404,7 @@ mod tests {
 
         let skills = stubs::manifest(&stubs::front_doors()).unwrap();
         let agents = agents::manifest();
-        assert_eq!(skills.len(), 7);
+        assert_eq!(skills.len(), 8);
         assert_eq!(agents.len(), 30);
         let expected: Vec<stubs::Entry> = skills.into_iter().chain(agents).collect();
         assert_eq!(stubs::installed_manifest(), expected);
