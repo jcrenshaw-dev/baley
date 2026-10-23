@@ -12,7 +12,9 @@ use std::num::NonZeroU32;
 
 use baley_core::policy::{AcceptedNames, EffectivePolicy, Host, Role};
 use baley_core::questions::{SetFacts, questions_key};
-use baley_core::scope::{BACKLOG_VIEW, NO_SUCH_STORY, PHASE_VIEW, backlog_key, phase_key};
+use baley_core::scope::{
+    BACKLOG_VIEW, NO_SUCH_STORY, PHASE_VIEW, ROADMAP_VIEW, backlog_key, phase_key, roadmap_key,
+};
 use baley_core::truth::{DISPATCH_ACTIVE, QUESTION_OPEN, Refinement, refinement};
 use baley_core::work_order::{
     ANALYZER_ORDER_PENDING, PENDING, WORK_ORDER_LIVE_INDEX, WORK_ORDER_VIEW, story_subject,
@@ -99,7 +101,9 @@ pub struct Checked {
     /// Its latest set, which a drafting order binds with every answer and
     /// deferral.
     pub latest: Option<LatestSet>,
-    /// The documents the check read, at the sequence that produced each.
+    /// The documents the check read, at the sequence that produced each:
+    /// the `roadmap` document the story was judged on, then the `backlog`
+    /// document and the latest set's `questions` document.
     pub documents: Vec<ObservedDocument>,
 }
 
@@ -118,6 +122,12 @@ pub fn check<S: Views + ?Sized>(
     project: &ProjectId,
     story: u32,
 ) -> Result<Checked, Value> {
+    // The sequence is read before the story, so a drop landing after the
+    // story was judged shows as a moved roadmap when the issue confirms it.
+    let roadmap_seq = store
+        .get(project, ROADMAP_VIEW, &roadmap_key())
+        .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?
+        .map(|document| document.produced_seq);
     let entry = match read_story(store, project, story) {
         Ok(entry) if entry.status != DROPPED => entry,
         Ok(_) | Err(ReadError::NoSuchStory) => return Err(no_such_story(story)),
@@ -150,11 +160,17 @@ pub fn check<S: Views + ?Sized>(
         Refinement::Drafting => OrderKind::Drafting,
         _ => OrderKind::Questions,
     };
+    let mut documents = vec![ObservedDocument {
+        view: ROADMAP_VIEW.into(),
+        key: roadmap_key(),
+        produced_seq: roadmap_seq,
+    }];
+    documents.extend(state.documents);
     Ok(Checked {
         story: entry,
         kind,
         latest: state.latest,
-        documents: state.documents,
+        documents,
     })
 }
 
@@ -166,8 +182,8 @@ pub fn check<S: Views + ?Sized>(
 /// inputs read now (D-21), with a drafting order's `questions` built from the
 /// latest set's facts. The decision declares no pending analyzer order of the
 /// story and observes every document the check and the input read saw, so an
-/// order issued, a set answered, a description approved or a story refined
-/// since makes the call `ledger-busy` with nothing recorded. The id is also
+/// order issued, a story dropped, a set answered, a description approved or
+/// a story refined since makes the call `ledger-busy` with nothing recorded. The id is also
 /// its request, and it has no parent. The receipt adds `analyzer`, the
 /// order's kind, so a session knows which return to expect.
 pub fn issue(
@@ -838,5 +854,48 @@ pub(crate) mod tests {
             pending_analyzer(&store, &project(), 1).unwrap().as_deref(),
             Some(I3)
         );
+    }
+
+    #[test]
+    fn an_order_issued_for_a_story_dropped_after_the_check_judged_it_is_caught() {
+        use crate::scope::approve::{self, APPROVE_COMMAND};
+
+        let (_dir, store) = approved();
+        let stale = check(&store, &project(), 3).expect("a deferred story can be refined");
+        let drop = receipt(
+            &submit_change(&store, ChangeKind::StoryDrop, &json!({"story": 3}), R3, T4).unwrap(),
+        )["digest"]
+            .as_str()
+            .and_then(Hash::from_hex)
+            .unwrap();
+        let judged = approve::judge(&store, &project(), drop).unwrap();
+        approve::record(
+            &store,
+            &command(APPROVE_COMMAND, R6, 6, T5),
+            Some(&judged),
+            "Ada Owner",
+        )
+        .unwrap();
+
+        // The drop landed after the check judged story 3 on the roadmap and
+        // before it read the backlog, so the backlog it saw is the dropped
+        // one.
+        let raced = Checked {
+            documents: stale
+                .documents
+                .iter()
+                .filter(|document| document.view != BACKLOG_VIEW)
+                .cloned()
+                .chain(refinement_state(&store, &project(), 3).unwrap().documents)
+                .collect(),
+            ..stale
+        };
+        let before = head(&store);
+        let busy = issue_checked(&store, &raced, I0, R1, T6);
+        assert_eq!(busy["status"], "failed", "{busy}");
+        assert_eq!(busy["code"], "ledger-busy", "{busy}");
+        assert_eq!(head(&store), before);
+        assert!(issued(&store).is_empty());
+        assert_eq!(pending_analyzer(&store, &project(), 3).unwrap(), None);
     }
 }
