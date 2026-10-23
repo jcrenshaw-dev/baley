@@ -9,8 +9,9 @@
 //! judge; (3) each task file inside the lease; (4) no check field with a
 //! code blank; (5) a committed story holding a truth; (6) every story the
 //! plan serves committed to the phase; (7) each evidence item bound to its
-//! own story's current truth. The judge trusts the facts and judges the
-//! plan. Nothing here records anything.
+//! own story's current truth; (9) each link's value named by its truth.
+//! The judge trusts the facts and judges the plan. Nothing here records
+//! anything.
 
 use std::num::NonZeroU32;
 
@@ -18,7 +19,7 @@ use serde_json::Value;
 
 use super::evidence::{self, EvidenceItem};
 use super::task::{self, Task};
-use super::{binding, content, stories};
+use super::{binding, content, link, stories};
 use crate::questions::{QuestionSet, SetRefusal};
 
 /// The refusal code for a plan out of its grammar: not an object, or a
@@ -47,6 +48,8 @@ pub const EVIDENCE_ITEM_TRUTH: &str = "evidence-item-truth";
 /// The refusal code for an evidence item naming its truth at a version
 /// other than the current one.
 pub const TRUTH_VERSION_MISMATCH: &str = "truth-version-mismatch";
+/// The refusal code for a link whose value its truth does not name.
+pub const LINK_VALUE_NOT_NAMED: &str = "link-value-not-named";
 
 /// Why a plan is refused. Positions count from 0 in the list as submitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +91,9 @@ pub enum PlanRefusal {
         id: String,
         current: u32,
     },
+    /// The link at `position`, whose id is `id`, carries a value its truth
+    /// does not name.
+    LinkValueNotNamed { position: usize, id: String },
 }
 
 impl PlanRefusal {
@@ -105,6 +111,7 @@ impl PlanRefusal {
             Self::StoryNotInPhase { .. } => STORY_NOT_IN_PHASE,
             Self::EvidenceItemTruth { .. } => EVIDENCE_ITEM_TRUTH,
             Self::TruthVersionMismatch { .. } => TRUTH_VERSION_MISMATCH,
+            Self::LinkValueNotNamed { .. } => LINK_VALUE_NOT_NAMED,
         }
     }
 
@@ -269,14 +276,16 @@ impl Plan {
 /// (2) the `questions` member through `judge_set`; (3) `lease`, task by
 /// task and file by file; (4) the blank check fields, item by item;
 /// (5) `no-truths`; (6) `story-not-in-phase`, in the plan's story order;
-/// (7) `evidence-item-truth` and `truth-version-mismatch`, item by item.
+/// (7) `evidence-item-truth` and `truth-version-mismatch`, item by item;
+/// (9) `link-value-not-named`, link by link.
 pub fn judge_plan(plan: &Value, facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
     let plan = content::read(plan)?;
     task::within_lease(&plan.tasks, &plan.files, &plan.directories)?;
     evidence::blank_fields(&plan.evidence_map)?;
     stories::holds_truths(facts)?;
     stories::committed(&plan.stories, facts)?;
-    binding::bind(&plan.stories, &plan.evidence_map, facts)?;
+    let truths = binding::bind(&plan.stories, &plan.evidence_map, facts)?;
+    link::named(&plan.evidence_map, &truths)?;
     Ok(plan)
 }
 
