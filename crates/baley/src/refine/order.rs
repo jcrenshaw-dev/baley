@@ -162,6 +162,20 @@ pub(crate) fn judged_story<S: Views + ?Sized>(
     project: &ProjectId,
     story: u32,
 ) -> Result<(Story, ObservedDocument), Value> {
+    match held_story(store, project, story)? {
+        (Some(entry), roadmap) => Ok((entry, roadmap)),
+        (None, _) => Err(no_such_story(story)),
+    }
+}
+
+/// Story `story` when the roadmap holds it and it is not dropped, or none,
+/// with the `roadmap` document it was read from. A read fault is the
+/// `failed` answer.
+pub(crate) fn held_story<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    story: u32,
+) -> Result<(Option<Story>, ObservedDocument), Value> {
     // The sequence is read before the story, so a drop landing after the
     // story was judged shows as a moved roadmap when the record confirms it.
     let roadmap_seq = store
@@ -169,8 +183,8 @@ pub(crate) fn judged_story<S: Views + ?Sized>(
         .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?
         .map(|document| document.produced_seq);
     let entry = match read_story(store, project, story) {
-        Ok(entry) if entry.status != DROPPED => entry,
-        Ok(_) | Err(ReadError::NoSuchStory) => return Err(no_such_story(story)),
+        Ok(entry) if entry.status != DROPPED => Some(entry),
+        Ok(_) | Err(ReadError::NoSuchStory) => None,
         Err(error) => return Err(scope_unread(&error)),
     };
     let roadmap = ObservedDocument {
@@ -710,11 +724,27 @@ fn dispatched<S: Views + ?Sized>(
     project: &ProjectId,
     phase: u32,
 ) -> Result<bool, Value> {
+    phase_dispatch(store, project, phase).map(|(active, _)| active)
+}
+
+/// Whether a worker is dispatched on phase `phase`, as [`dispatched`]
+/// reads it, with the `phase` document it was read from.
+pub(crate) fn phase_dispatch<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    phase: u32,
+) -> Result<(bool, ObservedDocument), Value> {
     let document = store
         .get(project, PHASE_VIEW, &phase_key(phase))
         .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?
         .ok_or_else(|| unreadable(PHASE_VIEW))?;
-    dispatch_of(document.body.get("status").and_then(Value::as_str))
+    let active = dispatch_of(document.body.get("status").and_then(Value::as_str))?;
+    let observed = ObservedDocument {
+        view: PHASE_VIEW.into(),
+        key: phase_key(phase),
+        produced_seq: Some(document.produced_seq),
+    };
+    Ok((active, observed))
 }
 
 /// Whether a phase with `status` has a worker dispatched: no for every
