@@ -103,6 +103,9 @@ pub struct HeldSet {
     pub facts: SetFacts,
     /// The stream the set and every record on it go on.
     pub stream: String,
+    /// The story whose set this is, read from the set's subject, or none for
+    /// a plan draft's set.
+    pub story: Option<u32>,
 }
 
 /// What a read of one set found.
@@ -136,12 +139,34 @@ pub fn read<V: Views + ?Sized>(
             "the set's stream cannot be read".into(),
         )));
     };
+    let Some(story) = story_of(&document.body) else {
+        return Ok(SetRead::Unreadable(UnreadableSet(
+            "the set's subject cannot be read".into(),
+        )));
+    };
     Ok(SetRead::Held(Box::new(HeldSet {
         round: round_of(&facts),
         produced_seq: document.produced_seq,
         facts,
         stream: stream.into(),
+        story,
     })))
+}
+
+/// The story a set's document names as its subject: `Some(Some(id))` for a
+/// story's set, `Some(None)` for a plan draft's, and `None` for a subject
+/// that cannot be read.
+fn story_of(document: &Value) -> Option<Option<u32>> {
+    let subject = document.get("subject")?;
+    match subject.get("kind").and_then(Value::as_str)? {
+        "story" => subject
+            .get("story")
+            .and_then(Value::as_u64)
+            .and_then(|story| u32::try_from(story).ok())
+            .map(Some),
+        "plan" => Some(None),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -160,7 +185,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::questions::record::tests::{open_set, story, transact};
+    use crate::questions::record::tests::{declare, open_set, story, transact};
     use crate::scope::fixtures::*;
 
     const OWNER: &str = "Ada Lovelace";
@@ -264,6 +289,7 @@ mod tests {
     #[test]
     fn a_round_read_from_arrival_order_or_appending_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let a = open_set(&store, R1, &r(), &story(1));
         let b = open_set(&store, R2, &r(), &story(1));
 
@@ -351,6 +377,7 @@ mod tests {
     #[test]
     fn an_unknown_or_another_projects_set_read_as_a_set_is_caught() {
         let (_dir, store) = two_projects();
+        declare(&store, &project_b(), 1);
         assert_eq!(
             read(&store, &project(), "7f3e4d5c-6071-4c8d-8e9f-1a2b3c4d5e6f"),
             Ok(SetRead::NotHeld)
@@ -382,6 +409,7 @@ mod tests {
     #[test]
     fn a_set_read_after_reopening_lost_or_changed_is_caught() {
         let (dir, store) = store();
+        declare(&store, &project(), 1);
         let set = open_set(&store, R1, &r(), &story(1));
         append(
             &store,
@@ -407,6 +435,7 @@ mod tests {
         use baley_core::questions::{Abandonment, Cause};
 
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let set = open_set(&store, R1, &r(), &story(1));
         append(
             &store,
@@ -434,6 +463,7 @@ mod tests {
     #[test]
     fn a_read_giving_another_documents_sequence_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let set = open_set(&store, R1, &r(), &story(1));
         let events = history(&store);
         let opened = of_type(&events, "questions.opened")[0].seq;

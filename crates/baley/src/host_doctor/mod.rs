@@ -1310,6 +1310,7 @@ mod tests {
                 "bal-phase",
                 "bal-story",
                 "bal-backlog",
+                "bal-context",
                 "bal-capture",
                 "bal-help",
             ],
@@ -1341,6 +1342,10 @@ mod tests {
                 (
                     Artifact::Stub("bal-backlog".into()),
                     "/home/o/.claude/skills/bal-backlog/SKILL.md".to_owned()
+                ),
+                (
+                    Artifact::Stub("bal-context".into()),
+                    "/home/o/.claude/skills/bal-context/SKILL.md".to_owned()
                 ),
                 (
                     Artifact::Stub("bal-capture".into()),
@@ -1378,6 +1383,7 @@ mod tests {
                 Artifact::Stub("bal-phase".into()),
                 Artifact::Stub("bal-story".into()),
                 Artifact::Stub("bal-backlog".into()),
+                Artifact::Stub("bal-context".into()),
                 Artifact::Stub("bal-capture".into()),
                 Artifact::Stub("bal-help".into()),
                 Artifact::Registration,
@@ -1422,6 +1428,7 @@ mod tests {
                 Artifact::Stub("bal-phase".into()),
                 Artifact::Stub("bal-story".into()),
                 Artifact::Stub("bal-backlog".into()),
+                Artifact::Stub("bal-context".into()),
                 Artifact::Stub("bal-help".into()),
                 Artifact::Registration,
             ]
@@ -1447,6 +1454,7 @@ mod tests {
                 Artifact::Stub("bal-phase".into()),
                 Artifact::Stub("bal-story".into()),
                 Artifact::Stub("bal-backlog".into()),
+                Artifact::Stub("bal-context".into()),
                 Artifact::Stub("bal-capture".into()),
                 Artifact::Hook,
                 Artifact::Settings,

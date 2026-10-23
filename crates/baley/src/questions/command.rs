@@ -100,7 +100,9 @@ pub fn run(args: QuestionsArgs) -> ExitCode {
 /// the policy step, so a refused call records nothing at all; the owner is
 /// read over the policy the step recorded; and the call is recorded as the
 /// owner under the version in force, through the same library function as
-/// `questions-answer`.
+/// `questions-answer`. It passes no drafting order: a close here records the
+/// answers and says the set is closed, and the session's next `story-refine`
+/// issues the drafting order (D-08).
 fn record_answers(
     set: &str,
     take: &[String],
@@ -127,7 +129,13 @@ fn record_answers(
         &SystemClock::now(),
     )
     .map_err(|e| Render::refusal(e.to_string()))?;
-    let recorded = answers::record(&store, &command, &owner, Some(&checked));
+    let recorded = answers::record(
+        &store,
+        &command,
+        &owner,
+        Some(&checked),
+        answers::Drafting::None,
+    );
     Ok(receipt_render(&answers::answer(recorded, &store), set))
 }
 
@@ -640,7 +648,7 @@ mod tests {
         use crate::mcp::prepare::prepared_command;
         use crate::questions::answer::tests::{OWNER, defer, on_stream, own, r2, take};
         use crate::questions::read::HeldSet;
-        use crate::questions::record::tests::{open_set, story, transact};
+        use crate::questions::record::tests::{declare, open_set, story, transact};
         use crate::scope::fixtures::*;
 
         /// Session A, the one that opened the set: the fixtures' caller.
@@ -668,7 +676,13 @@ mod tests {
             let command = prepared_command(&project(), &judged.request, 0, at, &caller);
             match answers::check(store, &project(), set, &judged.call) {
                 Ok(checked) => answers::answer(
-                    answers::record(store, &command, OWNER, Some(&checked)),
+                    answers::record(
+                        store,
+                        &command,
+                        OWNER,
+                        Some(&checked),
+                        answers::Drafting::None,
+                    ),
                     store,
                 ),
                 Err(refusal) => refusal,
@@ -697,7 +711,13 @@ mod tests {
             .unwrap();
             match answers::check(store, &project(), set, &call) {
                 Ok(checked) => answers::answer(
-                    answers::record(store, &command, OWNER, Some(&checked)),
+                    answers::record(
+                        store,
+                        &command,
+                        OWNER,
+                        Some(&checked),
+                        answers::Drafting::None,
+                    ),
                     store,
                 ),
                 Err(refusal) => refusal,
@@ -714,6 +734,7 @@ mod tests {
         #[test]
         fn a_set_lost_to_a_session_exit_or_answered_after_abandonment_is_caught() {
             let (dir, store) = store();
+            declare(&store, &project(), 1);
             assert_eq!(caller().baley_session(), SESSION_A);
             let set = open_set(&store, R1, &r2(), &story(1));
             drop(store);
@@ -777,6 +798,7 @@ mod tests {
         #[test]
         fn a_relayed_answer_recorded_as_the_owners_or_a_terminal_answer_as_baleys_is_caught() {
             let (_dir, store) = store();
+            declare(&store, &project(), 1);
             let set = open_set(&store, R1, &r2(), &story(1));
             let relayed = relayed(&store, &set, &json!([take("q1")]), R2, AT2);
             assert_eq!(relayed["status"], "ok", "{relayed}");

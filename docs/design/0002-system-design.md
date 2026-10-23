@@ -242,7 +242,7 @@ graph LR
         style 5 fill:#85bbf0,stroke:#5d82a8,color:#000000
         6["<div style='font-weight: bold'>Domain areas</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>The rules of each process<br />area: planning, execution,<br />verification, review, risk,<br />landing and the rest.</div>"]
         style 6 fill:#85bbf0,stroke:#5d82a8,color:#000000
-        7["<div style='font-weight: bold'>Work order composer</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>Builds every work order: the<br />route from policy and the<br />model catalog, instructions<br />by identity from the binary,<br />inputs as references into the<br />record. In this build it<br />issues the start planner's<br />order and its retries.</div>"]
+        7["<div style='font-weight: bold'>Work order composer</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>Builds every work order: the<br />route from policy and the<br />model catalog, instructions<br />by identity from the binary,<br />inputs as references into the<br />record. In this build it<br />issues the start planner's<br />order, the analyzer's<br />questions and drafting orders<br />for a story's refinement, and<br />their retries.</div>"]
         style 7 fill:#85bbf0,stroke:#5d82a8,color:#000000
         8["<div style='font-weight: bold'>Policy</div><div style='font-size: 70%; margin-top: 0px'>[Component]</div><div style='font-size: 80%; margin-top:10px'>Reads the global and project<br />settings, resolves the values<br />in effect and records which<br />applied.</div>"]
         style 8 fill:#85bbf0,stroke:#5d82a8,color:#000000
@@ -296,25 +296,25 @@ graph LR
 | Host interface | The MCP server (stdio), the command line and the guard hook: the only ways in |
 | Hardin | Derives the state of the work from the ledger's views, answers what may happen next, refuses the rest |
 | Domain areas | The rules of each process area, one design document each |
-| Work order composer | Builds every work order: the route from policy and the model catalog, instructions by identity from the binary, inputs as references into the record. In this build it issues the start planner's order and its retries |
+| Work order composer | Builds every work order: the route from policy and the model catalog, instructions by identity from the binary, inputs as references into the record. In this build it issues the start planner's order, the analyzer's questions and drafting orders for a story's refinement, and their retries |
 | Policy | Reads the global and project settings, resolves the values in effect, records which applied ([0003](0003-configuration-and-routing.md)) |
 | Model catalog | The model names each host and provider offers, seeded from the binary, changed by the owner and refreshed from imported lists ([0003](0003-configuration-and-routing.md)) |
 | Ports and adapters | The store, git and the test runner, the forge, the host adapters |
 
 ## 8. Work orders
 
-The one contract between Baley and every worker, including the outside reviews the host session makes. An order is recorded as `work_order.issued` and read back through the `work_order` view ([0001](0001-evidence-ledger.md)). This build issues one kind, the start planner's order, and its retries ([0004](0004-starting-a-project-and-changing-scope.md) section 5); the other roles' orders are issued by the builds that add them, in the same shape.
+The one contract between Baley and every worker, including the outside reviews the host session makes. An order is recorded as `work_order.issued` and read back through the `work_order` view ([0001](0001-evidence-ledger.md)). This build issues the start planner's order ([0004](0004-starting-a-project-and-changing-scope.md) section 5), the analyzer's questions and drafting orders for a story's refinement ([0005](0005-context-plans-and-acceptance.md) section 5), and their retries; the other roles' orders are issued by the builds that add them, in the same shape.
 
 | Part | Content | Source |
 |---|---|---|
 | Identity | The order's id; the logical request, the id of its chain's first order; the failed order it retries, or none; the attempt, from 1 | Ledger |
-| Role and subject | Planner, analyzer, checker, executor, verifier or reviewer, and what the order is about, `start` for the start planner | The area that issues it |
+| Role and subject | Planner, analyzer, checker, executor, verifier or reviewer, and what the order is about: `start` for the start planner and `story/<id>` for a story's analyzer orders, both recorded on the `roadmap` stream | The area that issues it |
 | Route | The route record: the requested rung and the rung the order sends after any escalation, the route's `rung`, the model passed or none, the setting and file that decided each, the level Claude Code's dated effort table supports for that model, and the effective model and effort, recorded `unknown` with the reasons, since no run is observed ([0003](0003-configuration-and-routing.md) section 6); and the agent stub that rung names for the role, `bal-<role>-<rung>` | Policy and the model catalog |
-| Instructions | The compiled instructions, each by identity, version and hash, such as `bal-start-planner` and, when the checkout holds code, `bal-start-survey` | Binary (SYS-P9) |
-| Inputs | The records the role needs, each a `record` payload reference, such as the start's brief | Ledger |
-| Expected result | The typed result the worker must return. For the start planner it is a `scope-submit` naming the order in `work_order` | The issuing area |
+| Instructions | The compiled instructions, each by identity, version and hash, such as `bal-start-planner` and, when the checkout holds code, `bal-start-survey`, or `bal-analyzer-questions` and `bal-analyzer-drafting` for the analyzer's questions and drafting orders | Binary (SYS-P9) |
+| Inputs | The records the role needs, each a `record` payload reference read when the order is issued, such as the start's brief, or the analyzer's `story`, `description` (the approved description), `roadmap`, `truths` (the story's current truths, once it was refined) and, in its drafting order, `questions` (the set with every answer and deferral). A retry keeps its parent's inputs | Ledger |
+| Expected result | The typed result the worker must return. For the start planner it is a `scope-submit` naming the order in `work_order`. The analyzer returns its questions or its draft truths to the session, which submits them with `story-questions-submit` or `context-submit` naming the order in `work_order` | The issuing area |
 
-An order is delivered as its id. The issuing call answers with the id, the agent stub to launch, the model to pass as the Agent tool's `model` parameter or none, so the stub's `model: inherit` applies, the one-line prompt `Read Baley work order <id> and follow it.`, and a launch sentence saying to start that stub with the Agent tool and that prompt. The session starts the subagent with that prompt, and the worker reads its order whole by id through `document`, kind `work_order`, in parts of at most 24,576 bytes ([0012](0012-host-interface.md) section 5, `crates/baley/src/work_order/issue.rs:94-112, 170-182`).
+An order is delivered as its id. The issuing call answers with the id, the agent stub to launch, the model to pass as the Agent tool's `model` parameter or none, so the stub's `model: inherit` applies, the one-line prompt `Read Baley work order <id> and follow it.`, and a launch sentence saying to start that stub with the Agent tool and that prompt. The session starts the subagent with that prompt, and the worker reads its order whole by id through `document`, kind `work_order`, in parts of at most 24,576 bytes ([0012](0012-host-interface.md) section 5, `crates/baley/src/work_order/issue.rs`, `prompt`, `launch` and `record`).
 
 ## 9. Requirements
 

@@ -48,7 +48,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "bal-context",
         cluster: "Build spine",
-        description: "Discuss a phase's scope, decisions and truths with its owner, then publish only the exact approved set through Baley",
+        description: "Refine a story with its owner: the analyzer's questions in rounds, then drafted truths the owner approves at the terminal.",
     },
     Command {
         name: "bal-plan",
@@ -209,7 +209,7 @@ pub fn render_description(name: &str, markdown: &str) -> Option<String> {
 const ABOUT: &str = "Baley keeps AI coding agents accountable to the person who answers for their work. It records what the agents did, and the proof that it works, in a hash-chained ledger the owner controls, and it refuses to let work move on an unproven claim. Claude Code is the host it serves.";
 
 /// The request a session follows so the ledger can say which instruction guided a write.
-const REQUEST: &str = "Send `bal-help` as `instruction` on the `baley_apply` operations `capture`, `project-start`, `work-order-fail` and `work-order-retry` called while following help, on no other `baley_apply` operation, and on no `baley_query` call.";
+const REQUEST: &str = "Send `bal-help` as `instruction` on the `baley_apply` operations `capture`, `project-start`, `story-refine`, `work-order-fail` and `work-order-retry` called while following help, on no other `baley_apply` operation, and on no `baley_query` call.";
 
 /// The help instruction's identity, version and hash, as the registry serves them.
 fn help_instruction() -> Value {
@@ -286,7 +286,7 @@ mod tests {
         ("bal-backlog", true, 4),
         ("bal-help", true, 3),
         ("bal-capture", true, 3),
-        ("bal-context", false, 4),
+        ("bal-context", true, 4),
         ("bal-plan", false, 4),
         ("bal-review", false, 4),
         ("bal-plan-review", false, 4),
@@ -444,5 +444,17 @@ mod tests {
                 assert!(!text.contains(word), "a help answer contains {word}");
             }
         }
+    }
+
+    #[test]
+    fn a_context_row_still_describing_a_phase_is_caught() {
+        let context = answer(Some("context"));
+        let rows = context["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{context}");
+        assert_eq!(triple(&rows[0]), ("bal-context".to_owned(), true, 4));
+        assert_eq!(
+            rows[0]["description"],
+            "Refine a story with its owner: the analyzer's questions in rounds, then drafted truths the owner approves at the terminal."
+        );
     }
 }

@@ -6,7 +6,10 @@
 //! scope preview|show`, `baley phase show`, `baley backlog show` and `baley
 //! story show` print what the ledger holds through the same reads as
 //! `document`, recording nothing. Declarations, edits and `project describe`
-//! come only from a session, since an agent drafts their text.
+//! come only from a session, since an agent drafts their text. `baley story
+//! truths approve <digest>` and `baley story refinement <id>` are
+//! `refine::command`'s: the first approves a story's truth draft as `scope
+//! approve` approves a scope draft, the second prints a story's refinement.
 //!
 //! Gathering finds the project and opens the ledger; judging, the arguments,
 //! the commands an approval or a submission is recorded under and what is
@@ -14,6 +17,7 @@
 //! is printed as `escape_debug` writes it, quotes left plain, so a recorded
 //! line break cannot forge a line.
 
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -24,6 +28,7 @@ use baley_core::scope::{
     ChangeKind, ChangeSubmission, Destination, START_KIND, ScopeChange, UNKNOWN_DRAFT,
     judge_change, judge_submission,
 };
+use baley_core::truth::{STORY_TRUTHS, TruthSubmission, Versions, judge_truths, versions};
 use baley_store::{
     Actor, Admin, CanonicalError, Command, CommandKind, Hash, ProjectId, RequestId, request_digest,
 };
@@ -39,10 +44,12 @@ use crate::ledger::display::{self, Render};
 use crate::mcp::prepare::{LEDGER_UNAVAILABLE, NOT_A_PROJECT, PROJECT_NOT_IN_LEDGER};
 use crate::mcp::scope::change_kind;
 use crate::providers::identity;
+use crate::refine::command::{sentence, truth_detail};
+use crate::refine::submit::{current_truths, mark_str};
 use crate::scope::approve::{self, APPROVE_COMMAND};
 use crate::scope::read::{
-    self, BacklogStory, Detail, Draft, NO_SUCH_STORY, Phase, PreviewError, ReadError, Roadmap,
-    Story,
+    self, BacklogStory, Detail, Draft, NO_SUCH_STORY, Phase, Preview, PreviewError, ReadError,
+    Roadmap, Story,
 };
 use crate::scope::submit::{self, SUBMIT_COMMAND};
 use crate::{init, policy_step, settings};
@@ -137,11 +144,11 @@ enum BacklogCommand {
 #[derive(clap::Args, Debug)]
 pub struct StoryArgs {
     #[command(subcommand)]
-    command: StoryCommand,
+    pub(crate) command: StoryCommand,
 }
 
 #[derive(clap::Subcommand, Debug)]
-enum StoryCommand {
+pub(crate) enum StoryCommand {
     /// Print one accepted story.
     Show {
         /// The story id Baley assigned at approval.
@@ -165,15 +172,23 @@ enum StoryCommand {
         #[arg(value_name = "ID")]
         id: String,
     },
+    /// Print a story's refinement: the approved description, the story and
+    /// the phase it is committed to, and its truths with every version.
+    Refinement {
+        /// The story id Baley assigned at approval.
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Approve a story's drafted truths.
+    Truths(crate::refine::command::TruthsArgs),
 }
 
 /// Runs one `baley scope` command and prints its result.
 pub fn run(args: ScopeArgs) -> ExitCode {
     emit(match args.command {
         ScopeCommand::Approve { digest } => approve(&digest),
-        ScopeCommand::Preview { digest } => judge_digest(&digest).and_then(|digest| {
-            reading(|store, project| preview_render(read::draft(store, project, digest)))
-        }),
+        ScopeCommand::Preview { digest } => judge_digest(&digest)
+            .and_then(|digest| reading(|store, project| preview(store, project, digest))),
         ScopeCommand::Show => {
             reading(|store, project| roadmap_render(read::roadmap(store, project)))
         }
@@ -215,6 +230,8 @@ pub fn run_story(args: StoryArgs) -> ExitCode {
             submit_change(&ChangeWords::StoryReassign { story: id, to })
         }
         StoryCommand::Drop { id } => submit_change(&ChangeWords::StoryDrop(id)),
+        StoryCommand::Refinement { id } => crate::refine::command::refinement(&id),
+        StoryCommand::Truths(args) => crate::refine::command::run(args),
     })
 }
 
@@ -685,6 +702,103 @@ pub(crate) fn command_change(words: &ChangeWords) -> Result<ChangeSubmission, Re
         .map_err(|refusal| answer_render(&submit::submission_refused(&refusal)))
 }
 
+/// What `scope preview` prints for draft `digest`: a held truth draft
+/// through [`truth_preview`], read beside the story's `truths` document, and
+/// every other draft, a purged truth draft among them, through
+/// [`preview_render`]. Nothing is recorded.
+pub(crate) fn preview(store: &SqliteStore, project: &ProjectId, digest: Hash) -> Render {
+    match read::draft(store, project, digest) {
+        Ok(Draft::Held(preview)) if preview.kind == STORY_TRUTHS => {
+            truth_preview(store, project, &preview)
+        }
+        read => preview_render(read),
+    }
+}
+
+/// What `scope preview` prints for a held truth draft (design 0005 `story
+/// truths submit` preview, D-05): its body judged again with the truth
+/// judge, the story's current truths read now, and each truth marked against
+/// them. A body that no longer judges prints the unavailable line a change
+/// prints; a read fault prints as an answer's failure.
+fn truth_preview(store: &SqliteStore, project: &ProjectId, preview: &Preview) -> Render {
+    let body = &preview.submission;
+    let story = body
+        .get("story")
+        .and_then(Value::as_u64)
+        .and_then(|story| u32::try_from(story).ok())
+        .and_then(NonZeroU32::new);
+    let set = body.get("set").and_then(Value::as_str);
+    let judged = match (story, set, body.get("truths")) {
+        (Some(story), Some(set), Some(truths)) => judge_truths(story, set, truths).ok(),
+        _ => None,
+    };
+    let Some(submission) = judged else {
+        return unavailable(
+            "the draft is recorded, but its body no longer judges as a truth submission",
+        );
+    };
+    let current = match current_truths(store, project, submission.story()) {
+        Ok(current) => current,
+        Err(answer) => return answer_render(&answer),
+    };
+    match versions(submission.truths(), &current.truths, &current.kept) {
+        Ok(versions) => truth_preview_render(preview, &submission, &versions),
+        Err(_) => unavailable("a truth of this story has no version number left"),
+    }
+}
+
+/// A truth draft's preview lines: the header every draft prints, `story:
+/// <id>`, `question set: <set>`, each truth as `truth <id> (<mark>):` and
+/// its sentence with its detail line, `removed: <ids>` or `removed: none`,
+/// and the command that approves it. Versions are given only at approval
+/// (D-02), so none is printed.
+fn truth_preview_render(
+    preview: &Preview,
+    submission: &TruthSubmission,
+    versions: &Versions,
+) -> Render {
+    let mut lines = vec![
+        format!(
+            "draft {} ({}), submitted {}",
+            preview.digest.to_hex(),
+            escaped(&preview.kind),
+            escaped(&preview.recorded_at)
+        ),
+        format!("story: {}", submission.story()),
+        format!("question set: {}", escaped(submission.set())),
+    ];
+    for (truth, versioned) in submission.truths().iter().zip(&versions.truths) {
+        lines.push(format!(
+            "truth {} ({}): {}",
+            escaped(&truth.id),
+            mark_str(versioned.mark),
+            sentence(
+                &truth.form,
+                &truth.trigger,
+                &truth.observer,
+                &truth.verb,
+                &truth.outcome
+            )
+        ));
+        // A judged truth has both attestations true.
+        lines.push(truth_detail(
+            &truth.kind,
+            true,
+            true,
+            truth.human_verify.as_deref(),
+        ));
+    }
+    lines.push(format!(
+        "removed: {}",
+        or_none(versions.removed.iter().map(|id| escaped(id)).collect())
+    ));
+    lines.push(format!(
+        "approve it with: baley story truths approve {}",
+        preview.digest.to_hex()
+    ));
+    printed(lines)
+}
+
 /// What `scope preview` prints for a draft read: the header, the
 /// description, the stories by label and the phases by position, each with
 /// its detail and dependencies, since that is what the owner approves. A
@@ -928,7 +1042,8 @@ pub(crate) fn phase_render(read: Result<Phase, ReadError>) -> Render {
 }
 
 /// What `backlog show` prints for a backlog read: one line per story in
-/// priority order, or one line when it is empty.
+/// priority order, its refinement state shown as `unrefined`, `questions
+/// open in round <n>`, `drafting` or `refined`, or one line when it is empty.
 pub(crate) fn backlog_render(read: Result<Vec<BacklogStory>, ReadError>) -> Render {
     match read {
         Ok(stories) if stories.is_empty() => Render::line("the backlog is empty", 0),
@@ -936,12 +1051,16 @@ pub(crate) fn backlog_render(read: Result<Vec<BacklogStory>, ReadError>) -> Rend
             stories
                 .iter()
                 .map(|story| {
+                    let refinement = match story.round {
+                        Some(round) => format!("questions open in round {round}"),
+                        None => escaped(&story.refinement),
+                    };
                     format!(
                         "story {} ({}, {}, {}, {} truths): {}",
                         story.id,
                         escaped(&story.status),
                         committed(story.phase),
-                        escaped(&story.refinement),
+                        refinement,
                         story.truths,
                         escaped(&story.sentence)
                     )
@@ -975,7 +1094,12 @@ pub(crate) fn story_render(read: Result<Story, ReadError>) -> Render {
 }
 
 /// The description's lines, as both the preview and the roadmap print them.
-fn describe(lines: &mut Vec<String>, what: &str, core_value: &str, constraints: &[String]) {
+pub(crate) fn describe(
+    lines: &mut Vec<String>,
+    what: &str,
+    core_value: &str,
+    constraints: &[String],
+) {
     lines.push(format!("what: {}", escaped(what)));
     lines.push(format!("core value: {}", escaped(core_value)));
     for constraint in constraints {
@@ -1001,7 +1125,7 @@ fn or_none(items: Vec<String>) -> String {
     }
 }
 
-fn printed(lines: Vec<String>) -> Render {
+pub(crate) fn printed(lines: Vec<String>) -> Render {
     Render {
         lines,
         code: 0,
@@ -1020,7 +1144,7 @@ fn unavailable(reason: &str) -> Render {
 
 /// Why accepted scope could not be read: a missing phase or story is a
 /// refusal, exit 2; a body no longer held or a broken record is exit 1.
-fn read_error(error: ReadError) -> Render {
+pub(crate) fn read_error(error: ReadError) -> Render {
     match error {
         ReadError::NoSuchPhase => {
             Render::refusal(format!("{NO_SUCH_PHASE}: this project has no such phase"))
@@ -1537,6 +1661,7 @@ mod tests {
             status: text(status),
             phase,
             refinement: text("unrefined"),
+            round: None,
             truths: 0,
             size: None,
         };
@@ -1561,6 +1686,35 @@ mod tests {
                 "story 1 (active): Every step is recorded",
                 "phase: 1",
                 "truths: 0"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_backlog_line_without_its_state_or_round_is_caught() {
+        let listed = |id, refinement: &str, round, truths| BacklogStory {
+            id,
+            sentence: text("Every step is recorded"),
+            status: text("active"),
+            phase: Some(1),
+            refinement: text(refinement),
+            round,
+            truths,
+            size: None,
+        };
+        let backlog = backlog_render(Ok(vec![
+            listed(1, "questions-open", Some(2), 0),
+            listed(2, "drafting", None, 0),
+            listed(3, "refined", None, 2),
+            listed(4, "unrefined", None, 0),
+        ]));
+        assert_eq!(
+            shown(&backlog),
+            [
+                "story 1 (active, phase 1, questions open in round 2, 0 truths): Every step is recorded",
+                "story 2 (active, phase 1, drafting, 0 truths): Every step is recorded",
+                "story 3 (active, phase 1, refined, 2 truths): Every step is recorded",
+                "story 4 (active, phase 1, unrefined, 0 truths): Every step is recorded",
             ]
         );
     }
@@ -1676,6 +1830,44 @@ mod tests {
             shown(&other).contains(&"  detail: Approval by digest"),
             "{:?}",
             other.lines
+        );
+    }
+
+    #[test]
+    fn a_truth_draft_previewed_without_its_marks_or_as_unavailable_is_caught() {
+        use crate::refine::questions::tests::D as DRAFTING;
+        use crate::refine::read::tests::{drafting_from_empty, revise, t3};
+        use crate::refine::submit::tests::{t1, t2, truths_submitted};
+        use crate::scope::fixtures::{R5, T3, T4, T6, project};
+
+        let (dir, store, set) = drafting_from_empty();
+        revise(&store, &set, json!([t1(), t2()]), 10, T3);
+        let draft = truths_submitted(&store, 1, &set, &json!([t1(), t3()]), DRAFTING, R5, T4);
+        assert_eq!(draft["status"], "ok", "{draft}");
+        let digest = draft["digest"].as_str().unwrap().to_owned();
+        drop(store);
+        let store = crate::ledger::open::store(
+            &dir.path().join("home"),
+            T6,
+            crate::ledger::open::options(),
+        )
+        .unwrap();
+
+        let render = preview(&store, &project(), Hash::from_hex(&digest).unwrap());
+        let lines = shown(&render);
+        for line in [
+            "story: 1",
+            format!("question set: {set}").as_str(),
+            "truth t1 (unchanged): When the owner approves a draft by a stale digest, the owner is refused stale-draft naming the first differing part.",
+            "truth t3 (added): When the owner approves a draft by a stale digest, the owner is refused stale-draft naming the first differing member.",
+            "removed: t2",
+            format!("approve it with: baley story truths approve {digest}").as_str(),
+        ] {
+            assert!(lines.contains(&line), "{line} in {lines:?}");
+        }
+        assert!(
+            !lines.iter().any(|line| line.contains(LEDGER_UNAVAILABLE)),
+            "{lines:?}"
         );
     }
 }

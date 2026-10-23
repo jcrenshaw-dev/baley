@@ -9,9 +9,11 @@
 //! call's host, the session's ledger and the server's time. `capture`,
 //! `scope-submit`, the ten change operations from `project-describe` to
 //! `backlog-reorder`, `project-start`, `work-order-fail`, `work-order-retry`,
-//! `questions-answer`, `document` and `route` set `needs_project`, and in
-//! their [`operate`] arms the writes prepare a write from it, `document` a
-//! read and `route` a read that also reads the settings.
+//! `questions-answer`, `story-refine`, `story-questions-submit`,
+//! `context-submit`, `document`, `context-intake` and `route` set
+//! `needs_project`, and in their [`operate`] arms the writes prepare a write
+//! from it, `document` and `context-intake` a read and `route` a read that
+//! also reads the settings.
 //! rmcp has already validated the request's metadata by the time any
 //! of this runs, so a protocol-required metadata error stays a protocol error
 //! and runs nothing.
@@ -38,6 +40,7 @@ use super::document;
 use super::gate::{Admitted, After, Called, after_queue, encode};
 use super::operations::{help_answer, instruction_answer, schema_answer, unknown_operation};
 use super::questions;
+use super::refine;
 use super::scope;
 use super::tools::{info, supported_protocol_versions, tool_list, version_answer};
 use super::transport::RawFrameBytes;
@@ -161,8 +164,12 @@ fn run_decision(
 /// project call's [`Preparation`] together, so an arm that needs a project
 /// names the input in its pattern and the arms that need none ignore it.
 /// `capture`, `scope-submit` and the ten change operations prepare a write
-/// from the [`Preparation`], and `document` a read.
-fn operate(called: &Called, arguments: Option<&Value>, project: Option<&Preparation>) -> Value {
+/// from the [`Preparation`], and `document` and `context-intake` a read.
+pub(crate) fn operate(
+    called: &Called,
+    arguments: Option<&Value>,
+    project: Option<&Preparation>,
+) -> Value {
     let arguments_or_null = arguments.unwrap_or(&Value::Null);
     match (called, project) {
         (Called::Version, _) => version_answer(arguments),
@@ -193,6 +200,20 @@ fn operate(called: &Called, arguments: Option<&Value>, project: Option<&Preparat
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "questions-answer" => {
             questions::serve(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation)) if spelling == "story-refine" => {
+            refine::serve(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation))
+            if spelling == "story-questions-submit" =>
+        {
+            refine::serve_questions(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation)) if spelling == "context-submit" => {
+            refine::serve_context(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation)) if spelling == "context-intake" => {
+            refine::serve_intake(arguments_or_null, preparation)
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "route" => {
             work_order::serve_route(arguments_or_null, preparation)

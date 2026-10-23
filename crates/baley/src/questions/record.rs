@@ -111,7 +111,7 @@ pub(crate) mod tests {
     pub(crate) const ORDER: &str = "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 
     /// Set Q1, accepted.
-    fn q1() -> QuestionSet {
+    pub(crate) fn q1() -> QuestionSet {
         judge_set(&json!([
             {"id": "q1", "question": "Which store backs the ledger?", "recommended": "SQLite",
                 "depends_on": []},
@@ -166,6 +166,45 @@ pub(crate) mod tests {
         transact(store, request, &mut |tx| open(tx, set, subject, T1)).unwrap()
     }
 
+    /// Declares story `story` of `project` in its own test transaction, as
+    /// an approval would, since the `backlog` and `roadmap` projectors refuse
+    /// a set or a refinement of a story they do not hold.
+    pub(crate) fn declare(store: &SqliteStore, project: &baley_store::ProjectId, story: u32) {
+        use baley_core::scope::{
+            ROADMAP_STREAM, STORY_DECLARED, STORY_DECLARED_VERSION, StoryStatus,
+            story_declared_payload,
+        };
+
+        let payload = story_declared_payload(
+            story,
+            "Every step is recorded",
+            StoryStatus::Active,
+            None,
+            Hash([0x5c; 32]),
+        );
+        let request = format!("2b3c4d5e-6f70-4a8b-9c0d-{story:012x}");
+        let command = command_in(project, "test.declare", &request, 4, T1);
+        store
+            .transact(&command, &mut |tx| {
+                tx.append(NewEvent {
+                    stream: StreamName(ROADMAP_STREAM.into()),
+                    type_name: STORY_DECLARED.into(),
+                    type_version: STORY_DECLARED_VERSION,
+                    git: None,
+                    payload: payload.clone(),
+                    attachments: Vec::new(),
+                })?;
+                Ok(Decision {
+                    kind: OutcomeKind::Done,
+                    answer: json!({"status": "ok"}),
+                    sensitive: false,
+                    observed: Observed::default(),
+                    git: None,
+                })
+            })
+            .unwrap();
+    }
+
     fn on_stream(store: &SqliteStore, stream: &str, type_name: &str) -> Vec<baley_store::Event> {
         let page = PageRequest {
             limit: 100,
@@ -198,6 +237,7 @@ pub(crate) mod tests {
     #[test]
     fn a_set_opened_off_its_subjects_stream_or_under_another_id_than_returned_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let story_set = open_set(&store, R1, &q1(), &story(1));
         let plan_set = open_set(&store, R2, &q1(), &plan(2));
         assert!(lowercase_uuid(&story_set), "{story_set}");
@@ -219,6 +259,7 @@ pub(crate) mod tests {
     #[test]
     fn two_sets_with_the_same_questions_given_one_id_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let first = open_set(&store, R1, &q1(), &story(1));
         let second = open_set(&store, R2, &q1(), &story(1));
         assert_ne!(first, second);
@@ -268,6 +309,7 @@ pub(crate) mod tests {
     #[test]
     fn a_set_opened_outside_its_callers_transaction_is_caught() {
         let (_dir, store) = store();
+        declare(&store, &project(), 1);
         let before = head(&store);
         let mut opened = None;
         let refused = transact(&store, R1, &mut |tx| {

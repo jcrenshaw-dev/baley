@@ -2,10 +2,9 @@ use serde_json::json;
 
 use super::*;
 
-/// The nineteen front doors not served yet, with their owning builds, written out from the
+/// The eighteen front doors not served yet, with their owning builds, written out from the
 /// design rather than read from the table under test.
 const UNAVAILABLE: &[(&str, u32)] = &[
-    ("bal-context", 4),
     ("bal-plan", 4),
     ("bal-review", 4),
     ("bal-plan-review", 4),
@@ -28,7 +27,7 @@ const UNAVAILABLE: &[(&str, u32)] = &[
 
 #[test]
 fn an_unavailable_front_door_is_never_presented_as_usable_and_names_its_owning_build() {
-    assert_eq!(UNAVAILABLE.len(), 19);
+    assert_eq!(UNAVAILABLE.len(), 18);
     for (identity, build) in UNAVAILABLE {
         assert_eq!(
             lookup(identity),
@@ -151,6 +150,41 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "bal-rounds",
         "1",
         "8bab77d68c4253a45e63cf5f16397e58e058c21f94781674c0cf08c09bfa3e6d",
+    ),
+    (
+        "bal-analyzer-questions",
+        "1",
+        "bf73b552ba3f4247d11f2ac8897f12065de8f9e63f065619e4837317a293a937",
+    ),
+    (
+        "bal-analyzer-drafting",
+        "1",
+        "8cfeef1bdc7915b39f5cbe2002a89db30e2a333b678af2dc468cde794bac0810",
+    ),
+    (
+        "bal-help",
+        "3",
+        "31ecd5654bebed4db300e611dc9bb8dfa4cd2993c79e251bef681ed6495e3f5a",
+    ),
+    (
+        "bal-rounds",
+        "2",
+        "420c5ece69f5f29e60337a0ab905db6a2c00439f77b7422290062a0fd358bb66",
+    ),
+    (
+        "bal-context",
+        "1",
+        "d318a66c27dae8d904b1bf54790a526656da09ed38e5b4b2a126b5a5b2392b4c",
+    ),
+    (
+        "bal-context",
+        "2",
+        "b1d0dae1c7c4da8169b407ae0ea2fdea8476545eb6ebaba08ecf496c8f564b77",
+    ),
+    (
+        "bal-analyzer-drafting",
+        "2",
+        "0dad9202903bc4ee1ba81792681c893b3abe5a098cb950fe40135d9fa74ed116",
     ),
 ];
 
@@ -448,7 +482,7 @@ fn a_rounds_instruction_given_a_help_row_or_a_skill_stub_is_caught() {
         panic!("bal-rounds is served");
     };
     assert_eq!(entry.build, 4);
-    assert_eq!(text.version, "1");
+    assert_eq!(text.version, "2");
     assert!(
         !crate::help::table::COMMANDS
             .iter()
@@ -487,4 +521,189 @@ fn a_rounds_instruction_missing_its_read_its_answer_or_its_relay_rules_is_caught
         assert!(forbidding.contains(word), "the forbidding lacks {word}");
     }
     assert!(!body.contains("approve"));
+}
+
+/// Names of Cadence's own files, commands and state that no ported analyzer
+/// text may carry (ADR 0048).
+const CADENCE_NAMES: &[&str] = &[
+    ".planning",
+    "CONTEXT.md",
+    "ROADMAP.md",
+    "planning.mjs",
+    "skim.mjs",
+    "excerpt",
+    "recall",
+    "AskUserQuestion",
+    "/cad-",
+];
+
+#[test]
+fn a_questions_text_missing_its_inputs_or_return_or_naming_cadence_state_is_caught() {
+    let body = served_text("bal-analyzer-questions");
+    for needle in [
+        "`story`",
+        "`description`",
+        "`roadmap`",
+        "`truths`",
+        "`document`",
+        "\"id\"",
+        "\"question\"",
+        "\"recommended\"",
+        "\"depends_on\"",
+        "`depends_on`",
+        "`[]`",
+        "Call no `baley_apply` operation",
+    ] {
+        assert!(body.contains(needle), "the questions text lacks {needle}");
+    }
+    for name in CADENCE_NAMES {
+        assert!(!body.contains(name), "the questions text names {name}");
+    }
+}
+
+#[test]
+fn a_drafting_text_missing_the_form_refusals_or_human_verify_is_caught() {
+    let body = served_text("bal-analyzer-drafting");
+    for needle in [
+        "`when`",
+        "`for-any`",
+        "`sees`",
+        "`gets`",
+        "`is refused`",
+        "`truth-form`",
+        "`truth-internal`",
+        "`truth-prose-oracle`",
+        "`human_verify`",
+        "`questions`",
+        "deferred question",
+        "keeps that truth's id",
+        "never on a recommendation the owner rejected",
+        "Leave out `observable` and `fixed_oracle`",
+    ] {
+        assert!(body.contains(needle), "the drafting text lacks {needle}");
+    }
+    // The return's shape never carries the attestations the owner makes.
+    assert!(!body.contains("\"observable\"") && !body.contains("\"fixed_oracle\""));
+    for name in CADENCE_NAMES {
+        assert!(!body.contains(name), "the drafting text names {name}");
+    }
+}
+
+#[test]
+fn an_analyzer_text_given_a_help_row_or_a_skill_stub_is_caught() {
+    let doors = crate::host_artifacts::stubs::front_doors();
+    for (identity, version) in [
+        ("bal-analyzer-questions", "1"),
+        ("bal-analyzer-drafting", "2"),
+    ] {
+        let Lookup::Served { entry, text } = lookup(identity) else {
+            panic!("{identity} is served");
+        };
+        assert_eq!(entry.build, 4, "{identity}");
+        assert_eq!(text.version, version, "{identity}");
+        assert!(
+            !crate::help::table::COMMANDS
+                .iter()
+                .any(|command| command.name == identity),
+            "{identity} is a help row"
+        );
+        assert!(
+            !doors.iter().any(|(name, _)| *name == identity),
+            "{identity} is a front door"
+        );
+    }
+}
+
+#[test]
+fn a_rounds_text_without_its_submit_step_or_editing_questions_is_caught() {
+    let Lookup::Served { text, .. } = lookup("bal-rounds") else {
+        panic!("bal-rounds is served");
+    };
+    assert_eq!(text.version, "2");
+    let body = text.body;
+    for needle in [
+        "story-questions-submit",
+        r#""work_order""#,
+        r#""questions""#,
+        "`drafting`",
+        "a closed receipt with no drafting",
+        "analyzer-order-pending",
+    ] {
+        assert!(body.contains(needle), "the rounds relay lacks {needle}");
+    }
+    let sending = body
+        .split(". ")
+        .find(|sentence| sentence.contains("exactly as returned"))
+        .expect("a sentence sends the questions as returned");
+    for word in ["edit", "drop", "merge", "reword", "reorder"] {
+        assert!(sending.contains(word), "the sending lacks {word}");
+    }
+    let submit = body.find("story-questions-submit").unwrap();
+    let read = body.find(r#""operation":"document""#).unwrap();
+    assert!(submit < read, "the submit step comes after the round read");
+}
+
+#[test]
+fn a_context_door_missing_an_operation_or_the_terminal_approval_is_caught() {
+    let body = served_text("bal-context");
+    for needle in [
+        "story-refine",
+        r#""instruction":"bal-context""#,
+        "bal-rounds",
+        "context-submit",
+        r#"{"kind":"refinement""#,
+        "work-order-fail",
+        "work-order-retry",
+        "analyzer-order-pending",
+        "question-open",
+        "deferring its open questions with a reason",
+        "a closed receipt with no drafting",
+        "observable",
+        "fixed_oracle",
+        "set only as the owner says",
+        "human_verify",
+        "baley scope preview",
+        "baley story truths approve",
+        "Nothing is approved over MCP",
+    ] {
+        assert!(
+            body.contains(needle),
+            "the context front door lacks {needle}"
+        );
+    }
+    assert!(!body.contains("scope-approve") && !body.contains("truths-approve"));
+}
+
+#[test]
+fn a_drafting_step_that_drops_truths_about_unbuilt_behaviour_is_caught() {
+    // A story is refined before it is built, so the drop rule names a
+    // contradiction, never a truth the code does not hold yet.
+    for identity in ["bal-context", "bal-analyzer-drafting"] {
+        let body = served_text(identity);
+        assert!(
+            body.contains("contradicts a fact the code holds or an answer the owner gave"),
+            "{identity} drops on something other than a contradiction"
+        );
+        assert!(
+            !body.contains("does not hold"),
+            "{identity} drops a truth that does not hold"
+        );
+    }
+    assert!(
+        served_text("bal-context")
+            .contains("A truth about behaviour the story has not built yet is kept."),
+        "the context front door does not keep a truth about unbuilt behaviour"
+    );
+}
+
+#[test]
+fn a_context_door_keyed_by_phase_or_naming_cadence_state_is_caught() {
+    let body = served_text("bal-context");
+    assert!(
+        body.contains("story's id"),
+        "the context front door names no story id"
+    );
+    for name in CADENCE_NAMES.iter().chain(&["STATE", "cursor"]) {
+        assert!(!body.contains(name), "the context front door names {name}");
+    }
 }

@@ -11,7 +11,9 @@
 //! rebuilt (design 0012, D-16). A question set by its id comes from the
 //! `questions` view with its round worked out when read, in the shape an
 //! answer's receipt carries, and a sentence naming the rounds relay
-//! instruction (design 0005 `questions round`).
+//! instruction (design 0005 `questions round`). A story's refinement by its
+//! id comes from `refine::read`, the read `context-intake` and `baley story
+//! refinement` give too (D-10).
 
 use std::io::Read;
 use std::path::Path;
@@ -24,6 +26,7 @@ use baley_store::{
     Hash, IndexQuery, KeyValue, Ledger, PageRequest, PayloadBody, PayloadRef, PayloadStatus,
     Payloads, ProjectId, Views,
 };
+use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,6 +37,7 @@ use crate::mcp::handler::Preparation;
 use crate::mcp::parts::{Cut, PART_BOUND, cut};
 use crate::mcp::prepare::{LEDGER_UNAVAILABLE, prepare};
 use crate::questions::read::{self as questions, SetRead};
+use crate::refine::read::StoryRefinement;
 use crate::scope::read::{
     self as scope, Draft, NO_SUCH_STORY, PreviewError, ReadError, Roadmap, Story,
 };
@@ -91,6 +95,13 @@ pub enum Identity {
     Questions {
         /// The set id a round or a receipt gave.
         set: String,
+    },
+    /// A story's refinement: the approved description, the story with the
+    /// phase it is committed to, and its truths with every kept version.
+    #[serde(rename = "refinement")]
+    Refinement {
+        /// The story id Baley assigned when the scope was approved.
+        story: u32,
     },
 }
 
@@ -220,10 +231,20 @@ pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
         Ok(shape) => shape,
         Err(refusal) => return refusal,
     };
+    match prepared_read(preparation) {
+        Ok((store, project)) => read(store, &project, &shape),
+        Err(answer) => answer,
+    }
+}
+
+/// Prepares a read for the session's `preparation`: finds the project and
+/// checks the ledger knows it, recording nothing, and gives the store and
+/// the project. A `failed` preparation answer is the error as it is.
+pub(crate) fn prepared_read(preparation: &Preparation) -> Result<(&SqliteStore, ProjectId), Value> {
     let ledger = preparation.ledger.as_deref();
     // A read reads no settings, so the config folder is never opened.
     let config = ledger.map_or(Path::new(""), |ledger| ledger.config.as_path());
-    let prepared = match prepare(
+    let prepared = prepare(
         ledger.map(|ledger| &ledger.store),
         &preparation.caller,
         None,
@@ -231,18 +252,16 @@ pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
         preparation.host,
         &preparation.at,
         &mut crate::process::System,
-    ) {
-        Ok(prepared) => prepared,
-        Err(failed) => return serde_json::to_value(*failed).expect("a failed answer serializes"),
-    };
+    )
+    .map_err(|failed| serde_json::to_value(*failed).expect("a failed answer serializes"))?;
     let Some(ledger) = ledger else {
-        return failed(
+        return Err(failed(
             LEDGER_UNAVAILABLE,
             "the read was prepared without a ledger",
             PLACE_LEDGER,
-        );
+        ));
     };
-    read(&ledger.store, &prepared.project, &shape)
+    Ok((&ledger.store, prepared.project))
 }
 
 /// A busy ledger's reason when a capture was not read.
@@ -255,7 +274,8 @@ const SCOPE_NOT_READ_BUSY: &str = "the ledger is busy, so the scope was not read
 /// read from its view document by id, then its body only when the view says
 /// this project still holds it; a draft, the roadmap and a story through
 /// `scope::read`; a work order through `work_order::read`; a question set
-/// through `questions::read`. Nothing is appended.
+/// through `questions::read`; a story's refinement through `refine::read`.
+/// Nothing is appended.
 pub fn read<S: Ledger + Views + Payloads + ?Sized>(
     store: &S,
     project: &ProjectId,
@@ -284,6 +304,10 @@ pub fn read<S: Ledger + Views + Payloads + ?Sized>(
         }
         Identity::WorkOrder { id } => work_order_answer(store, project, identity, id, shape.part),
         Identity::Questions { set } => questions_answer(store, project, identity, set, shape.part),
+        Identity::Refinement { story } => match crate::refine::read::read(store, project, *story) {
+            Ok(refinement) => refinement_answer(Some(identity), refinement, shape.part),
+            Err(error) => read_failed(error),
+        },
     }
 }
 
@@ -352,9 +376,29 @@ pub fn story_answer(
     }
 }
 
+/// The answer for a story's refinement read: `status` `ok`, `identity` when
+/// the read was asked by one, and the read's `description`, `story`, `phase`
+/// and `truths`, in parts when large. `document` and `context-intake` both
+/// answer through here, so the two differ only in `identity`.
+pub(crate) fn refinement_answer(
+    identity: Option<&Identity>,
+    refinement: StoryRefinement,
+    part: Option<usize>,
+) -> Value {
+    let mut answer = json!({"status": "ok"});
+    if let Some(identity) = identity {
+        answer["identity"] = json!(identity);
+    }
+    answer["description"] = json!(refinement.description);
+    answer["story"] = json!(refinement.story);
+    answer["phase"] = json!(refinement.phase);
+    answer["truths"] = json!(refinement.truths);
+    in_parts(answer, part)
+}
+
 /// Why accepted scope was not read. A missing phase or story echoes none of
 /// its number, as a missing capture echoes none of its id.
-fn read_failed(error: ReadError) -> Value {
+pub(crate) fn read_failed(error: ReadError) -> Value {
     match error {
         ReadError::NoSuchPhase => Refusal::new(NO_SUCH_PHASE, "this project has no such phase")
             .slot("identity")
@@ -1421,7 +1465,7 @@ mod tests {
         use serde_json::{Value, json};
 
         use super::super::*;
-        use crate::questions::record::tests::{open_set, story};
+        use crate::questions::record::tests::{declare, open_set, story};
         use crate::scope::fixtures::*;
 
         const OWNER: &str = "Ada Lovelace";
@@ -1461,6 +1505,7 @@ mod tests {
         #[test]
         fn a_questions_read_without_its_round_or_the_relay_or_appending_is_caught() {
             let (_dir, store) = store();
+            declare(&store, &project(), 1);
             let set = open_set(&store, R1, &r2(), &story(1));
             append(
                 &store,
@@ -1529,6 +1574,7 @@ mod tests {
         #[test]
         fn an_unknown_set_answered_as_anything_but_no_such_question_set_is_caught() {
             let (_dir, store) = store();
+            declare(&store, &project(), 1);
             open_set(&store, R1, &r2(), &story(1));
             let unknown = "7f3e4d5c-6071-4c8d-8e9f-1a2b3c4d5e6f";
             let long = "s".repeat(300);
@@ -1544,6 +1590,7 @@ mod tests {
         #[test]
         fn a_long_round_not_cut_into_parts_is_caught() {
             let (_dir, store) = store();
+            declare(&store, &project(), 1);
             let text = "x".repeat(4096);
             let questions: Vec<Value> = (1..=10)
                 .map(|n| {
@@ -1580,6 +1627,61 @@ mod tests {
                 assert_eq!(asked["id"], format!("q{n}"));
                 assert_eq!(asked["question"], text);
             }
+        }
+    }
+
+    mod refinements {
+        //! Story 1 is refined over the real store through the truth
+        //! submission and approval; expected answers are written out from
+        //! design 0012 HST-R6, D-10 and the plan's data, never from running
+        //! this code.
+
+        use serde_json::{Value, json};
+
+        use super::super::*;
+        use crate::refine::read::tests::{drafting_from_empty, revise};
+        use crate::refine::submit::tests::{t1, with};
+        use crate::scope::fixtures::*;
+
+        #[test]
+        fn a_refinement_document_read_whole_past_the_bound_or_echoing_its_id_is_caught() {
+            let (_dir, store, set) = drafting_from_empty();
+            let outcome = "o".repeat(1_000);
+            let truths: Vec<Value> = (1..=40)
+                .map(|n| with(with(t1(), "id", &format!("t{n}")), "outcome", &outcome))
+                .collect();
+            revise(&store, &set, Value::Array(truths), 10, T3);
+
+            let shape = |story: u32, part: Option<usize>| DocumentShape {
+                identity: Identity::Refinement { story },
+                part,
+            };
+            let first = read(&store, &project(), &shape(1, Some(1)));
+            assert_eq!(first["status"], "ok", "{first}");
+            assert_eq!(first["next"], 2, "{first}");
+            let mut joined = String::new();
+            let mut next = Some(1);
+            while let Some(part) = next {
+                let value = read(&store, &project(), &shape(1, Some(part)));
+                assert_eq!(value["part"], part);
+                let body = value["body"].as_str().unwrap();
+                assert!(body.len() <= 24_576, "part {part} is {} bytes", body.len());
+                joined.push_str(body);
+                next = value["next"].as_u64().map(|n| usize::try_from(n).unwrap());
+            }
+            let whole: Value = serde_json::from_str(&joined).unwrap();
+            assert_eq!(whole["status"], "ok");
+            assert_eq!(whole["identity"], json!({"kind": "refinement", "story": 1}));
+            assert_eq!(whole["truths"]["current"].as_array().unwrap().len(), 40);
+
+            let unknown = read(&store, &project(), &shape(9, None));
+            assert_eq!(unknown["status"], "refused", "{unknown}");
+            assert_eq!(unknown["code"], "no-such-story");
+            assert_eq!(unknown["slot"], "identity");
+            assert!(
+                !unknown["reason"].as_str().unwrap().contains('9'),
+                "{unknown}"
+            );
         }
     }
 }

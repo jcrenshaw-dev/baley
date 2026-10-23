@@ -21,6 +21,7 @@ use baley_core::scope::{
     judge_approval, judge_change, judge_change_approval, judge_scope_change, judge_submission,
     roadmap_key, start_events,
 };
+use baley_core::truth::STORY_TRUTHS;
 use baley_store::{
     Absence, Actor, Command, Decision, DocKey, Document, EVENT_PAGE_BOUND, EventMatch, Hash,
     HistoryFilter, IndexQuery, KeyValue, Ledger, Observed, OutcomeKind, PageRequest, Payloads,
@@ -96,7 +97,9 @@ struct CarriedDetail {
 /// The first step: reads the draft with `digest` and its `scope.submitted`.
 /// For a start it reads whether a start is approved and the newest start
 /// draft; for a change, what `judge_change_draft` names. Then it judges the
-/// approval. It runs outside any transaction, since a transaction has no
+/// approval. A story's truth draft is refused `unknown-draft`, its reason
+/// naming `baley story truths approve <digest>`, which approves it (owner
+/// ruling R2). It runs outside any transaction, since a transaction has no
 /// payload read (D-02). A refusal is the `refused` answer, slot `digest`; a
 /// body that is gone or no longer judges clean is a ledger fault, never
 /// approved. Nothing is recorded. It is also the first step of approving a
@@ -108,6 +111,7 @@ pub fn judge<S: Ledger + Views + Payloads + ?Sized>(
     digest: Hash,
 ) -> Result<Judged, Value> {
     let target = match preview(store, project, digest) {
+        Ok(read) if read.kind == STORY_TRUTHS => return Err(truth_draft(digest)),
         Ok(read) if read.kind != START_KIND => return judge_change_draft(store, project, &read),
         Ok(read) => Some(accept(&read)?),
         Err(PreviewError::UnknownDraft) => None,
@@ -630,7 +634,7 @@ fn confirm_newest(
 
 /// The first page of one change's drafts, newest first: its kind and
 /// target, so it reads only that change.
-fn newest_query(kind: &str, target: &str) -> IndexQuery {
+pub(crate) fn newest_query(kind: &str, target: &str) -> IndexQuery {
     IndexQuery {
         index: DRAFT_NEWEST_INDEX.into(),
         equals: vec![KeyValue::Text(kind.into()), KeyValue::Text(target.into())],
@@ -676,7 +680,7 @@ fn highest(roadmap: Option<Document>) -> Result<(u32, u32), StoreError> {
 }
 
 /// Whether `project`'s `scope.submitted` at `seq` names `digest`.
-fn submitted_at<L: Ledger + ?Sized>(
+pub(crate) fn submitted_at<L: Ledger + ?Sized>(
     store: &L,
     project: &ProjectId,
     digest: Hash,
@@ -733,6 +737,22 @@ fn preview_failed(error: PreviewError) -> Value {
 
 fn busy(error: StoreError) -> Value {
     store_failed(&error, NOT_RECORDED_BUSY)
+}
+
+/// The `refused` answer for a story's truth draft given to the scope
+/// approval: `unknown-draft`, since no scope draft has the digest, its
+/// reason naming the command that approves truths with this digest, so the
+/// owner is never told the ledger is damaged.
+fn truth_draft(digest: Hash) -> Value {
+    Refusal::new(
+        ApprovalRefusal::UnknownDraft.code(),
+        format!(
+            "this digest is a story's truth draft, not a scope draft, so nothing was approved. Approve it with baley story truths approve {}",
+            digest.to_hex()
+        ),
+    )
+    .slot("digest")
+    .value()
 }
 
 /// The `refused` answer for an approval, slot `digest`.
@@ -922,14 +942,17 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|s| json!([s["id"], s["refinement"], s["truths"]]))
+            .map(|s| {
+                let stored = s.get("refinement").is_some();
+                json!([s["id"], stored, s["set"], s["refined"], s["truths"]])
+            })
             .collect();
         assert_eq!(
             listed,
             [
-                json!([1, "unrefined", 0]),
-                json!([2, "unrefined", 0]),
-                json!([3, "unrefined", 0])
+                json!([1, false, null, null, 0]),
+                json!([2, false, null, null, 0]),
+                json!([3, false, null, null, 0])
             ]
         );
 
@@ -1599,5 +1622,27 @@ mod tests {
         assert_eq!(value["status"], "refused", "{value}");
         assert_eq!(value["code"], "request-id-reuse", "{value}");
         assert_eq!(value["slot"], "request_id", "{value}");
+    }
+
+    #[test]
+    fn a_truth_draft_given_to_scope_approve_answered_as_a_damaged_ledger_is_caught() {
+        use crate::refine::questions::tests::D;
+        use crate::refine::submit::tests::{drafting, t1, t2, truths_submitted};
+
+        let (_dir, store, set) = drafting();
+        let receipt = truths_submitted(&store, 1, &set, &json!([t1(), t2()]), D, R6, T4);
+        assert_eq!(receipt["status"], "ok", "{receipt}");
+        let x = receipt["digest"].as_str().unwrap().to_owned();
+        let before = head(&store);
+        let refusal = judge(&store, &project(), Hash::from_hex(&x).unwrap()).unwrap_err();
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], "unknown-draft", "{refusal}");
+        assert_eq!(refusal["slot"], "digest", "{refusal}");
+        let reason = refusal["reason"].as_str().unwrap();
+        assert!(
+            reason.contains(&format!("baley story truths approve {x}")),
+            "{reason}"
+        );
+        assert_eq!(head(&store), before);
     }
 }

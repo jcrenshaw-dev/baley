@@ -85,6 +85,8 @@ pub mod protected_paths;
 pub mod providers;
 /// Question sets over the storage port: a set opened and abandoned inside its caller's transaction, and its round read.
 pub mod questions;
+/// A story's refinement over the storage port: the analyzer's orders and the inputs they bind.
+pub mod refine;
 /// Replaces a settings file whole, refusing when it changed since it was read.
 pub mod replace;
 /// The scope records of design 0004: start submissions held as drafts over the storage port.

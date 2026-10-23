@@ -17,6 +17,7 @@ pub mod registry;
 pub mod restore;
 pub mod retention;
 pub mod scope;
+pub mod truth;
 pub mod work_order;
 
 pub use anchor::{

@@ -3,7 +3,9 @@
 //! it, so the owner sees exactly what an approval would record; phase
 //! numbers and story ids are assigned at approval, so a preview has none.
 //! Accepted scope is read from the `roadmap`, `phase`, `phase_detail` and
-//! `backlog` views, which only an approval changes. A draft or phase detail
+//! `backlog` views, which only an approval changes, except the backlog's
+//! record of each story's latest question set; a story's refinement state
+//! is worked out from that set when read. A draft or phase detail
 //! whose body this project purged answers a tombstone with this project's
 //! reason and is never opened, even when another project still holds the
 //! same bytes (design 0001 Views). `document` and the owner's `baley
@@ -15,10 +17,12 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
+use baley_core::questions::{QUESTIONS_VIEW, questions_key, round_of, set_facts};
 use baley_core::scope::{
     AcceptedScope, BACKLOG_VIEW, DRAFT_VIEW, PHASE_DETAIL_VIEW, PHASE_VIEW, PhaseProgress,
     ROADMAP_VIEW, backlog_key, draft_key, phase_detail_key, phase_key, roadmap_key,
 };
+use baley_core::truth::{Refinement, refinement};
 use baley_store::{
     DocKey, Document, Hash, Ledger, PayloadBody, Payloads, ProjectId, StaleInput, StoreError,
     Transaction, Views,
@@ -272,7 +276,7 @@ pub struct Phase {
 }
 
 /// One story as the backlog lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BacklogStory {
     /// Its id.
     pub id: u32,
@@ -282,8 +286,11 @@ pub struct BacklogStory {
     pub status: String,
     /// The number of the phase it is committed to, or none.
     pub phase: Option<u32>,
-    /// Its refinement state, such as `unrefined`.
+    /// Its refinement state: `unrefined`, `questions-open`, `drafting` or
+    /// `refined`, worked out from its latest question set when read.
     pub refinement: String,
+    /// The round its latest set waits on while questions are open, or none.
+    pub round: Option<u32>,
     /// How many truths it carries.
     pub truths: u64,
     /// The number of tasks its approved plans need, or none before planning.
@@ -341,7 +348,21 @@ struct DetailDocument {
 /// The `backlog` document.
 #[derive(Deserialize)]
 struct BacklogDocument {
-    stories: Vec<BacklogStory>,
+    stories: Vec<BacklogEntry>,
+}
+
+/// One story in the `backlog` document: its latest question set and the
+/// set its latest refinement names, from which its state is worked out.
+#[derive(Deserialize)]
+struct BacklogEntry {
+    id: u32,
+    sentence: String,
+    status: String,
+    phase: Option<u32>,
+    set: Option<String>,
+    refined: Option<String>,
+    truths: u64,
+    size: Option<u64>,
 }
 
 /// Reads `project`'s accepted roadmap from its `roadmap` document, the
@@ -488,17 +509,102 @@ fn detail_text<P: Payloads + ?Sized>(payloads: &P, hash: &str) -> Result<String,
     })
 }
 
-/// Reads `project`'s backlog from its `backlog` document, in priority order.
-/// No document is an empty backlog.
+/// How many times `backlog` reads the pair before a disagreement is a
+/// fault. Each read again follows a write that landed between the two
+/// reads, so a few cover any real interleaving.
+const BACKLOG_READS: usize = 3;
+
+/// Reads `project`'s backlog from its `backlog` document, in priority order,
+/// each story's refinement state worked out from its latest set's
+/// `questions` document, all those documents read in one `get_many`. The two
+/// reads are separate snapshots, so when they disagree, because another
+/// command replaced a story's set between them, both are read again, up to
+/// `BACKLOG_READS` times. No document is an empty backlog.
 pub fn backlog<S: Views + ?Sized>(
     store: &S,
     project: &ProjectId,
 ) -> Result<Vec<BacklogStory>, ReadError> {
-    Ok(
-        read::<BacklogDocument, _>(store, project, BACKLOG_VIEW, &backlog_key())?
-            .map(|document| document.stories)
-            .unwrap_or_default(),
-    )
+    for _ in 0..BACKLOG_READS {
+        let Some(document) =
+            read::<BacklogDocument, _>(store, project, BACKLOG_VIEW, &backlog_key())?
+        else {
+            return Ok(Vec::new());
+        };
+        let keys: Vec<DocKey> = document
+            .stories
+            .iter()
+            .filter_map(|story| story.set.as_deref().map(questions_key))
+            .collect();
+        let sets = store
+            .get_many(project, QUESTIONS_VIEW, &keys)
+            .map_err(ReadError::Store)?
+            .into_iter()
+            .map(|set| set.map(|set| set.body))
+            .collect();
+        if let BacklogPair::Agreed(stories) = backlog_of(document, sets)? {
+            return Ok(stories);
+        }
+    }
+    Err(ReadError::Unreadable(format!(
+        "the {BACKLOG_VIEW} view document and its question sets disagreed on {BACKLOG_READS} reads"
+    )))
+}
+
+/// What a `backlog` document and its latest sets' documents, read one after
+/// the other, say together.
+#[derive(Debug, PartialEq, Eq)]
+enum BacklogPair {
+    /// The reads agree, so this is the backlog.
+    Agreed(Vec<BacklogStory>),
+    /// A story's latest set came back abandoned. Only a later set abandons
+    /// a story's set, and that set would be the latest, so the backlog
+    /// moved between the reads.
+    Moved,
+}
+
+/// Judges a `backlog` document against the bodies of its stories' latest
+/// sets, in the order the stories name them, none for a set the view does
+/// not hold. A missing or unreadable set is a fault, never a moved backlog:
+/// the `backlog` and `questions` views change in one transaction, so a set
+/// the backlog names is already held when the sets are read.
+fn backlog_of(
+    document: BacklogDocument,
+    sets: Vec<Option<Value>>,
+) -> Result<BacklogPair, ReadError> {
+    let mut sets = sets.into_iter();
+    let mut stories = Vec::with_capacity(document.stories.len());
+    for story in document.stories {
+        let round = match &story.set {
+            Some(_) => {
+                let set = sets
+                    .next()
+                    .flatten()
+                    .ok_or_else(|| unreadable(QUESTIONS_VIEW))?;
+                Some(round_of(
+                    &set_facts(&set).map_err(|_| unreadable(QUESTIONS_VIEW))?,
+                ))
+            }
+            None => None,
+        };
+        let latest = story.set.as_deref().zip(round.as_ref());
+        let Ok(state) = refinement(latest, story.refined.as_deref()) else {
+            return Ok(BacklogPair::Moved);
+        };
+        stories.push(BacklogStory {
+            id: story.id,
+            sentence: story.sentence,
+            status: story.status,
+            phase: story.phase,
+            refinement: state.as_str().into(),
+            round: match state {
+                Refinement::QuestionsOpen { round } => Some(round),
+                _ => None,
+            },
+            truths: story.truths,
+            size: story.size,
+        });
+    }
+    Ok(BacklogPair::Agreed(stories))
 }
 
 /// Reads accepted story `id` from the roadmap.
@@ -1115,6 +1221,7 @@ mod tests {
             status: text(status),
             phase,
             refinement: text("unrefined"),
+            round: None,
             truths: 0,
             size: None,
         };
@@ -1125,6 +1232,134 @@ mod tests {
                 listed(2, "The owner approves scope", "active", Some(2)),
                 listed(3, "Teammates see the backlog", "deferred", None),
             ])
+        );
+    }
+    #[test]
+    fn a_backlog_read_showing_a_stale_or_stored_refinement_state_is_caught() {
+        use baley_core::questions::{
+            QUESTION_ANSWERED, QUESTION_ANSWERED_VERSION, answered_payload, judge_set,
+        };
+        use baley_core::scope::ROADMAP_STREAM;
+        use baley_core::truth::{STORY_REFINED, STORY_REFINED_VERSION};
+        use baley_store::{NewEvent, StreamName};
+        use serde_json::json;
+
+        use crate::questions::record::tests::{open_set, q1, story};
+
+        let (_dir, store) = approved();
+        let first = open_set(&store, R2, &q1(), &story(1));
+        let empty = open_set(&store, R3, &judge_set(&json!([])).unwrap(), &story(2));
+        let on_roadmap = |type_name: &str, type_version, payload| NewEvent {
+            stream: StreamName(ROADMAP_STREAM.into()),
+            type_name: type_name.into(),
+            type_version,
+            git: None,
+            payload,
+            attachments: Vec::new(),
+        };
+        let refined = json!({"story": 2, "set": empty, "submission": "5c".repeat(32),
+            "owner": "Ada Owner", "at": T4, "truths": [{"id": "t1", "form": "when",
+                "trigger": "the owner approves a draft by a stale digest",
+                "observer": "the owner", "verb": "is refused",
+                "outcome": "stale-draft naming the first differing part", "kind": "literal",
+                "observable": true, "fixed_oracle": true, "version": 1}]});
+        append(
+            &store,
+            R4,
+            T4,
+            vec![on_roadmap(STORY_REFINED, STORY_REFINED_VERSION, refined)],
+        );
+
+        let states =
+            |store: &baley_store_sqlite::SqliteStore| -> Vec<(u32, String, Option<u32>, u64)> {
+                backlog(store, &project())
+                    .unwrap()
+                    .into_iter()
+                    .map(|story| (story.id, story.refinement, story.round, story.truths))
+                    .collect()
+            };
+        assert_eq!(
+            states(&store),
+            [
+                (1, text("questions-open"), Some(1), 0),
+                (2, text("refined"), None, 1),
+                (3, text("unrefined"), None, 0),
+            ]
+        );
+
+        let answered = answered_payload(&first, "q1", 1, "SQLite", true, "Ada Owner", T6);
+        append(
+            &store,
+            R6,
+            T6,
+            vec![on_roadmap(
+                QUESTION_ANSWERED,
+                QUESTION_ANSWERED_VERSION,
+                answered,
+            )],
+        );
+        assert_eq!(states(&store)[0], (1, text("questions-open"), Some(2), 0));
+    }
+
+    #[test]
+    fn a_backlog_read_across_a_replaced_set_answered_unreadable_or_a_missing_set_read_again_is_caught()
+     {
+        use serde_json::json;
+
+        const S1: &str = "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+        let backlog = || -> BacklogDocument {
+            serde_json::from_value(json!({"stories": [
+                {"id": 1, "sentence": "Every step is recorded", "status": "active", "phase": 1,
+                    "set": S1, "refined": null, "truths": 0, "size": null},
+                {"id": 2, "sentence": "The owner approves scope", "status": "active",
+                    "phase": 2, "set": null, "refined": null, "truths": 0, "size": null}
+            ]}))
+            .unwrap()
+        };
+        let set = |abandoned: Value| {
+            json!({"questions": [{"id": "q1", "question": "Which store backs the ledger?",
+                "recommended": "SQLite", "depends_on": []}],
+                "answers": [], "deferrals": [], "abandoned": abandoned})
+        };
+        let superseded = json!({"cause": "superseded", "at": T4});
+
+        // Set S1 replaced between the reads: the backlog moved, read again.
+        assert_eq!(
+            backlog_of(backlog(), vec![Some(set(superseded))]),
+            Ok(BacklogPair::Moved)
+        );
+        assert_eq!(
+            backlog_of(backlog(), vec![Some(set(Value::Null))]),
+            Ok(BacklogPair::Agreed(vec![
+                BacklogStory {
+                    id: 1,
+                    sentence: text("Every step is recorded"),
+                    status: text("active"),
+                    phase: Some(1),
+                    refinement: text("questions-open"),
+                    round: Some(1),
+                    truths: 0,
+                    size: None,
+                },
+                BacklogStory {
+                    id: 2,
+                    sentence: text("The owner approves scope"),
+                    status: text("active"),
+                    phase: Some(2),
+                    refinement: text("unrefined"),
+                    round: None,
+                    truths: 0,
+                    size: None,
+                },
+            ]))
+        );
+        // A set the backlog names is held by the same transaction, so its
+        // absence is a fault, never a reason to read again.
+        assert_eq!(
+            backlog_of(backlog(), vec![None]),
+            Err(ReadError::Unreadable(text(
+                "the questions view document cannot be read"
+            )))
         );
     }
 }

@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use crate::envelope::Refusal;
 use crate::help::front_door;
 
+pub mod analyzer;
 pub mod capture;
+pub mod context;
 pub mod read_contract;
 pub mod rounds;
 pub mod scope;
@@ -115,11 +117,16 @@ pub static ENTRIES: &[Entry] = &[
             body: scope::BACKLOG_TEXT,
         }),
     },
-    // Build 4 adds this text beside its operations.
+    // Build 4 serves the context front door beside `story-refine`,
+    // `story-questions-submit`, `context-submit` and the refinement read.
     Entry {
-        identity: "bal-context",
+        identity: context::IDENTITY,
         build: 4,
-        text: None,
+        text: Some(Text {
+            version: context::VERSION,
+            hash: context::HASH,
+            body: context::TEXT,
+        }),
     },
     // Build 4 adds this text beside its operations.
     Entry {
@@ -290,6 +297,28 @@ pub static ENTRIES: &[Entry] = &[
             version: rounds::VERSION,
             hash: rounds::HASH,
             body: rounds::TEXT,
+        }),
+    },
+    // Build 4 serves the analyzer's questions text inside a story's questions
+    // order, never as a help row.
+    Entry {
+        identity: analyzer::QUESTIONS_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: analyzer::QUESTIONS_VERSION,
+            hash: analyzer::QUESTIONS_HASH,
+            body: analyzer::QUESTIONS_TEXT,
+        }),
+    },
+    // Build 4 serves the analyzer's drafting text inside a story's drafting
+    // order, never as a help row.
+    Entry {
+        identity: analyzer::DRAFTING_IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: analyzer::DRAFTING_VERSION,
+            hash: analyzer::DRAFTING_HASH,
+            body: analyzer::DRAFTING_TEXT,
         }),
     },
 ];

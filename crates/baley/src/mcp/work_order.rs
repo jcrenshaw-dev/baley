@@ -21,7 +21,7 @@ use baley_core::policy::{AcceptedNames, CONFIG_UNAVAILABLE, EffectivePolicy, Hos
 use baley_core::work_order::{
     ANSWERED, MATERIAL_UNAVAILABLE, NO_SUCH_WORK_ORDER, PENDING, Retry, RetryRefusal,
     START_ORDER_PENDING, START_SUBJECT, WORK_ORDER_NOT_FAILED, WORK_ORDER_NOT_PENDING,
-    WORK_ORDER_RETRIED, WORK_ORDER_VIEW, judge_retry, work_order_key,
+    WORK_ORDER_RETRIED, WORK_ORDER_VIEW, judge_retry, subject_story, work_order_key,
 };
 use baley_store::{
     Absence, Command, CommandKind, Document, Hash, InstructionEvidence, Ledger, ObservedDocument,
@@ -44,6 +44,9 @@ use crate::mcp::prepare::{
     prepare_checked, prepare_settings_read,
 };
 use crate::process::Process;
+use crate::refine::order::{
+    analyzer_absences, analyzer_order_pending, pending_analyzer, refinement_state,
+};
 use crate::scope::submit::{NOT_RECORDED_BUSY, start_once};
 use crate::work_order::fail::{self, Pending};
 use crate::work_order::issue::{self, Input, Issue, start_absences};
@@ -364,7 +367,10 @@ fn existing_code(
 /// The caller a start is prepared under: `caller` with `instruction`'s
 /// evidence attached, or as it is when the session named none, as `capture`
 /// attaches it, so every event of the call carries it.
-fn evidenced(caller: &ServerCaller, instruction: Option<&InstructionEvidence>) -> ServerCaller {
+pub(crate) fn evidenced(
+    caller: &ServerCaller,
+    instruction: Option<&InstructionEvidence>,
+) -> ServerCaller {
     match instruction {
         None => caller.clone(),
         Some(evidence) => caller
@@ -665,8 +671,9 @@ pub struct CheckedRetry {
     pub retry: Retry,
     /// The identities of the parent's instructions, in order.
     pub instructions: Vec<String>,
-    /// The parent's document and each earlier attempt's, at the sequence that
-    /// last produced each.
+    /// The parent's document and each earlier attempt's, and for an analyzer
+    /// order the documents its story's refinement state was read from, at the
+    /// sequence that last produced each.
     pub documents: Vec<ObservedDocument>,
     /// The `retention` stream's version the releases were read up to.
     pub retention: u64,
@@ -682,7 +689,12 @@ pub struct CheckedRetry {
 /// 1). A start order is then refused `project-already-started` once a start
 /// is approved, as project start is (D-19), and `start-order-pending` while
 /// another start order is pending, so a project keeps one live start order
-/// (D-02).
+/// (D-02). A story's analyzer order is refused `analyzer-order-pending`
+/// while another analyzer order of the story is pending, so a story keeps one
+/// live analyzer order (D-09), and then `question-open` while a question of
+/// the story's latest set is open, as `story-refine` is, so a retried order
+/// neither drafts before the owner decided nor returns questions that would
+/// abandon an open set.
 pub fn retry_check<S: Ledger + Views + ?Sized>(
     store: &S,
     project: &ProjectId,
@@ -724,6 +736,20 @@ pub fn retry_check<S: Ledger + Views + ?Sized>(
             .value());
         }
     }
+    if let Some(story) = analyzer_story(&retry) {
+        let pending = pending_analyzer(store, project, story)
+            .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?;
+        if let Some(order) = pending {
+            return Err(analyzer_order_pending(
+                story,
+                &order,
+                &format!("so no retry of {id} was issued"),
+            ));
+        }
+        // The issue observes what the state was read from, so a set opened
+        // since the check makes it `ledger-busy`.
+        documents.extend(refinement_state(store, project, story)?.documents);
+    }
     let instructions = match parent.body.get("instructions") {
         Some(Value::Array(listed)) => listed
             .iter()
@@ -748,6 +774,13 @@ pub fn retry_check<S: Ledger + Views + ?Sized>(
 /// Whether `retry` re-issues the start planner's order.
 fn is_start(retry: &Retry) -> bool {
     retry.role == Role::Planner && retry.subject == START_SUBJECT
+}
+
+/// The story whose analyzer order `retry` re-issues, if it is one.
+fn analyzer_story(retry: &Retry) -> Option<u32> {
+    (retry.role == Role::Analyzer)
+        .then(|| subject_story(&retry.subject))
+        .flatten()
 }
 
 /// Order `id`'s document as a decision observes it.
@@ -826,7 +859,8 @@ fn retry_refused(id: &str, refusal: RetryRefusal) -> Value {
 /// purge landing since makes the call `ledger-busy` with nothing recorded. A
 /// retried start order also declares a start order's two absences, no
 /// pending start order and no start approval, so a start approved since the
-/// check makes it `ledger-busy` too.
+/// check makes it `ledger-busy` too, and a retried analyzer order declares no
+/// pending analyzer order of its story, so one issued since does the same.
 pub fn issue_retry(
     store: &SqliteStore,
     command: &Command,
@@ -859,6 +893,8 @@ pub fn issue_retry(
     let inputs: Vec<Input<'_>> = retry.inputs.iter().map(Input::Held).collect();
     let absences: Vec<Absence> = if is_start(retry) {
         start_absences()
+    } else if let Some(story) = analyzer_story(retry) {
+        analyzer_absences(story)
     } else {
         Vec::new()
     };
@@ -1142,7 +1178,9 @@ pub(crate) fn judge_order_id(id: &str) -> Result<(), Value> {
 }
 
 /// The registry's evidence for the instruction a session named, if any.
-fn judge_instruction(identity: Option<&str>) -> Result<Option<InstructionEvidence>, Value> {
+pub(crate) fn judge_instruction(
+    identity: Option<&str>,
+) -> Result<Option<InstructionEvidence>, Value> {
     match identity.map(crate::instruction::evidence) {
         None => Ok(None),
         Some(Ok(evidence)) => Ok(Some(evidence)),
@@ -2018,5 +2056,115 @@ pub(crate) mod tests {
             route_query(json!({"work_order": I0})),
             Ok(RouteQuery::WorkOrder(I0.into()))
         );
+    }
+
+    /// Story 1's questions order `id`, issued through the refine check and
+    /// issue with its three inputs and then failed, in a store holding S1,
+    /// approved.
+    fn failed_analyzer(id: &str) -> (tempfile::TempDir, SqliteStore) {
+        use crate::refine::order::check;
+        use crate::refine::order::tests::{approved, issue_checked};
+        use crate::scope::fixtures::*;
+
+        let (dir, store) = approved();
+        let checked = check(&store, &project(), 1).unwrap();
+        let issued = issue_checked(&store, &checked, id, R1, T1);
+        assert_eq!(issued["status"], "ok", "{issued}");
+        fail_order(&store, &project(), id, R2, T2);
+        (dir, store)
+    }
+
+    #[test]
+    fn an_analyzer_retry_beside_a_live_order_of_its_story_is_caught() {
+        use crate::refine::order::tests::issue_by_hand;
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = failed_analyzer(I0);
+        issue_by_hand(&store, I1, 1, R3);
+        let before = head(&store);
+        let refusal = retry_check(&store, &project(), I0).unwrap_err();
+        assert_refused(
+            &refusal,
+            "analyzer-order-pending",
+            "operation",
+            &json!({"work_order": I1}),
+        );
+        assert_eq!(head(&store), before);
+    }
+
+    #[test]
+    fn an_analyzer_retry_racing_a_new_order_is_caught() {
+        use crate::refine::order::tests::issue_by_hand;
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = failed_analyzer(I0);
+        let checked = retry_check(&store, &project(), I0).expect("no other order is pending");
+        issue_by_hand(&store, I1, 1, R3);
+        let before = head(&store);
+        let command = command_in(&project(), RETRY_COMMAND, R4, 5, T4);
+        let answer = issue_retry(
+            &store,
+            &command,
+            &checked,
+            &policy(None, ""),
+            Host::ClaudeCode,
+            &no_names(),
+            I2,
+        );
+        assert_eq!(answer["status"], "failed", "{answer}");
+        assert_eq!(answer["code"], "ledger-busy", "{answer}");
+        assert_eq!(head(&store), before);
+        assert_eq!(held(&store, &project(), I2), None);
+    }
+
+    #[test]
+    fn an_analyzer_retry_losing_its_story_or_inputs_is_caught() {
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = failed_analyzer(I0);
+        let answer = retry_in(&store, &project(), I0, I2, R4, T4, "");
+        assert_eq!(answer["status"], "ok", "{answer}");
+        let events = history(&store);
+        let issued = of_type(&events, "work_order.issued");
+        let (first, retry) = (issued[0], issued[issued.len() - 1]);
+        assert_eq!(retry.payload["id"], I2);
+        assert_eq!(retry.stream, "roadmap");
+        assert_eq!(retry.payload["subject"], "story/1");
+        assert_eq!(retry.payload["parent"], I0);
+        assert_eq!(retry.payload["attempt"], 2);
+        assert_eq!(retry.payload["inputs"], first.payload["inputs"]);
+    }
+
+    #[test]
+    fn an_analyzer_retry_over_an_open_set_is_caught() {
+        use baley_core::questions::judge_set;
+
+        use crate::questions::record::tests::{open_set, q1, story};
+        use crate::refine::order::check;
+        use crate::refine::order::tests::{answer_by_hand, approved, issue_checked};
+        use crate::scope::fixtures::*;
+
+        let (_dir, store) = approved();
+        let first = open_set(&store, R1, &q1(), &story(1));
+        answer_by_hand(&store, &first, "q1", 1, R2);
+        answer_by_hand(&store, &first, "q2", 2, R3);
+        let checked = check(&store, &project(), 1).unwrap();
+        let drafting = issue_checked(&store, &checked, I3, R4, T4);
+        assert_eq!(drafting["analyzer"], "drafting", "{drafting}");
+        fail_order(&store, &project(), I3, R6, T5);
+        let q3 = judge_set(&json!([{"id": "q3", "question": "Who reads the ledger?",
+            "recommended": "The owner", "depends_on": []}]))
+        .unwrap();
+        let later = open_set(&store, R7, &q3, &story(1));
+
+        let before = head(&store);
+        let refusal = retry_check(&store, &project(), I3).unwrap_err();
+        assert_refused(
+            &refusal,
+            "question-open",
+            "operation",
+            &json!({"set": later, "question": "q3"}),
+        );
+        assert_eq!(head(&store), before);
     }
 }

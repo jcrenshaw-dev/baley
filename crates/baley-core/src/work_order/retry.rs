@@ -35,8 +35,14 @@ pub const MATERIAL_UNAVAILABLE: &str = "material-unavailable";
 /// The code of a start made while a start planner order is pending; it names
 /// that order.
 pub const START_ORDER_PENDING: &str = "start-order-pending";
+/// The code of a story refined, or an analyzer order of a story retried,
+/// while another analyzer order of that story is pending; it names the
+/// pending order, since a story has one live analyzer order.
+pub const ANALYZER_ORDER_PENDING: &str = "analyzer-order-pending";
 /// The code of a submission naming an order that is not this project's
-/// start planner order.
+/// start planner order, or, for a story's questions or truths, not the
+/// story's analyzer order of the kind the call answers: its questions order
+/// for its questions, its drafting order for its truths (D-20).
 pub const WRONG_WORK_ORDER: &str = "wrong-work-order";
 
 /// What a retry re-issues.

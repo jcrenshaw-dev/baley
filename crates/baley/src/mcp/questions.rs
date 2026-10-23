@@ -9,23 +9,35 @@
 //! same library function `baley questions answer` calls. The command is
 //! Baley's with the session as its caller: over MCP Baley cannot tell
 //! whether the owner gave the answer, so the record does not claim it, and
-//! the owner's name travels in each event's payload.
+//! the owner's name travels in each event's payload. A call that closes a
+//! story's set also issues the analyzer's drafting order with the answers
+//! (D-08), which `baley questions answer` never does (ADR 0044).
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 
-use baley_core::questions::{Call, judge_call};
-use baley_store::{CommandKind, ProjectId, RequestId, request_digest};
+use baley_core::policy::{AcceptedNames, EffectivePolicy, Host};
+use baley_core::questions::{Call, SetFacts, judge_call};
+use baley_core::work_order::WORK_ORDER_VIEW;
+use baley_store::{
+    Command, CommandKind, Ledger, ObservedDocument, Payloads, ProjectId, RequestId, Views,
+    request_digest,
+};
 use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::envelope::Refusal;
+use crate::mcp::capture::store_failed;
 use crate::mcp::handler::Preparation;
 use crate::mcp::prepare::WriteRequest;
 use crate::mcp::work_order::{judge_request_id, prepared_write, shape_fault};
 use crate::providers::identity::{self, OWNER_IDENTITY_MISSING};
-use crate::questions::answer::{self, ANSWER_COMMAND};
+use crate::questions::answer::{self, ANSWER_COMMAND, Drafting};
+use crate::refine::order::{pending_analyzer_order, prepare_drafting};
+use crate::scope::submit::NOT_RECORDED_BUSY;
+use crate::work_order::route::host_names;
 
 // `schema` serves this same declaration, so its doc comments are wire text.
 /// The arguments `questions-answer` takes beside its `operation`. Unknown
@@ -98,12 +110,124 @@ pub fn judge_arguments(arguments: &Value) -> Result<JudgedAnswer, Value> {
     })
 }
 
+/// What a relayed answer call's check read: the answer check's read of the
+/// set and, for a story's set, the story's pending analyzer order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Relayed {
+    /// The answer check's read.
+    pub checked: answer::Checked,
+    /// The `work_order` document of the set's story's analyzer order pending
+    /// at the check, at the sequence that produced it, or none.
+    pub pending: Option<ObservedDocument>,
+}
+
+impl Relayed {
+    /// The story and its set's facts after the call when the call, recorded
+    /// by `owner` at `at`, closes a story's set and no analyzer order of the
+    /// story was pending at the check: the call then issues the drafting
+    /// order (D-08). None otherwise: a pending order keeps the story's one
+    /// live analyzer order (D-09), which the session's next `story-refine`
+    /// follows once it is settled, and a plan draft's set gets T9's outputs.
+    pub(crate) fn closing(&self, owner: &str, at: &str) -> Option<(u32, SetFacts)> {
+        let story = self.checked.story?;
+        if self.pending.is_some() {
+            return None;
+        }
+        Some((story, self.checked.closed_facts(owner, at)?))
+    }
+
+    /// The pending analyzer order's document when the call, recorded by
+    /// `owner` at `at`, closes a story's set beside it, so that order alone
+    /// keeps the call from issuing the drafting order. None otherwise.
+    fn held_by(&self, owner: &str, at: &str) -> Option<&ObservedDocument> {
+        self.checked.story?;
+        self.checked.closed_facts(owner, at)?;
+        self.pending.as_ref()
+    }
+}
+
+/// A relayed answer call's check, run before admission and recording
+/// nothing: the answer check, then for a story's set the story's pending
+/// analyzer order with the document it was read from. A refusal or a read
+/// fault is the answer to give.
+pub(crate) fn relay_check<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    set: &str,
+    call: &Call,
+) -> Result<Relayed, Value> {
+    let checked = answer::check(store, project, set, call)?;
+    let pending = match checked.story {
+        Some(story) => pending_analyzer_order(store, project, story)
+            .map_err(|error| store_failed(&error, NOT_RECORDED_BUSY))?
+            .map(|document| ObservedDocument {
+                view: WORK_ORDER_VIEW.into(),
+                key: document.key,
+                produced_seq: Some(document.produced_seq),
+            }),
+        None => None,
+    };
+    Ok(Relayed { checked, pending })
+}
+
+/// Records a relayed call `relayed` under `command` as `owner` once the write
+/// is prepared. When the call closes a story's set with no analyzer order of
+/// the story pending, the drafting order is prepared as `drafting_id` under
+/// `policy`, the write's effective policy, for `host` with the catalog
+/// `names`, its `questions` input holding the set's answers and deferrals
+/// with this call's own, and is issued with the answers. When a pending
+/// analyzer order held the drafting order back, the recording observes that
+/// order's document, so an order settled since the check makes the call
+/// `ledger-busy` and the session's retry checks again. The answer is the
+/// receipt, or why nothing was recorded.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn relay_record<S: Ledger + Views + Payloads>(
+    store: &S,
+    command: &Command,
+    owner: &str,
+    relayed: &Relayed,
+    policy: &EffectivePolicy,
+    host: Host,
+    names: &AcceptedNames,
+    drafting_id: &str,
+) -> Value {
+    let at = &command.recorded_at;
+    let prepared = match relayed.closing(owner, at) {
+        Some((story, facts)) => {
+            match prepare_drafting(
+                store,
+                command,
+                story,
+                &facts,
+                policy,
+                host,
+                names,
+                drafting_id,
+            ) {
+                Ok(prepared) => Some(prepared),
+                Err(answer) => return answer,
+            }
+        }
+        None => None,
+    };
+    let drafting = match (&prepared, relayed.held_by(owner, at)) {
+        (Some(order), _) => Drafting::Issue(order),
+        (None, Some(pending)) => Drafting::HeldBy(pending),
+        (None, None) => Drafting::None,
+    };
+    answer::answer(
+        answer::record(store, command, owner, Some(&relayed.checked), drafting),
+        store,
+    )
+}
+
 /// Serves one `questions-answer` call for the session's `preparation`. The
 /// arguments are judged first; then the write is prepared under the
-/// session's caller with the answer check as its own check; then the owner
+/// session's caller with the relayed check as its own check; then the owner
 /// is read from the write's policy, falling back to git's `user.name`, and
-/// the call is recorded over the set the check read. A replay goes to the
-/// recording with no read, and the store answers it from its record.
+/// the call is recorded over the set the check read, with the drafting order
+/// when it closes a story's set (D-08). A replay goes to the recording with
+/// no read, and the store answers it from its record.
 pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
     let judged = match judge_arguments(arguments) {
         Ok(judged) => judged,
@@ -112,7 +236,7 @@ pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
     // Kept for the recording to observe. A replay skips the check.
     let kept = RefCell::new(None);
     let check = |store: &SqliteStore, project: &ProjectId| {
-        *kept.borrow_mut() = Some(answer::check(store, project, &judged.set, &judged.call)?);
+        *kept.borrow_mut() = Some(relay_check(store, project, &judged.set, &judged.call)?);
         Ok(())
     };
     let (store, command, stepped) =
@@ -120,21 +244,43 @@ pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
             Ok(prepared) => prepared,
             Err(answer) => return answer,
         };
+    let kept = kept.borrow();
     // A replay ran no steps and is answered from its record, so it needs no
     // owner.
-    let owner = match stepped {
-        Some(stepped) => match identity::owner(
-            identity::owner_name(&stepped.policy),
-            &mut crate::process::System,
-        ) {
-            Ok(owner) => owner,
-            Err(reason) => return Refusal::new(OWNER_IDENTITY_MISSING, reason).value(),
-        },
-        None => String::new(),
+    let (Some(stepped), Some(relayed)) = (stepped, kept.as_ref()) else {
+        return answer::answer(
+            answer::record(store, &command, "", None, Drafting::None),
+            store,
+        );
     };
-    answer::answer(
-        answer::record(store, &command, &owner, kept.borrow().as_ref()),
+    let owner = match identity::owner(
+        identity::owner_name(&stepped.policy),
+        &mut crate::process::System,
+    ) {
+        Ok(owner) => owner,
+        Err(reason) => return Refusal::new(OWNER_IDENTITY_MISSING, reason).value(),
+    };
+    // The catalog is read only for a drafting order, and unused otherwise.
+    let names = if relayed.closing(&owner, &command.recorded_at).is_some() {
+        match host_names(store, preparation.host) {
+            Ok(names) => names,
+            Err(error) => return store_failed(&error, NOT_RECORDED_BUSY),
+        }
+    } else {
+        AcceptedNames {
+            names: BTreeSet::new(),
+            version: 0,
+        }
+    };
+    relay_record(
         store,
+        &command,
+        &owner,
+        relayed,
+        &stepped.policy,
+        preparation.host,
+        &names,
+        &uuid::Uuid::new_v4().to_string(),
     )
 }
 
