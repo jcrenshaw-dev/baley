@@ -162,6 +162,11 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "1",
         "8cfeef1bdc7915b39f5cbe2002a89db30e2a333b678af2dc468cde794bac0810",
     ),
+    (
+        "bal-help",
+        "3",
+        "31ecd5654bebed4db300e611dc9bb8dfa4cd2993c79e251bef681ed6495e3f5a",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {

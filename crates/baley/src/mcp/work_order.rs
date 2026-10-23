@@ -364,7 +364,10 @@ fn existing_code(
 /// The caller a start is prepared under: `caller` with `instruction`'s
 /// evidence attached, or as it is when the session named none, as `capture`
 /// attaches it, so every event of the call carries it.
-fn evidenced(caller: &ServerCaller, instruction: Option<&InstructionEvidence>) -> ServerCaller {
+pub(crate) fn evidenced(
+    caller: &ServerCaller,
+    instruction: Option<&InstructionEvidence>,
+) -> ServerCaller {
     match instruction {
         None => caller.clone(),
         Some(evidence) => caller
@@ -1142,7 +1145,9 @@ pub(crate) fn judge_order_id(id: &str) -> Result<(), Value> {
 }
 
 /// The registry's evidence for the instruction a session named, if any.
-fn judge_instruction(identity: Option<&str>) -> Result<Option<InstructionEvidence>, Value> {
+pub(crate) fn judge_instruction(
+    identity: Option<&str>,
+) -> Result<Option<InstructionEvidence>, Value> {
     match identity.map(crate::instruction::evidence) {
         None => Ok(None),
         Some(Ok(evidence)) => Ok(Some(evidence)),
