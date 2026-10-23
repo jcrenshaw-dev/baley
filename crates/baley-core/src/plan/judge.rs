@@ -4,16 +4,17 @@
 //! A plan arrives as plain JSON and the phase's facts as plain values the
 //! binary gathered from its views. The plan is judged in one fixed order,
 //! the first fault answering, so one plan always gets one answer: (1) the
-//! plan's own members, task by task within `tasks`; (2) the `questions`
-//! member through the question set judge; (3) each task file inside the
-//! lease. The judge trusts the facts and judges the plan.
-//! Nothing here records anything.
+//! plan's own members, task by task within `tasks` and item by item within
+//! `evidence_map`; (2) the `questions` member through the question set
+//! judge; (3) each task file inside the lease. The judge trusts the facts
+//! and judges the plan. Nothing here records anything.
 
 use std::num::NonZeroU32;
 
 use serde_json::Value;
 
 use super::content;
+use super::evidence::EvidenceItem;
 use super::task::{self, Task};
 use crate::questions::{QuestionSet, SetRefusal};
 
@@ -148,7 +149,7 @@ pub struct Plan {
     pub(super) context: String,
     pub(super) notes: String,
     pub(super) tasks: Vec<Task>,
-    pub(super) evidence_map: Vec<Value>,
+    pub(super) evidence_map: Vec<EvidenceItem>,
     pub(super) questions: QuestionSet,
 }
 
@@ -194,7 +195,7 @@ impl Plan {
     }
 
     /// The evidence items, in submitted order.
-    pub fn evidence_map(&self) -> &[Value] {
+    pub fn evidence_map(&self) -> &[EvidenceItem] {
         &self.evidence_map
     }
 

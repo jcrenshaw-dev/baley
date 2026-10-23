@@ -7,12 +7,16 @@
 //! value it judges.
 
 mod content;
+mod evidence;
 #[cfg(test)]
 mod fixtures;
 mod judge;
 mod lease;
 mod task;
 
+pub use evidence::{
+    Artifact, Check, CheckTest, EvidenceItem, Expected, Level, Link, Observation, Spec,
+};
 pub use judge::{
     ApprovedItem, CommittedStory, CurrentTruth, EvidenceKind, LEASE, Plan, PlanFacts, PlanRefusal,
     TYPED_CONTENT, judge_plan,

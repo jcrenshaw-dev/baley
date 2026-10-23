@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use serde_json::{Map, Value};
 
 use super::judge::{Plan, PlanRefusal};
-use super::{lease, task};
+use super::{evidence, lease, task};
 use crate::questions::judge_set;
 
 /// The plan's members, in the order they are judged. The plan number, the
@@ -57,7 +57,7 @@ pub(super) fn read(value: &Value) -> Result<Plan, PlanRefusal> {
     let context = text(plan, "context")?;
     let notes = text(plan, "notes")?;
     let tasks = task::read(list(plan, "tasks")?)?;
-    let evidence_map = list(plan, "evidence_map")?.clone();
+    let evidence_map = evidence::read(list(plan, "evidence_map")?)?;
     let questions = plan
         .get("questions")
         .ok_or_else(|| PlanRefusal::typed("questions"))?;
@@ -91,9 +91,10 @@ pub(super) fn first_unknown<'a>(
         .min()
 }
 
-/// A whole number from 1 to `u32::MAX`, as phase and story counters run,
+/// A whole number from 1 to `u32::MAX`, as phase, story and version
+/// counters run,
 /// or `None` when the value is missing or anything else.
-fn counter(value: Option<&Value>) -> Option<u32> {
+pub(super) fn counter(value: Option<&Value>) -> Option<u32> {
     value
         .and_then(Value::as_u64)
         .filter(|number| *number >= 1)
