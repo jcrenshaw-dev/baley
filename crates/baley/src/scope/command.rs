@@ -7,8 +7,9 @@
 //! story show` print what the ledger holds through the same reads as
 //! `document`, recording nothing. Declarations, edits and `project describe`
 //! come only from a session, since an agent drafts their text. `baley story
-//! truths approve <digest>` is `refine::command`'s, which approves a story's
-//! truth draft as `scope approve` approves a scope draft.
+//! truths approve <digest>` and `baley story refinement <id>` are
+//! `refine::command`'s: the first approves a story's truth draft as `scope
+//! approve` approves a scope draft, the second prints a story's refinement.
 //!
 //! Gathering finds the project and opens the ledger; judging, the arguments,
 //! the commands an approval or a submission is recorded under and what is
@@ -167,6 +168,13 @@ pub(crate) enum StoryCommand {
         #[arg(value_name = "ID")]
         id: String,
     },
+    /// Print a story's refinement: the approved description, the story and
+    /// the phase it is committed to, and its truths with every version.
+    Refinement {
+        /// The story id Baley assigned at approval.
+        #[arg(value_name = "ID")]
+        id: String,
+    },
     /// Approve a story's drafted truths.
     Truths(crate::refine::command::TruthsArgs),
 }
@@ -219,6 +227,7 @@ pub fn run_story(args: StoryArgs) -> ExitCode {
             submit_change(&ChangeWords::StoryReassign { story: id, to })
         }
         StoryCommand::Drop { id } => submit_change(&ChangeWords::StoryDrop(id)),
+        StoryCommand::Refinement { id } => crate::refine::command::refinement(&id),
         StoryCommand::Truths(args) => crate::refine::command::run(args),
     })
 }
@@ -985,7 +994,12 @@ pub(crate) fn story_render(read: Result<Story, ReadError>) -> Render {
 }
 
 /// The description's lines, as both the preview and the roadmap print them.
-fn describe(lines: &mut Vec<String>, what: &str, core_value: &str, constraints: &[String]) {
+pub(crate) fn describe(
+    lines: &mut Vec<String>,
+    what: &str,
+    core_value: &str,
+    constraints: &[String],
+) {
     lines.push(format!("what: {}", escaped(what)));
     lines.push(format!("core value: {}", escaped(core_value)));
     for constraint in constraints {
@@ -1011,7 +1025,7 @@ fn or_none(items: Vec<String>) -> String {
     }
 }
 
-fn printed(lines: Vec<String>) -> Render {
+pub(crate) fn printed(lines: Vec<String>) -> Render {
     Render {
         lines,
         code: 0,
@@ -1030,7 +1044,7 @@ fn unavailable(reason: &str) -> Render {
 
 /// Why accepted scope could not be read: a missing phase or story is a
 /// refusal, exit 2; a body no longer held or a broken record is exit 1.
-fn read_error(error: ReadError) -> Render {
+pub(crate) fn read_error(error: ReadError) -> Render {
     match error {
         ReadError::NoSuchPhase => {
             Render::refusal(format!("{NO_SUCH_PHASE}: this project has no such phase"))
