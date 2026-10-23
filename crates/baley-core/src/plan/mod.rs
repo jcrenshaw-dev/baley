@@ -18,8 +18,8 @@ pub use evidence::{
     Artifact, Check, CheckTest, EvidenceItem, Expected, Level, Link, Observation, Spec,
 };
 pub use judge::{
-    ApprovedItem, CommittedStory, CurrentTruth, EvidenceKind, LEASE, Plan, PlanFacts, PlanRefusal,
-    TYPED_CONTENT, judge_plan,
+    ApprovedItem, CHECK_BOUNDARY, CHECK_COMMAND, CHECK_EXPECTED, CHECK_TEST_FILE, CommittedStory,
+    CurrentTruth, EvidenceKind, LEASE, Plan, PlanFacts, PlanRefusal, TYPED_CONTENT, judge_plan,
 };
 pub use lease::{inside_lease, plain_relative_path};
 pub use task::Task;

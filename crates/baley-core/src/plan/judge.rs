@@ -6,15 +6,16 @@
 //! the first fault answering, so one plan always gets one answer: (1) the
 //! plan's own members, task by task within `tasks` and item by item within
 //! `evidence_map`; (2) the `questions` member through the question set
-//! judge; (3) each task file inside the lease. The judge trusts the facts
-//! and judges the plan. Nothing here records anything.
+//! judge; (3) each task file inside the lease; (4) no check field with a
+//! code blank. The judge trusts the facts and judges the plan. Nothing here
+//! records anything.
 
 use std::num::NonZeroU32;
 
 use serde_json::Value;
 
 use super::content;
-use super::evidence::EvidenceItem;
+use super::evidence::{self, EvidenceItem};
 use super::task::{self, Task};
 use crate::questions::{QuestionSet, SetRefusal};
 
@@ -24,6 +25,15 @@ use crate::questions::{QuestionSet, SetRefusal};
 pub const TYPED_CONTENT: &str = "typed-content";
 /// The refusal code for a task naming a file outside the plan's lease.
 pub const LEASE: &str = "lease";
+/// The refusal code for a check whose command is blank.
+pub const CHECK_COMMAND: &str = "check-command";
+/// The refusal code for a check whose expected value is blank.
+pub const CHECK_EXPECTED: &str = "check-expected";
+/// The refusal code for a check whose test file is blank.
+pub const CHECK_TEST_FILE: &str = "check-test-file";
+/// The refusal code for a check whose boundary is blank, at either level
+/// (D-07).
+pub const CHECK_BOUNDARY: &str = "check-boundary";
 
 /// Why a plan is refused. Positions count from 0 in the list as submitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +52,15 @@ pub enum PlanRefusal {
     /// The question set judge refused the `questions` member: its refusal
     /// unchanged, positions counting within `questions` (D-10).
     Questions(SetRefusal),
+    /// The check at `position`, whose id is `id`, has a blank command.
+    CheckCommand { position: usize, id: String },
+    /// The check at `position`, whose id is `id`, has a blank expected
+    /// value.
+    CheckExpected { position: usize, id: String },
+    /// The check at `position`, whose id is `id`, has a blank test file.
+    CheckTestFile { position: usize, id: String },
+    /// The check at `position`, whose id is `id`, has a blank boundary.
+    CheckBoundary { position: usize, id: String },
 }
 
 impl PlanRefusal {
@@ -51,6 +70,10 @@ impl PlanRefusal {
             Self::TypedContent { .. } => TYPED_CONTENT,
             Self::Lease { .. } => LEASE,
             Self::Questions(refusal) => refusal.code(),
+            Self::CheckCommand { .. } => CHECK_COMMAND,
+            Self::CheckExpected { .. } => CHECK_EXPECTED,
+            Self::CheckTestFile { .. } => CHECK_TEST_FILE,
+            Self::CheckBoundary { .. } => CHECK_BOUNDARY,
         }
     }
 
@@ -213,10 +236,11 @@ impl Plan {
 /// Judges the submitted plan `plan` against the phase's `facts` in the
 /// fixed order, the first fault answering: (1) the plan's own members;
 /// (2) the `questions` member through `judge_set`; (3) `lease`, task by
-/// task and file by file.
+/// task and file by file; (4) the blank check fields, item by item.
 pub fn judge_plan(plan: &Value, _facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
     let plan = content::read(plan)?;
     task::within_lease(&plan.tasks, &plan.files, &plan.directories)?;
+    evidence::blank_fields(&plan.evidence_map)?;
     Ok(plan)
 }
 

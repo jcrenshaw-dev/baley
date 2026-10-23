@@ -166,6 +166,34 @@ pub(super) fn read(items: &[Value]) -> Result<Vec<EvidenceItem>, PlanRefusal> {
         .collect()
 }
 
+/// Step (4): the first check, in submitted order, with a blank command,
+/// expected value, test file or boundary, judged in that field order at
+/// either level (PLN-R13, D-07). A blank setup, call or test function has
+/// no code and is accepted.
+pub(super) fn blank_fields(items: &[EvidenceItem]) -> Result<(), PlanRefusal> {
+    let blank = |text: &str| text.trim().is_empty();
+    for (position, item) in items.iter().enumerate() {
+        let Spec::Check(check) = &item.spec else {
+            continue;
+        };
+        let id = item.id.clone();
+        let (Expected::Literal(expected) | Expected::Property(expected)) = &check.expected;
+        if blank(&check.command) {
+            return Err(PlanRefusal::CheckCommand { position, id });
+        }
+        if blank(expected) {
+            return Err(PlanRefusal::CheckExpected { position, id });
+        }
+        if blank(&check.test.file) {
+            return Err(PlanRefusal::CheckTestFile { position, id });
+        }
+        if blank(&check.boundary) {
+            return Err(PlanRefusal::CheckBoundary { position, id });
+        }
+    }
+    Ok(())
+}
+
 /// One item read: an unknown member first, the first by name, then each
 /// member in order.
 fn item(
@@ -332,6 +360,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::plan::PlanRefusal;
     use crate::plan::fixtures::{accepted, ar, f1, l1, p1, refusal, typed, with, without};
 
     /// P1 with member `member` of the object at `pointer` within C1 set to
@@ -471,5 +500,142 @@ mod tests {
             json!({"what": "every task title", "who": "the owner"}),
         );
         assert_eq!(refusal(&o1_with, &facts), typed("evidence_map[2].spec.who"));
+    }
+
+    /// P1 with member `member` of the object at `pointer` within the item
+    /// at `at` set to `to`.
+    fn item_with(at: usize, pointer: &str, member: &str, to: Value) -> Value {
+        with(p1(), &format!("/evidence_map/{at}{pointer}"), member, to)
+    }
+
+    #[test]
+    fn a_check_without_a_level_or_with_a_blank_field_accepted_or_refused_under_another_code_is_caught()
+     {
+        let facts = f1();
+        let plan = accepted(&p1(), &facts);
+        let level = |at: usize| match &plan.evidence_map()[at].spec {
+            Spec::Check(check) => (check.level, check.fakes.clone()),
+            other => panic!("a check, not {other:?}"),
+        };
+        assert_eq!(level(0), (Level::Unit, Vec::new()));
+        assert_eq!(level(1), (Level::Integration, vec!["the clock".to_owned()]));
+        accepted(
+            &item_with(0, "/spec", "level", json!("integration")),
+            &facts,
+        );
+        accepted(&item_with(1, "/spec", "fakes", json!([])), &facts);
+        assert_eq!(
+            refusal(&without(p1(), "/evidence_map/0/spec", "level"), &facts),
+            typed("evidence_map[0].spec.level")
+        );
+        assert_eq!(
+            refusal(&item_with(0, "/spec", "level", json!("system")), &facts),
+            typed("evidence_map[0].spec.level")
+        );
+        let c1 = |position: usize, id: &str| (position, id.to_owned());
+        let command = |(position, id)| PlanRefusal::CheckCommand { position, id };
+        let expected = |(position, id)| PlanRefusal::CheckExpected { position, id };
+        let test_file = |(position, id)| PlanRefusal::CheckTestFile { position, id };
+        let boundary = |(position, id)| PlanRefusal::CheckBoundary { position, id };
+        let cases = [
+            (
+                item_with(0, "/spec", "command", json!("  ")),
+                command(c1(0, "c1")),
+            ),
+            (
+                item_with(0, "/spec/expected", "value", json!("")),
+                expected(c1(0, "c1")),
+            ),
+            (
+                item_with(0, "/spec/test", "file", json!(" ")),
+                test_file(c1(0, "c1")),
+            ),
+            (
+                item_with(0, "/spec", "boundary", json!("")),
+                boundary(c1(0, "c1")),
+            ),
+            (
+                item_with(1, "/spec", "boundary", json!(" ")),
+                boundary(c1(1, "c2")),
+            ),
+            (
+                item_with(1, "/spec", "command", json!(" ")),
+                command(c1(1, "c2")),
+            ),
+            (
+                item_with(1, "/spec/expected", "value", json!("")),
+                expected(c1(1, "c2")),
+            ),
+            (
+                item_with(1, "/spec/test", "file", json!("")),
+                test_file(c1(1, "c2")),
+            ),
+        ];
+        for (plan, refused) in cases {
+            assert_eq!(refusal(&plan, &facts), refused, "{plan}");
+        }
+    }
+
+    #[test]
+    fn a_check_judged_on_its_fields_in_another_order_or_on_a_field_without_a_code_is_caught() {
+        let facts = f1();
+        let c1 = || ("c1".to_owned(), 0);
+        let both = |first: (&str, &str, Value), second: (&str, &str, Value)| {
+            let plan = with(
+                p1(),
+                &format!("/evidence_map/0{}", first.0),
+                first.1,
+                first.2,
+            );
+            with(
+                plan,
+                &format!("/evidence_map/0{}", second.0),
+                second.1,
+                second.2,
+            )
+        };
+        let (id, position) = c1();
+        assert_eq!(
+            refusal(
+                &both(
+                    ("/spec", "command", json!("")),
+                    ("/spec", "boundary", json!(""))
+                ),
+                &facts
+            ),
+            PlanRefusal::CheckCommand { position, id }
+        );
+        let (id, position) = c1();
+        assert_eq!(
+            refusal(
+                &both(
+                    ("/spec/expected", "value", json!(" ")),
+                    ("/spec/test", "file", json!(""))
+                ),
+                &facts
+            ),
+            PlanRefusal::CheckExpected { position, id }
+        );
+        let (id, position) = c1();
+        assert_eq!(
+            refusal(
+                &both(
+                    ("/spec/test", "file", json!("")),
+                    ("/spec", "boundary", json!(" "))
+                ),
+                &facts
+            ),
+            PlanRefusal::CheckTestFile { position, id }
+        );
+        let unnamed = both(("/spec", "setup", json!("")), ("/spec", "call", json!("")));
+        accepted(
+            &with(unnamed, "/evidence_map/0/spec/test", "function", json!("")),
+            &facts,
+        );
+        let command = with(p1(), "/evidence_map/0/spec", "command", json!(""));
+        assert_eq!(
+            refusal(&without(command, "/evidence_map/1/spec", "level"), &facts),
+            typed("evidence_map[1].spec.level")
+        );
     }
 }
