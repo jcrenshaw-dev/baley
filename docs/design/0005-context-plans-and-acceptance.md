@@ -342,11 +342,13 @@ The work order selects the full-plan input or the delta and blocker input from t
 ```mermaid
 stateDiagram-v2
   [*] --> Unrefined: story.declared
-  Unrefined --> Asking: questions.opened
+  Unrefined --> Asking: questions.opened with a question
+  Unrefined --> Drafting: questions.opened with no question, drafting work order issued
   Asking --> Asking: a round answered, a question still open
   Asking --> Drafting: no question open, drafting work order issued
   Drafting --> Refined: story.refined (version 1, or the next version for a changed truth)
-  Refined --> Asking: story refine again, questions.opened
+  Refined --> Asking: story refine again, questions.opened with a question
+  Refined --> Drafting: story refine again, questions.opened with no question
   Refined --> Committed: phase edit commits it to a phase
   Committed --> Refined: phase withdrawn or story reassigned
   Committed --> Planned: plan.approved serving it
@@ -354,7 +356,7 @@ stateDiagram-v2
   Planned --> Delivered: phase complete with its truths met or waived
 ```
 
-*Figure 1. States of a story in this area. Asking and Drafting are the rounds of its latest question set and the analyzer's drafting of truths from the answers; a story in Asking or Drafting that was refined before keeps its approved truths until the new ones are approved. Withdrawn and dropped states are in [0004](0004-starting-a-project-and-changing-scope.md) Figure 2.*
+*Figure 1. States of a story in this area. A story's refinement state is never stored: it is worked out when read from its latest question set and its refined marker, the set its latest `story.refined` names. Unrefined is a story with no set, Asking one whose latest set has an open question, Drafting one whose latest set is closed with no approval naming it, and Refined one whose latest approval names its latest set. An empty set closes at once, so its story goes straight to Drafting. A story refined before keeps its approved truths while it is asked again and drafted, until new ones are approved. `story refine` in Asking is refused `question-open`, so a story's open set is never abandoned by a new one and no `story refine` leads from Asking: the owner ends a set early only by deferring its open questions, each with a reason. Withdrawn and dropped states are in [0004](0004-starting-a-project-and-changing-scope.md) Figure 2.*
 
 ```mermaid
 stateDiagram-v2
@@ -405,11 +407,11 @@ stateDiagram-v2
     Waiting --> Deferred: question.deferred with a reason
   }
   Open --> Closed: every question answered or deferred
-  Open --> Abandoned: questions.abandoned
-  Closed --> Abandoned: questions.abandoned
+  Open --> Abandoned: questions.abandoned, its plan draft discarded
+  Closed --> Abandoned: questions.abandoned, a later set for its story or its plan draft discarded
 ```
 
-*Figure 7. States of a question set and, inside it, of each question. Every state here is computed when the set is read, from its questions in submitted order and the answers, deferrals and abandonment recorded on it, never from the order they were recorded in, and none is stored. A set is abandoned when a later set for the same story is opened or its plan draft is discarded. The current round is every question in InRound. A question that waits on a deferred question never enters a round and closes only by its own deferral. Abandoned is terminal and keeps every recorded answer and deferral. The figure is numbered after the workflows so that the figure numbers other documents cite stay fixed.*
+*Figure 7. States of a question set and, inside it, of each question. Every state here is computed when the set is read, from its questions in submitted order and the answers, deferrals and abandonment recorded on it, never from the order they were recorded in, and none is stored. A story's set is abandoned by a later set for the same story only once it is closed, since `story refine` and `story questions submit` are refused `question-open` while it is open, and a plan draft's set is abandoned when its draft is discarded. The current round is every question in InRound. A question that waits on a deferred question never enters a round and closes only by its own deferral. Abandoned is terminal and keeps every recorded answer and deferral. The figure is numbered after the workflows so that the figure numbers other documents cite stay fixed.*
 
 ## 8. Workflows
 
@@ -421,46 +423,58 @@ sequenceDiagram
   participant A as Analyzer
   participant L as Ledger
   O->>H: refine story S
-  H->>B: story refine S
-  alt dispatch active on S's phase
+  H->>B: story-refine S
+  alt an analyzer order of S pending
+    B-->>H: analyzer-order-pending, naming the order
+  else a question of S's latest set open
+    B-->>H: question-open, naming the set and its first open question
+  else dispatch active on S's phase
     B-->>H: dispatch-active
   else
-    B-->>H: analyzer questions work order
+    B->>L: work_order.issued, the analyzer questions order
+    B-->>H: the order, analyzer questions
     H->>A: launch
     A->>A: find the facts in the code and the records
     A-->>H: questions (id, question, recommended, depends_on)
-    H->>B: story questions submit, as returned
+    H->>B: story-questions-submit naming the order, the questions as returned
     alt a question refused
-      B-->>H: question-id / question-blank / question-dependency / question-cycle
+      B-->>H: question-id / question-blank / question-dependency / question-cycle / typed-content
     else
-      B->>L: questions.opened
-      B-->>H: set id, round 1
-      H->>O: the rounds of Figure 8, until no question is open
-      B-->>H: set closed, analyzer drafting work order with every answer and deferral
-      H->>A: launch
+      B->>L: questions.abandoned for S's earlier set, closed by then, and questions.opened
+      alt the set is empty
+        B->>L: work_order.issued, the analyzer drafting order
+        B-->>H: set closed, the drafting order
+      else
+        B-->>H: set id, round 1
+        H->>O: the rounds of Figure 8, until no question is open
+        B->>L: the closing answers and work_order.issued, the analyzer drafting order
+        B-->>H: set closed, the drafting order with every answer and deferral
+      end
+      H->>A: launch the drafting order
       A-->>H: draft truths
       H->>H: drop a truth that does not hold against the code or the answers
       H->>O: truths
       O->>H: edits, attestations
-      H->>B: story truths submit, naming the set
+      H->>B: context-submit naming the drafting order and the set
       alt a truth refused
-        B-->>H: truth-form / truth-internal / truth-prose-oracle, naming the truth
+        B-->>H: truth-form / truth-id / truth-attestation / truth-internal / truth-prose-oracle, naming the truth
       else
-        B-->>H: preview (unchanged, changed, added, removed), digest
-        O->>H: yes
-        H->>B: story truths approve
+        B->>L: scope.submitted of kind story-truths
+        B-->>H: digest, each truth unchanged, changed or added, the removed ids
+        H->>O: the digest
+        O->>B: baley scope preview, then baley story truths approve, with the digest
         alt a question of the story's latest set open
-          B-->>H: question-open, naming each
+          B-->>O: question-open, naming each
         else
-          B->>L: story.refined with the set id
-          B-->>H: receipt with versions
+          B->>L: story.refined with the set id and every truth with its version
+          B-->>O: receipt with versions
         end
       end
     end
   end
 ```
 
-*Figure 4. Refining a story. The analyzer is dispatched twice: once for its questions and, after the owner's rounds, once for the draft truths. An empty question set closes at once and the drafting work order follows the submit.*
+*Figure 4. Refining a story. The analyzer is dispatched twice: once for its questions and, after the owner's rounds, once for the draft truths. Every refusal records nothing, and a story's earlier set is abandoned only once it is closed. An empty question set closes at once and the submit's receipt names the drafting order; a closing `questions-answer` over MCP names it in its receipt's `drafting`; after a close at the terminal the session's next `story-refine` issues it. While another analyzer order of the story is pending, neither close issues one. The session checks the draft truths against the code and the answers before the owner edits and attests them, and the owner approves at the terminal with `baley story truths approve`, which records `story.refined`; the session never approves ([ADR 0044](../adr/0044-owner-acts-on-the-command-line.md)).*
 
 ```mermaid
 sequenceDiagram
@@ -585,7 +599,7 @@ sequenceDiagram
   end
 ```
 
-*Figure 8. Putting a question set to the owner in rounds, for a story's refinement and for a plan draft alike. The host session reads the round with `document`, relays questions and answers through `questions-answer` and decides nothing; the owner can do the same at the terminal with `baley questions round` and `baley questions answer`. The owner may answer part of a round and may defer a waiting question. When the set closes, a story's set is to yield the analyzer's drafting work order and a plan draft's set `ready` or the planner's revision work order; neither is built yet, and the receipt says only that the set is closed.*
+*Figure 8. Putting a question set to the owner in rounds, for a story's refinement and for a plan draft alike. The host session reads the round with `document`, relays questions and answers through `questions-answer` and decides nothing; the owner can do the same at the terminal with `baley questions round` and `baley questions answer`. The owner may answer part of a round and may defer a waiting question. When a call over MCP closes a story's set, its receipt names the analyzer's drafting work order in `drafting` (Figure 4). A plan draft's set is to yield `ready` or the planner's revision work order, which are Build 4 T9's; until then its receipt says only that the set is closed.*
 
 ## 9. Settings
 
@@ -601,13 +615,13 @@ sequenceDiagram
 
 | Instruction | Served to | Carries requirements |
 |---|---|---|
-| Analyzer questions | The analyzer, in its questions work order: the question grammar and its refusals; find every fact yourself from the code and the records and never ask the owner for one; ask only for the decisions left to the owner, each with a recommended answer and the ids of the questions it depends on; draft no truths yet; never decide | PLN-R6, PLN-R23 |
-| Analyzer drafting | The analyzer, in its drafting work order: the truth form, the three refusals, the story's questions with every answer and deferral; draft truths on the owner's answers, not on the recommendations; assume no answer to a deferred question; never decide | PLN-R2, PLN-R3, PLN-R6, PLN-R25 |
+| Analyzer questions | The analyzer, as `bal-analyzer-questions`, listed by its questions work order: the question grammar and its refusals; find every fact yourself from the code and the records and never ask the owner for one; ask only for the decisions left to the owner, each with a recommended answer and the ids of the questions it depends on; draft no truths yet; never decide. The text is ported from Cadence v3.9.0's analyzer contract (`skills/cad-assumptions-analyzer-contract/SKILL.md`) with the evidence rules of its context workflow (`cadence-core/workflows/context.md`) under [ADR 0048](../adr/0048-port-what-cadence-hands-agents.md), and its changes from Cadence's wording that accepted ADRs force are listed beside it (`crates/baley/src/instruction/analyzer.rs`, `QUESTIONS_TEXT`) | PLN-R6, PLN-R23 |
+| Analyzer drafting | The analyzer, as `bal-analyzer-drafting`, listed by its drafting work order: the truth form, the refusals, the story's questions with every answer and deferral; draft truths on the owner's answers, not on the recommendations; assume no answer to a deferred question; a restated truth keeps its id; name in `human_verify` the tool or live service a truth's proof needs; leave the attestations to the owner; never decide. The text is ported from the same analyzer contract and the `acceptance_criteria` step of the same context workflow under [ADR 0048](../adr/0048-port-what-cadence-hands-agents.md), its ADR-forced changes listed beside it (`crates/baley/src/instruction/analyzer.rs`, `DRAFTING_TEXT`). Neither analyzer text is a help row, so neither has a stub | PLN-R2, PLN-R3, PLN-R4, PLN-R6, PLN-R25 |
 | Planner | The planner, in its planning work order: the plan grammar with its `questions` field, the question grammar, the lease rules, the evidence map grammar, one check per truth, the test derivation rules below, the capacity ceiling as a fact, "propose a split rather than overfill", "put every decision the plan needs from the owner in `questions` with a recommended answer, write the plan on the recommended answers, and leave no decision in `notes` or task prose". In a revision work order it also receives the draft and every answer and deferral on its set, and applies them | PLN-R5, PLN-R9 to PLN-R13, PLN-R17, PLN-R18, PLN-R23, PLN-R27 |
 | Checker | The checker, in its check work order: the six dimensions (story coverage, task completeness, sequencing, goal-backward truths, scope sanity, proportionality), severity rules, derive what must be true from the goal before opening the plan. For round 2, follow the work order's scope, check every first-round blocker and report new defects in the selected material | PLN-R16 |
 | Default test style | The planner and, through [0006](0006-execution.md), the executor, when the project has set nothing: test a unit through what it exposes; fake only the outside world; never start a program; skip trivial code; write the expected value by hand | PLN-R19 |
-| Stubs | The host session: which operation each of `story refine`, `story questions submit`, `questions round`, `questions answer`, `story truths submit`, `phase plan`, `plan submit`, `phase close` calls, and that the owner approves each preview | PLN-R15 |
-| Rounds | The host session, with every question set, served by its identity `bal-rounds` and named by the round read and the answer receipt; it has no help row and no stub: read the round with `document`; put every question of the current round to the owner with its recommended answer and show the waiting questions; relay each answer and deferral unchanged through `questions-answer`; answer, drop, merge, reword and reorder none; read again after each call until the set is closed. Its first step, submitting the analyzer's questions as returned, comes with `story questions submit` | PLN-R24, PLN-R25, PLN-R26 |
+| Stubs | The host session: which operation each of `story refine`, `story questions submit`, `questions round`, `questions answer`, `story truths submit`, `phase plan`, `plan submit`, `phase close` calls, and that the owner approves each preview. The `bal-context` front door, a help row with a stub, takes a story id and walks one refinement: the refinement read with `document` or `context-intake`, `story-refine` and the order's launch, `work-order-fail` and `work-order-retry` for an order that fails, the rounds through `bal-rounds`, the drafted truths checked and put to the owner for edits and attestations, `context-submit`, and the owner's preview and approval at the terminal with `baley scope preview` and `baley story truths approve`. It is ported from Cadence v3.9.0's `skills/cad-context/SKILL.md` and `cadence-core/workflows/context.md` under [ADR 0048](../adr/0048-port-what-cadence-hands-agents.md), its ADR-forced changes listed beside it (`crates/baley/src/instruction/context.rs`, `TEXT`) | PLN-R1 to PLN-R6, PLN-R15 |
+| Rounds | The host session, with every question set, served by its identity `bal-rounds` at version 2 and named by `bal-context`, the round read and the answer receipt; it has no help row and no stub. Its first step submits the analyzer's questions as returned with `story-questions-submit`, an empty set's receipt naming the drafting order; then read the round with `document`; put every question of the current round to the owner with its recommended answer and show the waiting questions; relay each answer and deferral unchanged through `questions-answer`; answer, drop, merge, reword and reorder none; read again after each call until the set is closed, and return to the instruction that sent it there, whose next step launches the drafting order (`crates/baley/src/instruction/rounds.rs`, `TEXT`) | PLN-R6, PLN-R24, PLN-R25, PLN-R26 |
 
 The test derivation rules the planner receives, as served:
 
@@ -627,27 +641,27 @@ The test derivation rules the planner receives, as served:
 
 ## 11. Build status
 
-The binary parks the inherited engine for Build 9 to delete, and nothing in production reaches it (`crates/baley/src/inherited.rs:1-4`). The session server answers `plan-read`, `context-intake`, `plan-submit` and `context-submit` (`crates/baley/src/mcp/operations.rs:107-108, 156-157`) as `operation-unavailable`, and the operation baseline names Build 4 for them. Production reaches the compiled context and plan instructions, as text, through `baley context-instructions` and `baley plan-instructions`. In the parked engine truths belong to a phase's context, plans are rendered to `PLAN-N.md`, and nothing knows a story, the stories a phase commits, or a size.
+The binary parks the inherited engine for Build 9 to delete, and nothing in production reaches it (`crates/baley/src/inherited.rs`, its module comment). The session server serves `context-intake` on `baley_query` and `context-submit` on `baley_apply` (`crates/baley/src/mcp/operations.rs`, `QUERY_OPERATIONS` and `APPLY_OPERATIONS`), and still answers `plan-read` and `plan-submit` as `operation-unavailable`, the operation baseline naming Build 4 for them. `baley context-instructions` and `baley plan-instructions` still print the parked engine's compiled context and plan instructions as text until Build 9 removes them; the parked context text contradicts the served `bal-context`, and no served path reaches it. In the parked engine truths belong to a phase's context, plans are rendered to `PLAN-N.md`, and nothing knows a story, the stories a phase commits, or a size.
 
 | Requirement | Status | Where |
 |---|---|---|
-| PLN-R1 | Partly built | The `backlog` view lists every story approved scope declared, in priority order, which an approved `backlog reorder` changes, keeps a dropped story with status `dropped`, and holds each story `unrefined` with no truths and no size (`crates/baley-core/src/scope/backlog.rs:43-189`), and `baley backlog show` prints it (`crates/baley/src/scope/command.rs`, `backlog_render`). A story carrying its truths, and the refinement state, are Build 4 T7 |
-| PLN-R7 to PLN-R10, PLN-R20 to PLN-R22 | Not built | In the parked engine truths are per phase (`crates/baley/src/context/model.rs:36-46`), and nothing knows committed stories, size or capacity |
-| PLN-R2, PLN-R3 | Not built | Only the parked engine validates a submission's form, one trigger, one observer, verbs, kinds and attestations (`crates/baley/src/context/validation.rs:5-106`). The session server answers `context-submit` as unavailable (`crates/baley/src/mcp/operations.rs:157`) until Build 4 |
-| PLN-R4 | Not built | Only the parked engine writes truth version 1 always, with no revision (`crates/baley/src/context/persistence.rs:33-49`, `crates/baley/src/context_service.rs:184-193`). The session server answers `context-submit` as unavailable (`crates/baley/src/mcp/operations.rs:157`) until Build 4 |
-| PLN-R5 | Not built | The parked engine refuses more than seven truths `seven-truths` (`crates/baley/src/context/validation.rs:30-39`), to be removed. The session server answers `context-submit` as unavailable (`crates/baley/src/mcp/operations.rs:157`) until Build 4 |
-| PLN-R6 | Not built | `/bal-context` says "Do not dispatch an analyzer" (`crates/baley/src/context/instructions.rs:43-44`), which `baley context-instructions` prints, and has the session hold the interview itself |
-| PLN-R11 | Not built | Only the parked engine holds typed content and lease rules (`crates/baley/src/plan/model.rs:29-75`, `crates/baley/src/plan/validation.rs:107-186`), and its plan has no `questions` field. The session server answers `plan-submit` as unavailable (`crates/baley/src/mcp/operations.rs:156`) until Build 4 |
-| PLN-R12, PLN-R13 | Not built | Only the parked engine checks a plan's evidence map, associations and limits, and it has no refusals about committed stories (`story-not-in-phase`, `no-truths`) (`crates/baley/src/plan/associations.rs:287-497`, `crates/baley/src/plan/limits.rs:187-438`, `crates/baley/src/plan/evidence.rs:12-116`). The session server answers `plan-submit` as unavailable (`crates/baley/src/mcp/operations.rs:156`) until Build 4 |
-| PLN-R14 | Not built | Only the parked engine numbers a phase's plans and refuses to replace an admitted plan (`crates/baley/src/plan/inventory.rs:129-179`, `crates/baley/src/plan/validation.rs:23-105`). The session server answers `plan-submit` as unavailable (`crates/baley/src/mcp/operations.rs:156`) until Build 4 |
-| PLN-R15 | Not built | Only the parked engine holds a plan draft, approves it by digest and refuses `stale-draft` (`crates/baley/src/plan_service.rs:163-260`). Its drafts are memory-only and lost on restart (`crates/baley/src/session/mod.rs:422-432`). The session server answers `plan-submit` as unavailable (`crates/baley/src/mcp/operations.rs:156`) until Build 4. Drafts recorded in the ledger and approved by digest at the terminal are built for the start's scope submission ([0004](0004-starting-a-project-and-changing-scope.md) section 11); plan drafts are Build 4 T9 |
-| PLN-R16 | Not built | `/bal-plan` forbids checker dispatch (`crates/baley/src/plan/instructions.rs:504-506`), and the parked engine still holds the 3.x checker verdict record as a fact kind (`crates/baley/src/evidence/mod.rs:48`, `crates/baley/src/evidence/checker.rs:43-52`). Re-check scope selection, retained comparison material, `plan.check_issued` and pending-check lookup are not built |
-| PLN-R17, PLN-R18, PLN-R19 | Built as text | The derivation rules are compiled at `crates/baley/src/plan/instructions.rs:119-180`, which `baley plan-instructions` prints. The compiled text still tells the planner to flag ambiguity for the owner in prose (`crates/baley/src/plan/instructions.rs:124`). It has no check `level`, and it still sends integration to a pending observation (`crates/baley/src/plan/instructions.rs:175-180`) |
-| PLN-R23 | Partly built | `judge_set` (`crates/baley-core/src/questions/set.rs`) judges a set whole with every refusal of PLN-R23, and refuses `typed-content` for a text over 4,096 bytes and a `depends_on` naming an id twice. `open` and `abandon` (`crates/baley/src/questions/record.rs`) record `questions.opened` and `questions.abandoned` inside a caller's transaction, but no served operation calls them yet: `story questions submit`, which opens a story's set and abandons the one it supersedes, is Build 4 T7, and `plan submit`, which opens a plan draft's set and abandons the replaced draft's, is Build 4 T9 |
-| PLN-R24 | Built | `round_of` (`crates/baley-core/src/questions/round.rs`) works out the round from the questions in submitted order and the records, and `judge_call` and `judge_answers` (`crates/baley-core/src/questions/answer.rs`) judge a call against the round as it stood before it. The round is read with `document` (`crates/baley/src/mcp/document.rs`, `questions_answer`) and `baley questions round` (`crates/baley/src/questions/command.rs`, `round_render`), and a round is answered with `questions-answer` (`crates/baley/src/mcp/questions.rs`, `serve`) and `baley questions answer` (`crates/baley/src/questions/command.rs`, `record_answers`). The rounds relay is served as `bal-rounds` (`crates/baley/src/instruction/rounds.rs`). It runs over sets the PLN-R23 row's library functions open |
-| PLN-R25 | Partly built | `check` and `record` (`crates/baley/src/questions/answer.rs`) record every answer and deferral of a call in one transaction with its round, owner and time, a take with the recommended text and `accepted` true and an own answer in the owner's words with `accepted` false; `question-closed`, `answer-blank` and `question-set-abandoned` are judged by `judge_answers`, and the `questions` view refuses any record that would replace one (`crates/baley-core/src/questions/view.rs`, `QuestionsProjector`). A later set for the same story and a replaced plan draft abandon a set only once Build 4 T7 and T9 call `abandon` |
-| PLN-R26 | Partly built | `deferral-reason`, a deferral closing a waiting question, and a question waiting on a deferred one never entering a round are built (`judge_answers`, `round_of`). The `question-open` and `question-set-abandoned` refusals on `story truths approve` are Build 4 T7, and `question-open` on `plan approve` is Build 4 T9 |
-| PLN-R27 | Not built | A plan's `questions` field is Build 4 T8 and T9, judged by `judge_set`. The draft's set opened with the preview, `answer-not-applied` and the planner's revision work order are Build 4 T9. The close-time outputs of `questions answer`, the analyzer's drafting work order (Build 4 T7) and `ready` or the revision work order (Build 4 T9), plug in at `receipt_value` (`crates/baley/src/questions/answer.rs`), which until then answers only `closed` |
+| PLN-R1 | Partly built | The `backlog` view lists every story approved scope declared, in priority order, which an approved `backlog reorder` changes, keeps a dropped story with status `dropped`, and records each story's latest question set, refined marker and truth count (`crates/baley-core/src/scope/backlog.rs`, `BacklogProjector`). The backlog read works out each story's refinement state from its latest set (`crates/baley/src/scope/read.rs`, `backlog`, through `crates/baley-core/src/truth/state.rs`, `refinement`), and `baley backlog show` prints it (`crates/baley/src/scope/command.rs`, `backlog_render`). A story carries its truths, with every version, in the `truths` view (`crates/baley-core/src/truth/view.rs`, `TruthsProjector`). A story's size, and a phase's truths read as the sum of its committed stories' truths, are phase planning's, Build 4 T9 |
+| PLN-R7 to PLN-R10, PLN-R20 to PLN-R22 | Not built | In the parked engine truths are per phase (`crates/baley/src/context/model.rs`, `Submission`), and nothing knows committed stories, size or capacity |
+| PLN-R2, PLN-R3 | Built | `judge_truths` (`crates/baley-core/src/truth/submission.rs`) judges a submission truth by truth, its shape, its id, its form and its two attestations, refusing `truth-form`, `truth-id`, `truth-attestation`, `truth-internal` and `truth-prose-oracle`, and classifies no sentence. `context-submit` (`crates/baley/src/mcp/refine.rs`, `serve_context`) judges the truths through it before anything is prepared. The parked engine's own validation (`crates/baley/src/context/validation.rs`, `validate`) is reached by no served path and goes in Build 9 |
+| PLN-R4 | Partly built | A truth draft is recorded with no version (`crates/baley/src/refine/submit.rs`, `check` and `record`) and approved only by `baley story truths approve` (`crates/baley/src/refine/command.rs`, `approve`), whose two steps (`crates/baley/src/refine/approve.rs`, `judge` and `record`) give each truth its version (`crates/baley-core/src/truth/version.rs`, `versions`) and record `story.refined` with the story's whole truth list (`crates/baley-core/src/truth/event.rs`, `refined_payload`). The `truths` view keeps every version, and the refinement read returns them (`crates/baley/src/refine/read.rs`, `read`). Evidence written against an older version being stale is the plan's, Build 4 T8 and T9, which bind to these versions |
+| PLN-R5 | Partly built | `judge_truths` accepts any number of truths, none included, and the backlog, the roadmap and `baley story show` show each story's count. The parked engine's `seven-truths` cap (`crates/baley/src/context/validation.rs`, `validate`) is reached by no served path and goes in Build 9. The planner's proposed split is Build 4 T9 |
+| PLN-R6 | Built | `story-refine` (`crates/baley/src/mcp/refine.rs`, `serve`) chooses and issues the questions order or the drafting order (`crates/baley/src/refine/order.rs`, `check` and `issue`), refusing `analyzer-order-pending` and `question-open`, with the inputs it binds at issue (`crates/baley/src/refine/inputs.rs`, `read`). `story-questions-submit` (`crates/baley/src/mcp/refine.rs`, `serve_questions`, through `crates/baley/src/refine/questions.rs`, `check` and `record`) records the set as returned and, for an empty set, issues the drafting order, and a closing `questions-answer` over MCP issues it with the answers (`crates/baley/src/mcp/questions.rs`, `serve`). The analyzer's texts are `bal-analyzer-questions` and `bal-analyzer-drafting` (`crates/baley/src/instruction/analyzer.rs`), and `bal-context` walks a session through one refinement (`crates/baley/src/instruction/context.rs`). `baley context-instructions` still prints the parked context text, which says "Do not dispatch an analyzer" (`crates/baley/src/context/instructions.rs`, `ROLE`), until Build 9 removes it |
+| PLN-R11 | Not built | Only the parked engine holds typed content and lease rules (`crates/baley/src/plan/model.rs`, `Task` and `Content`, and `crates/baley/src/plan/validation.rs`, `typed_content` and `arguments`), and its plan has no `questions` field. The session server answers `plan-submit` as unavailable (`crates/baley/src/mcp/operations.rs`, `APPLY_OPERATIONS`) until Build 4 |
+| PLN-R12, PLN-R13 | Not built | Only the parked engine checks a plan's evidence map, associations and limits, and it has no refusals about committed stories (`story-not-in-phase`, `no-truths`) (`crates/baley/src/plan/associations.rs`, `validate_items`, `validate` and `validate_union`; `crates/baley/src/plan/limits.rs`, `content`, `checks` and `links`; `crates/baley/src/plan/evidence.rs`, `Map` and `Item`). The session server answers `plan-submit` as unavailable (`crates/baley/src/mcp/operations.rs`, `APPLY_OPERATIONS`) until Build 4 |
+| PLN-R14 | Not built | Only the parked engine numbers a phase's plans and refuses to replace an admitted plan (`crates/baley/src/plan/inventory.rs`, `with_records`, and `crates/baley/src/plan/validation.rs`, `replacement_inner` and `admitted`). The session server answers `plan-submit` as unavailable (`crates/baley/src/mcp/operations.rs`, `APPLY_OPERATIONS`) until Build 4 |
+| PLN-R15 | Not built | Only the parked engine holds a plan draft, approves it by digest and refuses `stale-draft` (`crates/baley/src/plan_service.rs`, `execute`). Its drafts are memory-only and lost on restart (`crates/baley/src/session/mod.rs`, `Drafts` and `drafts`). The session server answers `plan-submit` as unavailable (`crates/baley/src/mcp/operations.rs`, `APPLY_OPERATIONS`) until Build 4. Drafts recorded in the ledger and approved by digest at the terminal are built for the start's scope submission ([0004](0004-starting-a-project-and-changing-scope.md) section 11) and for a story's truths (the PLN-R4 row); plan drafts are Build 4 T9 |
+| PLN-R16 | Not built | `/bal-plan` forbids checker dispatch (`crates/baley/src/plan/instructions.rs`, `ROLE`), and the parked engine still holds the 3.x checker verdict record as a fact kind (`crates/baley/src/evidence/mod.rs`, `Fact`, and `crates/baley/src/evidence/checker.rs`, `Checker`). Re-check scope selection, retained comparison material, `plan.check_issued` and pending-check lookup are not built |
+| PLN-R17, PLN-R18, PLN-R19 | Built as text | The derivation rules are compiled into the parked planner text (`crates/baley/src/plan/instructions.rs`, `ROLE`), which `baley plan-instructions` prints. That text still tells the planner to flag ambiguity for the owner in prose, has no check `level`, and still sends integration to a pending observation |
+| PLN-R23 | Partly built | `judge_set` (`crates/baley-core/src/questions/set.rs`) judges a set whole with every refusal of PLN-R23, and refuses `typed-content` for a text over 4,096 bytes and a `depends_on` naming an id twice. `open` and `abandon` (`crates/baley/src/questions/record.rs`) record `questions.opened` and `questions.abandoned` inside a caller's transaction. `story questions submit` calls them (`crates/baley/src/refine/questions.rs`, `record`) to open a story's set and abandon the story's earlier set, which is closed by then, since `question-open` refuses `story-refine` and `story-questions-submit` while it is open. `plan submit`, which opens a plan draft's set and abandons the replaced draft's, is Build 4 T9 |
+| PLN-R24 | Built | `round_of` (`crates/baley-core/src/questions/round.rs`) works out the round from the questions in submitted order and the records, and `judge_call` and `judge_answers` (`crates/baley-core/src/questions/answer.rs`) judge a call against the round as it stood before it. The round is read with `document` (`crates/baley/src/mcp/document.rs`, `questions_answer`) and `baley questions round` (`crates/baley/src/questions/command.rs`, `round_render`), and a round is answered with `questions-answer` (`crates/baley/src/mcp/questions.rs`, `serve`) and `baley questions answer` (`crates/baley/src/questions/command.rs`, `record_answers`). The rounds relay is served as `bal-rounds` at version 2, whose first step submits a story's questions as returned (`crates/baley/src/instruction/rounds.rs`). It runs over the sets the PLN-R23 row's library functions open |
+| PLN-R25 | Partly built | `check` and `record` (`crates/baley/src/questions/answer.rs`) record every answer and deferral of a call in one transaction with its round, owner and time, a take with the recommended text and `accepted` true and an own answer in the owner's words with `accepted` false; `question-closed`, `answer-blank` and `question-set-abandoned` are judged by `judge_answers`, and the `questions` view refuses any record that would replace one (`crates/baley-core/src/questions/view.rs`, `QuestionsProjector`). A story's set is abandoned `superseded` by the story's next set only once it is closed: `question-open` refuses `story-refine` (`crates/baley/src/refine/order.rs`, `check`) and `story-questions-submit` (`crates/baley/src/refine/questions.rs`, `check`) while a question of it is open. A replaced plan draft abandons its set once Build 4 T9 calls `abandon` |
+| PLN-R26 | Partly built | `deferral-reason`, a deferral closing a waiting question, and a question waiting on a deferred one never entering a round are built (`judge_answers`, `round_of`). `baley story truths approve` refuses `question-open`, naming each open question of the story's latest set, and `question-set-abandoned` for a draft drafted from an older set (`crates/baley-core/src/truth/approval.rs`, `judge_truth_approval`). `question-open` on `plan approve` is Build 4 T9 |
+| PLN-R27 | Not built | A plan's `questions` field is Build 4 T8 and T9, judged by `judge_set`. The draft's set opened with the preview, `answer-not-applied` and the planner's revision work order are Build 4 T9. A story set's close-time output, the analyzer's drafting work order, is built (the PLN-R6 row); a plan draft's, `ready` or the revision work order, plugs in at `receipt_value` (`crates/baley/src/questions/answer.rs`), which until then answers only `closed` for a plan draft's set |
 
 ## 12. Open questions
 
