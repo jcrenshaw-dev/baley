@@ -10,8 +10,10 @@
 //! code blank; (5) a committed story holding a truth; (6) every story the
 //! plan serves committed to the phase; (7) each evidence item bound to its
 //! own story's current truth; (8) each item id holding one definition
-//! across the phase; (9) each link's value named by its truth. The judge
-//! trusts the facts and judges the plan. Nothing here records anything.
+//! across the phase; (9) each link's value named by its truth; (10) every
+//! truth the plan serves named by an item of the phase; (11) each such
+//! truth holding a check. The judge trusts the facts and judges the plan.
+//! Nothing here records anything.
 
 use std::num::NonZeroU32;
 
@@ -53,6 +55,12 @@ pub const TRUTH_VERSION_MISMATCH: &str = "truth-version-mismatch";
 pub const EVIDENCE_ITEM_CONFLICT: &str = "evidence-item-conflict";
 /// The refusal code for a link whose value its truth does not name.
 pub const LINK_VALUE_NOT_NAMED: &str = "link-value-not-named";
+/// The refusal code for a truth the plan serves that no evidence item of
+/// the phase names.
+pub const UNCOVERED_TRUTH: &str = "uncovered-truth";
+/// The refusal code for a truth the plan serves whose evidence items across
+/// the phase hold no check.
+pub const TRUTH_WITHOUT_CHECK: &str = "truth-without-check";
 
 /// Why a plan is refused. Positions count from 0 in the list as submitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +112,20 @@ pub enum PlanRefusal {
     /// The link at `position`, whose id is `id`, carries a value its truth
     /// does not name.
     LinkValueNotNamed { position: usize, id: String },
+    /// No item of the phase names `truth` of `story` at `version`, its
+    /// current version.
+    UncoveredTruth {
+        story: u32,
+        truth: String,
+        version: u32,
+    },
+    /// The items of the phase naming `truth` of `story` at `version`, its
+    /// current version, hold no check.
+    TruthWithoutCheck {
+        story: u32,
+        truth: String,
+        version: u32,
+    },
 }
 
 impl PlanRefusal {
@@ -123,6 +145,8 @@ impl PlanRefusal {
             Self::TruthVersionMismatch { .. } => TRUTH_VERSION_MISMATCH,
             Self::EvidenceItemConflict { .. } => EVIDENCE_ITEM_CONFLICT,
             Self::LinkValueNotNamed { .. } => LINK_VALUE_NOT_NAMED,
+            Self::UncoveredTruth { .. } => UNCOVERED_TRUTH,
+            Self::TruthWithoutCheck { .. } => TRUTH_WITHOUT_CHECK,
         }
     }
 
@@ -289,7 +313,9 @@ impl Plan {
 /// (5) `no-truths`; (6) `story-not-in-phase`, in the plan's story order;
 /// (7) `evidence-item-truth` and `truth-version-mismatch`, item by item;
 /// (8) `evidence-item-conflict`, item by item;
-/// (9) `link-value-not-named`, link by link.
+/// (9) `link-value-not-named`, link by link; then over the served truths
+/// in order, with the approved plans' items, (10) `uncovered-truth` and
+/// (11) `truth-without-check`.
 pub fn judge_plan(submitted: &Value, facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
     let plan = content::read(submitted)?;
     task::within_lease(&plan.tasks, &plan.files, &plan.directories)?;
@@ -303,6 +329,9 @@ pub fn judge_plan(submitted: &Value, facts: &PlanFacts) -> Result<Plan, PlanRefu
         .map_or(&[][..], Vec::as_slice);
     coverage::consistent(definitions, &plan.evidence_map, &facts.approved)?;
     link::named(&plan.evidence_map, &truths)?;
+    let phase = coverage::Phase::new(&plan.stories, &plan.evidence_map, facts);
+    phase.covered()?;
+    phase.checked()?;
     Ok(plan)
 }
 
