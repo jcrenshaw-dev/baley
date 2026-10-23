@@ -6,7 +6,9 @@
 //! scope preview|show`, `baley phase show`, `baley backlog show` and `baley
 //! story show` print what the ledger holds through the same reads as
 //! `document`, recording nothing. Declarations, edits and `project describe`
-//! come only from a session, since an agent drafts their text.
+//! come only from a session, since an agent drafts their text. `baley story
+//! truths approve <digest>` is `refine::command`'s, which approves a story's
+//! truth draft as `scope approve` approves a scope draft.
 //!
 //! Gathering finds the project and opens the ledger; judging, the arguments,
 //! the commands an approval or a submission is recorded under and what is
@@ -137,11 +139,11 @@ enum BacklogCommand {
 #[derive(clap::Args, Debug)]
 pub struct StoryArgs {
     #[command(subcommand)]
-    command: StoryCommand,
+    pub(crate) command: StoryCommand,
 }
 
 #[derive(clap::Subcommand, Debug)]
-enum StoryCommand {
+pub(crate) enum StoryCommand {
     /// Print one accepted story.
     Show {
         /// The story id Baley assigned at approval.
@@ -165,6 +167,8 @@ enum StoryCommand {
         #[arg(value_name = "ID")]
         id: String,
     },
+    /// Approve a story's drafted truths.
+    Truths(crate::refine::command::TruthsArgs),
 }
 
 /// Runs one `baley scope` command and prints its result.
@@ -215,6 +219,7 @@ pub fn run_story(args: StoryArgs) -> ExitCode {
             submit_change(&ChangeWords::StoryReassign { story: id, to })
         }
         StoryCommand::Drop { id } => submit_change(&ChangeWords::StoryDrop(id)),
+        StoryCommand::Truths(args) => crate::refine::command::run(args),
     })
 }
 

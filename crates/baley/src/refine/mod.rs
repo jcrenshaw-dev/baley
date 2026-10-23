@@ -5,6 +5,7 @@
 //! call, so the terminal and the host reach the same rules (ADR 0044).
 
 pub mod approve;
+pub mod command;
 pub mod inputs;
 pub mod order;
 pub mod questions;
