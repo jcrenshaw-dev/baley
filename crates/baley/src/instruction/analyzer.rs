@@ -5,30 +5,52 @@
 //!
 //! Each text is ported from Cadence (ADR 0048). Besides the names of
 //! Cadence's own files, commands and state, which become the order's inputs
-//! and the host's own tools, these changes from Cadence's wording in the
-//! questions text are forced by accepted Baley ADRs:
+//! and the host's own tools, each text opens with a summary line in place of
+//! the skill file's front matter, which names the skill and its agents to
+//! Cadence's loader; the line restates the role's job from Cadence's own
+//! role section and adds no rule.
+//!
+//! These changes from Cadence's wording in the questions text are forced by
+//! accepted Baley ADRs:
 //!
 //! - The return is typed questions, `{"id","question","recommended",
-//!   "depends_on"}`, instead of the assumptions report (ADR 0030, chosen
-//!   option 3). A `Likely` or `Unclear` item becomes a question whose
-//!   `recommended` is the analyzer's recommended choice and whose text names
-//!   its evidence files and what goes wrong if it is wrong. A `Confident`
-//!   item and a fact the code settles raise no question. A topic that needs
-//!   external research becomes a question the owner can settle from
-//!   knowledge or defer, as Cadence's `close_gray_areas` step puts it to the
-//!   user.
+//!   "depends_on"}`, with the question grammar of PLN-R23, instead of the
+//!   assumptions report (ADR 0030, chosen option 3). A `Likely` or
+//!   `Unclear` item becomes a question whose `recommended` is the
+//!   analyzer's recommended choice and whose text names its evidence files
+//!   and what goes wrong if it is wrong. A `Confident` item and a fact the
+//!   code settles raise no question. A topic that needs external research
+//!   becomes a question the owner can settle from knowledge or defer, as
+//!   Cadence's `close_gray_areas` step puts it to the user.
 //! - Every `Likely` or `Unclear` item is a question, with no cap of about
 //!   five: Baley puts the set to the owner in rounds and keeps no flagged
 //!   assumptions (ADR 0030).
+//! - "Draft no truths and decide nothing": the analyzer returns questions
+//!   only for the decisions left to the owner, never truths (ADR 0030).
 //! - The spend question is dropped: Baley dispatches the analyzer twice,
 //!   once for questions and once to draft truths (ADR 0030).
 //! - No CONTEXT.md is written: the session submits the return and the
 //!   ledger records it (ADR 0006).
+//! - It works on one story, not a phase, since truths belong to stories
+//!   (ADR 0017), and says owner where Cadence says user, the glossary's
+//!   term (ADR 0031).
 //! - No count of 3 to 7 and no size question (ADR 0017).
 //! - Nothing is approved here: the owner approves at the terminal
 //!   (ADR 0044).
 //! - Cadence's `<recalled_memory>` block is dropped: `recall` is Build
 //!   8's, `retired("recall", 8)` in `crate::mcp::operations`.
+//!
+//! These rules in the questions text are added under ADR 0049, which lets
+//! a ported text carry a rule a design requirement states:
+//!
+//! - Each text is at most 4,096 bytes: design 0005 section 6, the
+//!   `questions.opened` record, and its section 5's `story questions
+//!   submit` refusals.
+//! - "Call no `baley_apply` operation: the host session submits what you
+//!   return", with the role's line that the session submits the final
+//!   message as returned: design 0005's PLN-R6 has the host session submit
+//!   the analyzer's questions as returned. "Write no file and make no
+//!   commit" restates the read-only role Cadence's own role line gives.
 //!
 //! In the drafting text, Cadence's acceptance-criterion ids, never
 //! renumbered, become truth ids that a restated truth keeps (PLN-R4), and
@@ -36,11 +58,37 @@
 //! changes from Cadence's `acceptance_criteria` step are forced by accepted
 //! Baley ADRs:
 //!
+//! - It drafts truths for one story, not criteria for a phase (ADR 0017),
+//!   from the owner's answers to the story's questions, in the second of
+//!   the analyzer's two dispatches (ADR 0030), and says owner where
+//!   Cadence says user (ADR 0031).
 //! - No count of 3 to 7 and no size question (ADR 0017).
 //! - No CONTEXT.md is written: the session submits the drafts as a truth
 //!   submission and the ledger records it (ADR 0006).
 //! - The owner approves at the terminal, with no lock-or-edit question put
 //!   by the drafter (ADR 0044).
+//!
+//! These rules in the drafting text are added under ADR 0049, each stated
+//! by a requirement of design 0005:
+//!
+//! - The truth form, its one trigger, one observer and allowed verbs and
+//!   kinds, and the `truth-form` refusal (PLN-R2), with each text at most
+//!   4,096 bytes (section 6, the truth record).
+//! - The `truth-internal` and `truth-prose-oracle` refusals, and leaving out
+//!   `observable` and `fixed_oracle`, which the owner attests (PLN-R3).
+//! - The id rules: a restated truth keeps its id, a new one gets an unused
+//!   id and a truth no longer wanted is left out (PLN-R4).
+//! - Drafting on the owner's answers, never on a recommendation the owner
+//!   rejected, assuming no answer to a deferred question, and deciding
+//!   nothing (section 10, the Analyzer drafting row). Cadence's research
+//!   anti-pattern flags a gap under the report's research section, which a
+//!   truth list has no place for, so a gap the code and the answers cannot
+//!   settle gets no truth instead.
+//! - "Call no `baley_apply` operation: the host session submits what you
+//!   return", with the role's line that the session drops a draft truth
+//!   that does not hold against the code or the answers and submits the
+//!   rest (PLN-R6). "Write no file and make no commit" restates the
+//!   read-only role Cadence's own role line gives.
 
 /// The registry identity of the analyzer's questions text.
 pub const QUESTIONS_IDENTITY: &str = "bal-analyzer-questions";

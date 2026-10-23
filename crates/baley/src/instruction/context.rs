@@ -1,16 +1,17 @@
 //! The `bal-context` front door's served text, pinned in source: how a host
 //! session refines one story with its owner, from the analyzer's questions in
 //! rounds to the truth draft the owner approves at the terminal (design 0005
-//! sections 5 to 7 and 10, PLN-R1 to PLN-R6, D-14). It is a help row, so it
+//! sections 5 to 7 and 10, PLN-R1 to PLN-R6). It is a help row, so it
 //! gets a skill stub.
 //!
 //! The text is ported from Cadence (ADR 0048). Cadence's own files,
-//! commands and state are replaced by Baley's: `resolve_phase` becomes
-//! resolving the story through the roadmap read; `check_existing` and
-//! `load_priors` become the story's refinement read, current truths
-//! meaning a revision, with the analyzer's priors bound into its order;
-//! `analyze` becomes `story-refine` and the order's `launch`, and the
-//! dispatch bracket becomes `work-order-fail` and `work-order-retry`;
+//! commands and state are replaced by Baley's: the skill's front matter
+//! description and the workflow's purpose become the opening summary line;
+//! `resolve_phase` becomes resolving the story through the roadmap read;
+//! `check_existing` and `load_priors` become the story's refinement read,
+//! current truths meaning a revision, with the analyzer's priors bound into
+//! its order; `analyze` becomes `story-refine` and the order's `launch`, and
+//! the dispatch bracket becomes `work-order-fail` and `work-order-retry`;
 //! `close_gray_areas` and `confirm_decisions` become the rounds through
 //! `bal-rounds`; `acceptance_criteria` becomes the drafted truths and
 //! `context-submit`, its tool-availability tag the truth's `human_verify`
@@ -18,9 +19,12 @@
 //! Baley ADRs:
 //!
 //! - It takes a story id, not a phase, since truths belong to stories
-//!   (ADR 0017).
+//!   (ADR 0017), and says owner where Cadence says user, the glossary's
+//!   term (ADR 0031).
 //! - The spend question is dropped: Baley dispatches the analyzer twice,
-//!   once for questions and once to draft truths (ADR 0030).
+//!   once for questions and once to draft truths (ADR 0030). With it goes
+//!   the plain pass that derives gray areas without the analyzer, on a
+//!   skip or a failed dispatch: a failed order is retried instead.
 //! - Decisions are the owner's answers and deferrals, recorded round by
 //!   round, with no decision list to confirm, no durability filter and no
 //!   flagged assumptions (ADR 0030).
@@ -28,9 +32,25 @@
 //! - No CONTEXT.md, no requirement row correction, no cursor update and no
 //!   commit of planning files: the ledger records every step (ADR 0006).
 //! - The owner approves at the terminal, with no lock-or-edit question put
-//!   by the session, and the two attestations are the owner's (ADR 0044).
+//!   by the session (ADR 0044).
 //! - Cadence's recalled memory is dropped: `recall` is Build 8's,
 //!   `retired("recall", 8)` in `crate::mcp::operations`.
+//!
+//! These rules are added under ADR 0049, which lets a ported text carry a
+//! rule a design requirement states, each stated by a requirement of design
+//! 0005:
+//!
+//! - "Check each against the code and the answers, and drop a truth that
+//!   does not hold before the owner sees it": PLN-R6 has the host session
+//!   drop a draft truth that does not hold against the code or the answers.
+//! - The truth's sentence in its two forms (PLN-R2).
+//! - The two attestations, `observable` and `fixed_oracle`, set only as the
+//!   owner says, and a truth attested false refused `truth-internal` or
+//!   `truth-prose-oracle` (PLN-R3).
+//! - A truth put to the owner keeps its id (PLN-R4).
+//! - The `analyzer-order-pending` and `question-open` refusals of
+//!   `story-refine`, and the owner alone ending a set early by deferring its
+//!   open questions with a reason (section 5, the `story refine` refusals).
 
 /// The registry identity of the context front door.
 pub const IDENTITY: &str = "bal-context";
