@@ -14,26 +14,18 @@ Baley is under active redesign and has no released version. Reports about the cu
 - secrets reaching logs, records or the material sent to review providers;
 - tampering with records that goes undetected.
 
+## How this repository is audited
+
+Baley is audited with [sentinel](https://github.com/jcrenshaw-dev/sentinel), pinned as the `.sentinel` submodule, so the checks that run here are the ones of the kit version this repository was audited with. The full audit runs on the maintainer's machine, never in CI, so findings stay private until they are fixed. Once an audit has run, its record is `SENTINEL.md` at the repository root: the date, the commit it covered, what ran and how it went, and the open findings as counts by severity, with no finding's title or location. The audit only finds and records. It fixes nothing, writes no tests and commits nothing.
+
 ## What runs on every pull request
 
-Two workflows run on every pull request and on every push to `main`.
+Two workflows run on every pull request and every push to `main`. All six of their checks are required by the `main` ruleset, so a pull request cannot merge until each one passes.
 
-- `test.yml` holds the required checks: `cargo-test`, `clippy`, `cargo-deny` and `fmt`. A pull request cannot merge into `main` until all four pass.
-- `fast.yml` runs the fast checks from [sentinel](https://github.com/jcrenshaw-dev/sentinel), in two jobs. Neither is a required check, so neither blocks a merge, but a failed job shows on the pull request.
-  - `mechanical` runs sentinel's `check.sh`. `cargo audit`, `cargo deny`, `cargo clippy` and `semgrep` are gates, and the job fails when one of them fails. `gitleaks`, which reads every commit, `shellcheck` and `zizmor` are reported only. `cargo geiger`, the fuzz builds and Miri need tools CI does not install, so `check.sh` skips them there and they run in the full audit.
-  - `security-review` runs on pull requests only. It has Claude review the pull request's diff against [THREAT-MODEL.md](THREAT-MODEL.md) with read-only tools. This repository is public, so the review is encrypted to the maintainer's key, and the pull request comment shows only the number of findings by severity. It does not wait for `mechanical`, so a failed gate, such as a new advisory against a dependency already in use, does not skip it. The job fails only when the review did not run or its output is malformed. Findings do not fail it. Pull requests opened by Dependabot skip it, because GitHub gives them no secrets.
+- `test.yml` runs `cargo-test`, `clippy`, `cargo-deny` and `fmt`.
+- `fast.yml` is sentinel's workflow, copied from `.sentinel/ci/fast.yml`. Its `mechanical` job runs the kit's `check.sh`, which fails on cargo deny, clippy, semgrep and any audit output tracked in git, and reports the rest. Its `security-review` job runs on pull requests from this repository and has Claude review the diff against [THREAT-MODEL.md](THREAT-MODEL.md) with read-only tools. This repository is public, so the review is encrypted to the maintainer's key and the pull request comment shows only the number of findings by severity. The job fails only when the review did not run; findings do not fail it. `mechanical` also runs on `main` every Monday, so a new advisory against a dependency already in use shows up without a pull request.
 
-## The full audit
-
-The full audit runs on the maintainer's machine through sentinel's `/snt:audit`, never in CI, so findings stay private until they are fixed. It runs in five steps and stops after each one until the maintainer says to go on.
-
-1. **Mechanical checks:** the same `check.sh`, with its output saved to `audit/check.txt`. On the maintainer's machine it also reports `cargo geiger`, a build of the fuzz targets in `crates/baley-core/fuzz` and `crates/baley/fuzz`, and Miri on the unit tests, since the code has `unsafe` blocks. Miri runs each test in its own process through nextest. Undefined behavior is a finding, and the tests Miri cannot run or that time out are counted.
-2. **Claude Security scan:** the maintainer picks a release scan of the whole repository at medium effort, a branch scan of the branch's committed changes at high, or a quick scan of the whole repository at low. After a whole-repository scan, any production file the scan did not cover is named, and a scoped scan of exactly those files is offered.
-3. **Lens pass:** eight review prompts, one concern each, read the whole repository against [THREAT-MODEL.md](THREAT-MODEL.md) on Claude, Codex or both, or not at all. Nothing runs until the maintainer picks.
-4. **Check:** lens findings the scan already reported, that THREAT-MODEL.md documents, or that need a same-user process the threat model does not count as an escalation are set aside with a reason. Read-only subagents trace the rest in the code, and the confirmed ones are kept in `audit/lenses.md`.
-5. **Findings log:** one row per step: which mechanical checks failed, and how many findings the scan, and the lenses after the check, reported at each severity.
-
-The audit finds and records. It fixes no code, writes no tests and commits nothing. What happens to each finding is the maintainer's decision.
+The full list of checks, which ones gate and which only report, is in the kit's README at `.sentinel/README.md`, at the version this repository is pinned to.
 
 ## Fixed findings
 
