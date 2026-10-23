@@ -17,6 +17,7 @@ use crate::help::front_door;
 pub mod analyzer;
 pub mod capture;
 pub mod context;
+pub mod planner;
 pub mod read_contract;
 pub mod rounds;
 pub mod scope;
@@ -320,6 +321,17 @@ pub static ENTRIES: &[Entry] = &[
             version: analyzer::DRAFTING_VERSION,
             hash: analyzer::DRAFTING_HASH,
             body: analyzer::DRAFTING_TEXT,
+        }),
+    },
+    // Build 4 serves the planner's text by identity inside a planner order,
+    // never as a help row.
+    Entry {
+        identity: planner::IDENTITY,
+        build: 4,
+        text: Some(Text {
+            version: planner::VERSION,
+            hash: planner::HASH,
+            body: planner::TEXT,
         }),
     },
 ];
