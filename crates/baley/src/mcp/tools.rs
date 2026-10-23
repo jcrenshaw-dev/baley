@@ -398,6 +398,7 @@ mod tests {
         // story-questions-submit takes request_id, story, work_order and
         // questions, context-submit takes request_id, work_order, story, set
         // and truths,
+        // context-intake takes story and part,
         // and route takes role or work_order.
         let names = |tool| {
             let schema = input_schema(tool);
@@ -419,6 +420,7 @@ mod tests {
                 "operation",
                 "part",
                 "role",
+                "story",
                 "tool",
                 "work_order"
             ]
@@ -472,7 +474,9 @@ mod tests {
             .map(description)
             .collect();
         assert!(
-            parts.iter().any(|d| d.ends_with("Taken by help.")),
+            parts
+                .iter()
+                .any(|d| d.ends_with("Taken by help and context-intake.")),
             "{parts:?}"
         );
         assert!(

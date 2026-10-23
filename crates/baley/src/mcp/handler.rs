@@ -10,10 +10,10 @@
 //! `scope-submit`, the ten change operations from `project-describe` to
 //! `backlog-reorder`, `project-start`, `work-order-fail`, `work-order-retry`,
 //! `questions-answer`, `story-refine`, `story-questions-submit`,
-//! `context-submit`, `document` and `route` set
+//! `context-submit`, `document`, `context-intake` and `route` set
 //! `needs_project`, and in their [`operate`] arms the writes prepare a write
-//! from it, `document` a read and `route` a read that also reads the
-//! settings.
+//! from it, `document` and `context-intake` a read and `route` a read that
+//! also reads the settings.
 //! rmcp has already validated the request's metadata by the time any
 //! of this runs, so a protocol-required metadata error stays a protocol error
 //! and runs nothing.
@@ -164,7 +164,7 @@ fn run_decision(
 /// project call's [`Preparation`] together, so an arm that needs a project
 /// names the input in its pattern and the arms that need none ignore it.
 /// `capture`, `scope-submit` and the ten change operations prepare a write
-/// from the [`Preparation`], and `document` a read.
+/// from the [`Preparation`], and `document` and `context-intake` a read.
 pub(crate) fn operate(
     called: &Called,
     arguments: Option<&Value>,
@@ -211,6 +211,9 @@ pub(crate) fn operate(
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "context-submit" => {
             refine::serve_context(arguments_or_null, preparation)
+        }
+        (Called::Operation(_, spelling), Some(preparation)) if spelling == "context-intake" => {
+            refine::serve_intake(arguments_or_null, preparation)
         }
         (Called::Operation(_, spelling), Some(preparation)) if spelling == "route" => {
             work_order::serve_route(arguments_or_null, preparation)

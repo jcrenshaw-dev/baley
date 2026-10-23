@@ -26,6 +26,7 @@ use baley_store::{
     Hash, IndexQuery, KeyValue, Ledger, PageRequest, PayloadBody, PayloadRef, PayloadStatus,
     Payloads, ProjectId, Views,
 };
+use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -230,10 +231,20 @@ pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
         Ok(shape) => shape,
         Err(refusal) => return refusal,
     };
+    match prepared_read(preparation) {
+        Ok((store, project)) => read(store, &project, &shape),
+        Err(answer) => answer,
+    }
+}
+
+/// Prepares a read for the session's `preparation`: finds the project and
+/// checks the ledger knows it, recording nothing, and gives the store and
+/// the project. A `failed` preparation answer is the error as it is.
+pub(crate) fn prepared_read(preparation: &Preparation) -> Result<(&SqliteStore, ProjectId), Value> {
     let ledger = preparation.ledger.as_deref();
     // A read reads no settings, so the config folder is never opened.
     let config = ledger.map_or(Path::new(""), |ledger| ledger.config.as_path());
-    let prepared = match prepare(
+    let prepared = prepare(
         ledger.map(|ledger| &ledger.store),
         &preparation.caller,
         None,
@@ -241,18 +252,16 @@ pub fn serve(arguments: &Value, preparation: &Preparation) -> Value {
         preparation.host,
         &preparation.at,
         &mut crate::process::System,
-    ) {
-        Ok(prepared) => prepared,
-        Err(failed) => return serde_json::to_value(*failed).expect("a failed answer serializes"),
-    };
+    )
+    .map_err(|failed| serde_json::to_value(*failed).expect("a failed answer serializes"))?;
     let Some(ledger) = ledger else {
-        return failed(
+        return Err(failed(
             LEDGER_UNAVAILABLE,
             "the read was prepared without a ledger",
             PLACE_LEDGER,
-        );
+        ));
     };
-    read(&ledger.store, &prepared.project, &shape)
+    Ok((&ledger.store, prepared.project))
 }
 
 /// A busy ledger's reason when a capture was not read.

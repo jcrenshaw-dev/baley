@@ -4,7 +4,9 @@
 //! and submits the truths it drafted as a draft the owner approves at the
 //! terminal (design 0005 `story refine`, `story questions submit` and
 //! `story truths submit`, PLN-R2 to PLN-R6, D-06, D-07, D-08, D-09, D-19).
-//! No operation here approves anything (ADR 0044).
+//! No operation here approves anything (ADR 0044). `context-intake` on
+//! `baley_query` reads a story's refinement by its id, as the `document`
+//! kind `refinement` does, recording nothing and issuing no order (D-10).
 //!
 //! Each call's arguments are judged before anything is prepared. The write
 //! is then prepared with the call's check as its own check, so every refusal
@@ -19,7 +21,7 @@ use std::num::NonZeroU32;
 use baley_core::policy::AcceptedNames;
 use baley_core::questions::{QuestionSet, SetRefusal, judge_set};
 use baley_core::truth::{TruthRefusal, TruthSubmission, judge_truths};
-use baley_store::{CommandKind, InstructionEvidence, ProjectId, RequestId, request_digest};
+use baley_store::{CommandKind, InstructionEvidence, ProjectId, RequestId, Views, request_digest};
 use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -27,6 +29,7 @@ use serde_json::{Map, Value, json};
 
 use crate::envelope::Refusal;
 use crate::mcp::capture::store_failed;
+use crate::mcp::document::{prepared_read, read_failed, refinement_answer};
 use crate::mcp::handler::Preparation;
 use crate::mcp::prepare::WriteRequest;
 use crate::mcp::scope::{bind_instructions, order_caller};
@@ -35,7 +38,9 @@ use crate::mcp::work_order::{
 };
 use crate::refine::order;
 use crate::refine::questions::{self, QUESTIONS_SUBMIT_COMMAND};
+use crate::refine::read::read as read_refinement;
 use crate::refine::submit as truths;
+use crate::scope::read::{NO_SUCH_STORY, ReadError};
 use crate::scope::submit::{NOT_RECORDED_BUSY, SUBMIT_COMMAND};
 use crate::work_order::issue as recording;
 use crate::work_order::route::host_names;
@@ -508,6 +513,76 @@ pub fn serve_context(arguments: &Value, preparation: &Preparation) -> Value {
     }
 }
 
+// `schema` serves this same declaration, so its doc comments are wire text.
+/// The arguments `context-intake` takes beside its `operation`. Unknown
+/// fields are refused.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IntakeShape {
+    /// The id of the story whose refinement to read, as the roadmap or the
+    /// backlog gives it.
+    pub story: u32,
+    /// One-based part for answers over 24,576 bytes; defaults to 1.
+    /// Concatenate the returned bodies in order.
+    pub part: Option<usize>,
+}
+
+/// The tagged form `context-intake`'s arguments arrive in.
+#[derive(Deserialize)]
+#[serde(tag = "operation")]
+enum IntakeCall {
+    #[serde(rename = "context-intake")]
+    Intake(IntakeShape),
+}
+
+/// Judges `context-intake`'s arguments. A shape fault, the parked `phase`
+/// key among them, is `invalid-arguments`, answered before anything is
+/// prepared.
+pub fn judge_intake_arguments(arguments: &Value) -> Result<IntakeShape, Value> {
+    match serde_json::from_value::<IntakeCall>(arguments.clone()) {
+        Ok(IntakeCall::Intake(shape)) => Ok(shape),
+        Err(error) => Err(Refusal::new("invalid-arguments", error.to_string())
+            .slot("arguments")
+            .value()),
+    }
+}
+
+/// Serves one `context-intake` call for the session's `preparation`, as
+/// `document` serves a read: the arguments are judged first, then the read
+/// is prepared, which records nothing, then [`intake_answer`] reads the
+/// story's refinement from the project. A `failed` preparation answer is
+/// returned as it is. No order is issued and nothing is appended (D-10).
+pub fn serve_intake(arguments: &Value, preparation: &Preparation) -> Value {
+    let shape = match judge_intake_arguments(arguments) {
+        Ok(shape) => shape,
+        Err(refusal) => return refusal,
+    };
+    match prepared_read(preparation) {
+        Ok((store, project)) => intake_answer(store, &project, &shape),
+        Err(answer) => answer,
+    }
+}
+
+/// The answer for `context-intake` over `store`: the story's refinement in
+/// the members the `document` read of kind `refinement` answers, without an
+/// `identity`, in parts when large. A story the roadmap does not hold is
+/// `no-such-story` at slot `story`, echoing none of its id.
+pub fn intake_answer<S: Views + ?Sized>(
+    store: &S,
+    project: &ProjectId,
+    shape: &IntakeShape,
+) -> Value {
+    match read_refinement(store, project, shape.story) {
+        Ok(refinement) => refinement_answer(None, refinement, shape.part),
+        Err(ReadError::NoSuchStory) => {
+            Refusal::new(NO_SUCH_STORY, "this project has no such story")
+                .slot("story")
+                .value()
+        }
+        Err(error) => read_failed(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Expected answers are written out from design 0005, D-19 and
@@ -808,5 +883,61 @@ mod tests {
                 .contains(&answer["code"].as_str().unwrap()),
             "{answer}"
         );
+    }
+
+    #[test]
+    fn context_intake_left_retired_keyed_by_phase_or_moved_is_caught() {
+        use crate::mcp::operations::QUERY_OPERATIONS;
+
+        let names: Vec<&str> = QUERY_OPERATIONS.iter().map(|op| op.name).collect();
+        let at = names
+            .iter()
+            .position(|name| *name == "context-intake")
+            .expect("listed");
+        assert_eq!(names[at - 1], "plan-read");
+        assert_eq!(names[at + 1], "route");
+        assert_eq!(
+            lookup(Tool::Query, Some("context-intake")),
+            Lookup::Available {
+                needs_project: true
+            }
+        );
+        let answer = schema_answer(
+            &json!({"operation": "schema", "tool": "query", "for": "context-intake"}),
+        );
+        assert_eq!(answer["status"], "ok", "{answer}");
+        let required = answer["schema"]["required"].as_array().unwrap();
+        assert!(required.contains(&json!("story")), "{answer}");
+        assert!(!required.contains(&json!("part")), "{answer}");
+        assert!(!required.contains(&json!("phase")), "{answer}");
+        assert!(
+            answer["schema"]["properties"].get("part").is_some(),
+            "{answer}"
+        );
+
+        let caller = ServerCaller::new(
+            "/real/r",
+            "/real/r",
+            "claude-code",
+            "0b7e4a52-3c1d-4f6a-8e9b-1a2b3c4d5e6f",
+            &json!(7),
+        )
+        .unwrap();
+        let preparation = Preparation {
+            ledger: None,
+            host: Host::ClaudeCode,
+            caller,
+            at: "2026-10-22T09:00:00Z".into(),
+        };
+        // The arguments are judged before anything is prepared, so the parked
+        // phase key is refused even with no ledger.
+        let answer = crate::mcp::handler::operate(
+            &Called::Operation(Tool::Query, "context-intake".into()),
+            Some(&json!({"operation": "context-intake", "phase": 1})),
+            Some(&preparation),
+        );
+        assert_eq!(answer["status"], "refused", "{answer}");
+        assert_eq!(answer["code"], "invalid-arguments", "{answer}");
+        assert_eq!(answer["slot"], "arguments", "{answer}");
     }
 }

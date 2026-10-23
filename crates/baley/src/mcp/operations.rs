@@ -105,7 +105,7 @@ pub const QUERY_OPERATIONS: &[Operation] = &[
     retired("execution-history", 5),
     retired("evidence-read", 5),
     retired("plan-read", 4),
-    retired("context-intake", 4),
+    with_project("context-intake"),
     with_project("route"),
     retired("config-entry", 2),
     retired("config-facts", 2),
@@ -387,6 +387,9 @@ enum RequestShape {
     // `story-questions-submit` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "story-questions-submit")]
     StoryQuestionsSubmit(#[allow(dead_code)] crate::mcp::refine::QuestionsShape),
+    // `context-intake` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "context-intake")]
+    ContextIntake(#[allow(dead_code)] crate::mcp::refine::IntakeShape),
     // `route` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "route")]
     Route(#[allow(dead_code)] crate::mcp::work_order::RouteShape),
@@ -741,6 +744,7 @@ mod tests {
                     "story-refine",
                     "story-questions-submit",
                     "context-submit",
+                    "context-intake",
                     "route",
                 ]
                 .contains(n)
@@ -757,7 +761,7 @@ mod tests {
                 needs_project: true
             }
         );
-        for name in ["document", "route"] {
+        for name in ["document", "context-intake", "route"] {
             assert_eq!(
                 lookup(Tool::Query, Some(name)),
                 Lookup::Available {
@@ -807,7 +811,6 @@ mod tests {
         assert_eq!(build(Tool::Query, "plan-read"), 4);
         assert_eq!(build(Tool::Apply, "review-admit"), 4);
         assert_eq!(build(Tool::Apply, "risk-fire"), 4);
-        assert_eq!(build(Tool::Query, "context-intake"), 4);
         assert_eq!(build(Tool::Query, "detect-surfaces"), 4);
         assert_eq!(build(Tool::Apply, "execution-run"), 5);
         assert_eq!(build(Tool::Query, "verify-next"), 5);
@@ -1032,14 +1035,15 @@ mod tests {
     #[test]
     fn the_document_schema_does_not_omit_or_widen_the_capture_identity() {
         // Design 0012: a capture by its string id, a draft by its string
-        // digest, the roadmap with no other field, a story by its integer id
-        // a work order by its string id and a question set by its string
-        // set id, each refusing any other field.
+        // digest, the roadmap with no other field, a story by its integer id,
+        // a work order by its string id, a question set by its string set id
+        // and a refinement by its integer story id, each refusing any other
+        // field.
         let schema = served_schema("document").unwrap();
         let identities = schema["properties"]["identity"]["oneOf"]
             .as_array()
             .unwrap();
-        assert_eq!(identities.len(), 6, "{identities:?}");
+        assert_eq!(identities.len(), 7, "{identities:?}");
         for (identity, kind, field) in [
             (&identities[0], "capture", Some(("id", "string"))),
             (&identities[1], "draft", Some(("digest", "string"))),
@@ -1047,6 +1051,7 @@ mod tests {
             (&identities[3], "story", Some(("id", "integer"))),
             (&identities[4], "work_order", Some(("id", "string"))),
             (&identities[5], "questions", Some(("set", "string"))),
+            (&identities[6], "refinement", Some(("story", "integer"))),
         ] {
             assert_eq!(identity["type"], "object", "{identity}");
             assert_eq!(identity["properties"]["kind"]["const"], kind, "{identity}");
