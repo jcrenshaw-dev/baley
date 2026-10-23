@@ -461,7 +461,7 @@ fn unreadable(view: &str) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! Stores are real SQLite stores in fresh temporary directories, with
     //! times supplied; expected answers are written out from design 0005,
     //! D-08, D-09, owner ruling R3 and the plan's data S1 and Q1, never
