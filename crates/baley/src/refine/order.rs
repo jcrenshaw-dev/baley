@@ -1,13 +1,16 @@
 //! A story's analyzer order (design 0005 `story refine`, PLN-R6, D-08,
-//! D-09): the check that chooses the questions order or the drafting
-//! order, judged before admission and recording nothing.
+//! D-09, D-21): the check that chooses the questions order or the drafting
+//! order, judged before admission and recording nothing, and the issue of
+//! the order it chose on the `roadmap` stream.
 //!
 //! A story has one live analyzer order, and no order is chosen while a
 //! question of its latest set is open, so a set mid-answer is never
 //! abandoned by a new one and truths are never drafted before the owner
 //! decided.
 
-use baley_core::policy::Role;
+use std::num::NonZeroU32;
+
+use baley_core::policy::{AcceptedNames, EffectivePolicy, Host, Role};
 use baley_core::questions::{SetFacts, questions_key};
 use baley_core::scope::{BACKLOG_VIEW, NO_SUCH_STORY, PHASE_VIEW, backlog_key, phase_key};
 use baley_core::truth::{DISPATCH_ACTIVE, QUESTION_OPEN, Refinement, refinement};
@@ -15,16 +18,22 @@ use baley_core::work_order::{
     ANALYZER_ORDER_PENDING, PENDING, WORK_ORDER_LIVE_INDEX, WORK_ORDER_VIEW, story_subject,
 };
 use baley_store::{
-    IndexQuery, KeyValue, ObservedDocument, PageRequest, ProjectId, StoreError, Views,
+    Absence, Command, IndexQuery, KeyValue, ObservedDocument, PageRequest, ProjectId, StoreError,
+    Views,
 };
-use serde_json::{Value, json};
+use baley_store_sqlite::SqliteStore;
+use serde_json::{Map, Value, json};
 
 use crate::envelope::{LEDGER_BUSY, Refusal};
+use crate::instruction::analyzer::{DRAFTING_IDENTITY, QUESTIONS_IDENTITY};
 use crate::mcp::capture::{PLACE_LEDGER, failed, store_failed};
 use crate::mcp::prepare::LEDGER_UNAVAILABLE;
 use crate::questions::read::{SetRead, read as read_set};
+use crate::refine::inputs::{self, QUESTIONS_INPUT, questions_body};
 use crate::scope::read::{ReadError, Story, story as read_story};
 use crate::scope::submit::{NOT_RECORDED_BUSY, scope_unread};
+use crate::work_order::issue::{self, Input, Issue};
+use crate::work_order::route::compose;
 
 /// The status a dropped story holds.
 const DROPPED: &str = "dropped";
@@ -44,6 +53,14 @@ impl OrderKind {
         match self {
             Self::Questions => "questions",
             Self::Drafting => "drafting",
+        }
+    }
+
+    /// The identity of the text the order's worker reads.
+    pub fn instruction(self) -> &'static str {
+        match self {
+            Self::Questions => QUESTIONS_IDENTITY,
+            Self::Drafting => DRAFTING_IDENTITY,
         }
     }
 }
@@ -139,6 +156,108 @@ pub fn check<S: Views + ?Sized>(
         latest: state.latest,
         documents: state.documents,
     })
+}
+
+/// Issues the order `checked` chose as `id` under `command`, the command its
+/// caller prepared: its subject the story's analyzer subject, so it goes on
+/// `roadmap` (D-19); the route for `analyzer` at attempt 1 under `policy`,
+/// the host's effective policy, at the command's policy version, with the
+/// catalog `names`; the evidence of the questions or drafting text; and the
+/// inputs read now (D-21), with a drafting order's `questions` built from the
+/// latest set's facts. The decision declares no pending analyzer order of the
+/// story and observes every document the check and the input read saw, so an
+/// order issued, a set answered, a description approved or a story refined
+/// since makes the call `ledger-busy` with nothing recorded. The id is also
+/// its request, and it has no parent. The receipt adds `analyzer`, the
+/// order's kind, so a session knows which return to expect.
+pub fn issue(
+    store: &SqliteStore,
+    command: &Command,
+    checked: &Checked,
+    policy: &EffectivePolicy,
+    host: Host,
+    names: &AcceptedNames,
+    id: &str,
+) -> Value {
+    let story = checked.story.id;
+    let instructions = match crate::instruction::evidence(checked.kind.instruction()) {
+        Ok(evidence) => [evidence],
+        Err(refusal) => return refusal,
+    };
+    let route = match compose(
+        policy,
+        command.policy_version,
+        host,
+        Role::Analyzer,
+        NonZeroU32::MIN,
+        names,
+    ) {
+        Ok(route) => route,
+        Err(refusal) => return Refusal::new(refusal.code(), refusal.to_string()).value(),
+    };
+    let read = match inputs::read(store, &command.project, story) {
+        Ok(read) => read,
+        Err(error) => return scope_unread(&error),
+    };
+    let questions = match (checked.kind, &checked.latest) {
+        (OrderKind::Drafting, Some(set)) => {
+            match inputs::bytes(&questions_body(&set.id, &set.facts)) {
+                Ok(bytes) => Some(bytes),
+                Err(error) => return scope_unread(&error),
+            }
+        }
+        _ => None,
+    };
+    let mut bound: Vec<Input<'_>> = read
+        .inputs
+        .iter()
+        .map(|(name, bytes)| Input::Bytes { name, bytes })
+        .collect();
+    if let Some(bytes) = &questions {
+        bound.push(Input::Bytes {
+            name: QUESTIONS_INPUT,
+            bytes,
+        });
+    }
+    let documents: Vec<ObservedDocument> = read
+        .documents
+        .iter()
+        .chain(&checked.documents)
+        .cloned()
+        .collect();
+    let absences = analyzer_absences(story);
+    let subject = story_subject(story);
+    let mut further = Map::new();
+    further.insert("analyzer".into(), json!(checked.kind.as_str()));
+    let issue = Issue {
+        id,
+        request: id,
+        parent: None,
+        subject: &subject,
+        route: &route,
+        instructions: &instructions,
+        inputs: &bound,
+        absences: &absences,
+        streams: &[],
+        documents: &documents,
+        further: &further,
+    };
+    issue::answer(issue::record(store, command, Some(&issue)), store)
+}
+
+/// The fact an analyzer order of story `story` relies on being absent: a
+/// pending analyzer order of the same story on the `live` index (D-09).
+pub fn analyzer_absences(story: u32) -> Vec<Absence> {
+    let text = |value: &str| KeyValue::Text(value.into());
+    vec![Absence::Documents {
+        view: WORK_ORDER_VIEW.into(),
+        index: WORK_ORDER_LIVE_INDEX.into(),
+        equals: vec![
+            text(Role::Analyzer.name()),
+            text(&story_subject(story)),
+            text(PENDING),
+        ],
+    }]
 }
 
 /// The id of story `story`'s pending analyzer order in `project`, the newest
@@ -351,28 +470,24 @@ mod tests {
     use std::collections::BTreeSet;
     use std::num::NonZeroU32;
 
+    use super::*;
+    use crate::questions::record::tests::{open_set, q1, story as subject};
+    use crate::scope::fixtures::*;
     use baley_core::policy::{AcceptedNames, Host, Schema, effective_policy};
     use baley_core::questions::{
         QUESTION_ANSWERED, QUESTION_ANSWERED_VERSION, answered_payload, judge_set,
     };
     use baley_core::scope::{ChangeKind, ROADMAP_STREAM};
     use baley_core::truth::{STORY_REFINED, STORY_REFINED_VERSION};
+    use baley_core::work_order::WORK_ORDER_ISSUED;
     use baley_store::{Hash, NewEvent, StreamName};
     use baley_store_sqlite::SqliteStore;
-    use serde_json::Map;
-
-    use super::*;
-    use crate::questions::record::tests::{open_set, q1, story as subject};
-    use crate::scope::fixtures::*;
-    use crate::work_order::issue::{self, Input, Issue};
-    use crate::work_order::route::compose;
-
     pub(crate) const I0: &str = "6e2d3c4b-5f60-4b7c-9d8e-0f1a2b3c4d5e";
 
     /// A store holding S1, approved.
     pub(crate) fn approved() -> (tempfile::TempDir, SqliteStore) {
         let (dir, store) = store();
-        let digest = receipt(&submit(&store, &s1(), R1, 1, T1).unwrap())["digest"]
+        let digest = receipt(&submit(&store, &s1(), R9, 1, T1).unwrap())["digest"]
             .as_str()
             .and_then(Hash::from_hex)
             .unwrap();
@@ -564,5 +679,164 @@ mod tests {
         let fault = dispatch_of(Some("executing")).expect_err("an unknown status is a fault");
         assert_eq!(fault["status"], "failed");
         assert_eq!(fault["code"], "ledger-unavailable");
+    }
+
+    pub(crate) const I3: &str = "8a4f5e6d-7182-4d9e-9fa0-2b3c4d5e6f70";
+    const I4: &str = "9b5a6f7e-8293-4eaf-8ab1-3c4d5e6f7081";
+
+    /// Issues what `checked` chose as `id` under `request_id` at `at`, with
+    /// the default policy, which sets nothing for the analyzer, and an empty
+    /// catalog.
+    pub(crate) fn issue_checked(
+        store: &SqliteStore,
+        checked: &Checked,
+        id: &str,
+        request_id: &str,
+        at: &str,
+    ) -> Value {
+        let policy =
+            effective_policy(Schema::standard(), Some(Host::ClaudeCode), None, None).unwrap();
+        let names = AcceptedNames {
+            names: BTreeSet::new(),
+            version: 0,
+        };
+        let command = command("story.refine", request_id, 7, at);
+        issue(
+            store,
+            &command,
+            checked,
+            &policy,
+            Host::ClaudeCode,
+            &names,
+            id,
+        )
+    }
+
+    fn issued(store: &SqliteStore) -> Vec<baley_store::Event> {
+        of_type(&history(store), WORK_ORDER_ISSUED)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    fn input_names(event: &baley_store::Event) -> Vec<&str> {
+        event.payload["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|input| input["name"].as_str().unwrap())
+            .collect()
+    }
+
+    fn state(store: &SqliteStore, id: &str) -> Value {
+        crate::work_order::read::order(store, &project(), id)
+            .unwrap()
+            .expect("the order is held")["state"]
+            .clone()
+    }
+
+    #[test]
+    fn an_analyzer_order_recorded_off_its_story_or_with_the_wrong_text_is_caught() {
+        let (_dir, store) = approved();
+        let checked = check(&store, &project(), 1).unwrap();
+        let receipt = issue_checked(&store, &checked, I0, R1, T4);
+
+        assert_eq!(receipt["status"], "ok", "{receipt}");
+        assert_eq!(receipt["work_order"], I0);
+        assert_eq!(receipt["attempt"], 1);
+        assert_eq!(receipt["agent"], "bal-analyzer-high");
+        assert_eq!(receipt["analyzer"], "questions");
+        let issued = issued(&store);
+        assert_eq!(issued.len(), 1);
+        assert_eq!(issued[0].stream, "roadmap");
+        assert_eq!(issued[0].payload["role"], "analyzer");
+        assert_eq!(issued[0].payload["subject"], "story/1");
+        assert_eq!(
+            issued[0].payload["instructions"],
+            json!([{"identity": "bal-analyzer-questions", "version": "1",
+                "hash": "bf73b552ba3f4247d11f2ac8897f12065de8f9e63f065619e4837317a293a937"}])
+        );
+        assert_eq!(input_names(&issued[0]), ["story", "description", "roadmap"]);
+        assert_eq!(state(&store, I0), "pending");
+    }
+
+    /// The body of the input `name` an issued order holds.
+    fn input_body(store: &SqliteStore, event: &baley_store::Event, name: &str) -> Value {
+        use std::io::Read;
+
+        use baley_store::{PayloadBody, Payloads};
+
+        let input = event.payload["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|input| input["name"] == name)
+            .unwrap_or_else(|| panic!("no input {name}"));
+        let hash = Hash::from_hex(input["body"]["payload"].as_str().unwrap()).unwrap();
+        let PayloadBody::Present(mut reader) = store.open(&hash).unwrap() else {
+            panic!("the {name} body is present");
+        };
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn a_drafting_order_issued_without_the_answers_is_caught() {
+        let (_dir, store) = approved();
+        let set = open_set(&store, R2, &q1(), &subject(1));
+        answer_by_hand(&store, &set, "q1", 1, R3);
+        answer_by_hand(&store, &set, "q2", 2, R4);
+        let checked = check(&store, &project(), 1).unwrap();
+        let receipt = issue_checked(&store, &checked, I0, R1, T4);
+
+        assert_eq!(receipt["analyzer"], "drafting", "{receipt}");
+        let issued = issued(&store);
+        assert_eq!(
+            issued[0].payload["instructions"][0]["identity"],
+            "bal-analyzer-drafting"
+        );
+        assert_eq!(
+            input_names(&issued[0]),
+            ["story", "description", "roadmap", "questions"]
+        );
+        let questions = input_body(&store, &issued[0], "questions");
+        assert_eq!(questions["set"], set.as_str());
+        assert_eq!(
+            questions["answers"],
+            json!([
+                {"question": "q1", "answer": "SQLite", "accepted": true, "round": 1,
+                    "owner": "Ada Owner", "at": T3},
+                {"question": "q2", "answer": "SQLite", "accepted": true, "round": 2,
+                    "owner": "Ada Owner", "at": T3}])
+        );
+    }
+
+    #[test]
+    fn an_order_issued_over_a_moved_set_or_a_second_live_order_is_caught() {
+        let (_dir, store) = approved();
+        let stale = check(&store, &project(), 1).unwrap();
+        let set = open_set(&store, R2, &q1(), &subject(1));
+        let before = head(&store);
+        let busy = issue_checked(&store, &stale, I0, R1, T4);
+        assert_eq!(busy["status"], "failed", "{busy}");
+        assert_eq!(busy["code"], "ledger-busy", "{busy}");
+        assert_eq!(head(&store), before);
+
+        answer_by_hand(&store, &set, "q1", 1, R3);
+        answer_by_hand(&store, &set, "q2", 2, R4);
+        let checked = check(&store, &project(), 1).unwrap();
+        assert_eq!(checked.kind, OrderKind::Drafting);
+        let first = issue_checked(&store, &checked, I3, R6, T5);
+        assert_eq!(first["status"], "ok", "{first}");
+        let before = head(&store);
+        let second = issue_checked(&store, &checked, I4, R7, T6);
+        assert_eq!(second["status"], "failed", "{second}");
+        assert_eq!(second["code"], "ledger-busy", "{second}");
+        assert_eq!(head(&store), before);
+        assert_eq!(
+            pending_analyzer(&store, &project(), 1).unwrap().as_deref(),
+            Some(I3)
+        );
     }
 }
