@@ -1,7 +1,8 @@
 //! The recording of one issued order (design 0001 Streams and Payloads,
 //! design 0012): its inputs as `record` payloads and one `work_order.issued`
 //! on its subject's stream, in one domain transaction under the command its
-//! caller prepared.
+//! caller prepared, or inside a transaction its caller runs, so an order is
+//! recorded with the answers or set that issued it.
 //!
 //! The caller judges everything first and supplies what its judgement read:
 //! the facts that must still be absent, the stream versions it saw and the
@@ -17,7 +18,7 @@ use baley_core::work_order::{
 use baley_store::{
     Absence, Command, Decision, InstructionEvidence, KeyValue, Ledger, NewEvent, Observed,
     ObservedDocument, OutcomeKind, Payloads, Recorded, Refusal as StoreRefusal, RetentionClass,
-    StoreError, StreamName,
+    StoreError, StreamName, Transaction,
 };
 use serde_json::{Map, Value, json};
 
@@ -127,60 +128,9 @@ pub fn record<L: Ledger + ?Sized>(
                 "a work order reached its transaction without what it is issued with".into(),
             ));
         };
-        let Some(stream) = order_stream(issue.subject) else {
-            return Err(StoreError::Unavailable(format!(
-                "no stream records orders about {}",
-                issue.subject
-            )));
-        };
-        for (read, version) in issue.streams {
-            tx.expect(read, *version)?;
-        }
-        let mut inputs = Vec::with_capacity(issue.inputs.len());
-        for input in issue.inputs {
-            inputs.push(match input {
-                Input::Bytes { name, bytes } => OrderInput {
-                    name: (*name).into(),
-                    body: tx.put_payload(bytes, RetentionClass::Record)?,
-                },
-                Input::Held(held) => (*held).clone(),
-            });
-        }
-        let route = &issue.route.route;
-        let payload = issued_payload(&IssuedOrder {
-            id: issue.id,
-            request: issue.request,
-            parent: issue.parent,
-            role: route.role,
-            subject: issue.subject,
-            attempt: route.attempt,
-            route: &issue.route.record,
-            agent: &issue.route.agent,
-            instructions: issue.instructions,
-            inputs: &inputs,
-        });
-        tx.append(NewEvent {
-            stream: StreamName(stream.into()),
-            type_name: WORK_ORDER_ISSUED.into(),
-            type_version: WORK_ORDER_ISSUED_VERSION,
-            git: None,
-            payload,
-            attachments: inputs.iter().map(|input| input.body.clone()).collect(),
-        })?;
         let mut receipt = Map::new();
         receipt.insert("status".into(), json!("ok"));
-        receipt.insert("work_order".into(), json!(issue.id));
-        receipt.insert("request".into(), json!(issue.request));
-        receipt.insert("attempt".into(), json!(route.attempt));
-        receipt.insert("agent".into(), json!(issue.route.agent));
-        receipt.insert("model".into(), json!(route.model));
-        receipt.insert("prompt".into(), json!(prompt(issue.id)));
-        receipt.insert(
-            "launch".into(),
-            json!(launch(&issue.route.agent, route.model.as_deref())),
-        );
-        receipt.insert("recorded_at".into(), json!(command.recorded_at));
-        receipt.extend(issue.further.clone());
+        receipt.extend(issue_within(tx, issue, &command.recorded_at)?);
         Ok(Decision {
             kind: OutcomeKind::Done,
             answer: Value::Object(receipt),
@@ -193,6 +143,75 @@ pub fn record<L: Ledger + ?Sized>(
             git: None,
         })
     })
+}
+
+/// Issues `issue` inside `tx`, a transaction its caller runs, recorded at
+/// `recorded_at`: its inputs stored as `record` payloads and one
+/// `work_order.issued` on its subject's stream, after the stream versions it
+/// names are confirmed. It builds no decision, so the caller declares the
+/// issue's absences and observed documents in its own beside its own, and
+/// the order is recorded with the caller's records or not at all, as a
+/// closing answer issues the drafting order. The answer is the receipt's
+/// members other than `status`.
+pub fn issue_within(
+    tx: &mut dyn Transaction,
+    issue: &Issue<'_>,
+    recorded_at: &str,
+) -> Result<Map<String, Value>, StoreError> {
+    let Some(stream) = order_stream(issue.subject) else {
+        return Err(StoreError::Unavailable(format!(
+            "no stream records orders about {}",
+            issue.subject
+        )));
+    };
+    for (read, version) in issue.streams {
+        tx.expect(read, *version)?;
+    }
+    let mut inputs = Vec::with_capacity(issue.inputs.len());
+    for input in issue.inputs {
+        inputs.push(match input {
+            Input::Bytes { name, bytes } => OrderInput {
+                name: (*name).into(),
+                body: tx.put_payload(bytes, RetentionClass::Record)?,
+            },
+            Input::Held(held) => (*held).clone(),
+        });
+    }
+    let route = &issue.route.route;
+    let payload = issued_payload(&IssuedOrder {
+        id: issue.id,
+        request: issue.request,
+        parent: issue.parent,
+        role: route.role,
+        subject: issue.subject,
+        attempt: route.attempt,
+        route: &issue.route.record,
+        agent: &issue.route.agent,
+        instructions: issue.instructions,
+        inputs: &inputs,
+    });
+    tx.append(NewEvent {
+        stream: StreamName(stream.into()),
+        type_name: WORK_ORDER_ISSUED.into(),
+        type_version: WORK_ORDER_ISSUED_VERSION,
+        git: None,
+        payload,
+        attachments: inputs.iter().map(|input| input.body.clone()).collect(),
+    })?;
+    let mut receipt = Map::new();
+    receipt.insert("work_order".into(), json!(issue.id));
+    receipt.insert("request".into(), json!(issue.request));
+    receipt.insert("attempt".into(), json!(route.attempt));
+    receipt.insert("agent".into(), json!(issue.route.agent));
+    receipt.insert("model".into(), json!(route.model));
+    receipt.insert("prompt".into(), json!(prompt(issue.id)));
+    receipt.insert(
+        "launch".into(),
+        json!(launch(&issue.route.agent, route.model.as_deref())),
+    );
+    receipt.insert("recorded_at".into(), json!(recorded_at));
+    receipt.extend(issue.further.clone());
+    Ok(receipt)
 }
 
 /// A busy ledger's reason when a recorded answer was not read.
@@ -474,6 +493,99 @@ mod tests {
         let after = start(&store, I1, R5, T6);
         assert_eq!(after["status"], "ok", "{after}");
         assert_eq!(after["work_order"], I1);
+    }
+
+    #[test]
+    fn an_issue_inside_a_callers_transaction_lost_or_split_is_caught() {
+        use baley_core::questions::{QUESTIONS_OPENED, judge_set};
+        use baley_store::{Decision, Observed, OutcomeKind};
+
+        use crate::questions::record::open;
+        use crate::questions::record::tests::{declare, story};
+
+        let (_dir, store) = store();
+        declare(&store, &project(), 1);
+        let policy =
+            effective_policy(Schema::standard(), Some(Host::ClaudeCode), None, None).unwrap();
+        let names = AcceptedNames {
+            names: BTreeSet::new(),
+            version: 0,
+        };
+        let route = compose(
+            &policy,
+            0,
+            Host::ClaudeCode,
+            Role::Analyzer,
+            NonZeroU32::MIN,
+            &names,
+        )
+        .unwrap();
+        let instructions = [crate::instruction::evidence("bal-analyzer-drafting").unwrap()];
+        let inputs = [Input::Bytes {
+            name: "story",
+            bytes: b"{}",
+        }];
+        let empty = judge_set(&json!([])).unwrap();
+        // Opens an empty set of story 1 and issues `id` beside it, then
+        // ends the decision with `fails` deciding whether it errs.
+        let run = |id: &str, request_id: &str, fails: bool| {
+            let issue = Issue {
+                id,
+                request: id,
+                parent: None,
+                subject: "story/1",
+                route: &route,
+                instructions: &instructions,
+                inputs: &inputs,
+                absences: &[],
+                streams: &[],
+                documents: &[],
+                further: &Map::new(),
+            };
+            let mut members = None;
+            let result = store.transact(&command("test.close", request_id, 3, T2), &mut |tx| {
+                open(tx, &empty, &story(1), T2)?;
+                members = Some(issue_within(tx, &issue, T2)?);
+                if fails {
+                    return Err(StoreError::Unavailable(
+                        "the caller's own step failed".into(),
+                    ));
+                }
+                Ok(Decision {
+                    kind: OutcomeKind::Done,
+                    answer: json!({"status": "ok"}),
+                    sensitive: false,
+                    observed: Observed::default(),
+                    git: None,
+                })
+            });
+            (result, members)
+        };
+
+        let (result, members) = run(I0, R1, false);
+        assert!(result.is_ok(), "{result:?}");
+        let members = members.expect("the decision ran");
+        assert_eq!(members["work_order"], I0);
+        assert_eq!(members["agent"], "bal-analyzer-high");
+        assert_eq!(members["recorded_at"], T2);
+        assert!(members.get("status").is_none(), "{members:?}");
+        let events = history(&store);
+        let opened = of_type(&events, QUESTIONS_OPENED);
+        let issued = of_type(&events, WORK_ORDER_ISSUED);
+        assert_eq!((opened.len(), issued.len()), (1, 1));
+        assert_eq!(opened[0].request_id.0, R1);
+        assert_eq!(issued[0].request_id.0, R1);
+        assert_eq!(issued[0].payload["id"], I0);
+        assert_eq!(issued[0].stream, "roadmap");
+
+        let before = head(&store);
+        let (result, _) = run(I1, R2, true);
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(head(&store), before);
+        let events = history(&store);
+        assert_eq!(of_type(&events, QUESTIONS_OPENED).len(), 1);
+        assert_eq!(of_type(&events, WORK_ORDER_ISSUED).len(), 1);
+        assert_eq!(order(&store, &project(), I1), None);
     }
 
     #[test]
