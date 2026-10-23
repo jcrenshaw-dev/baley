@@ -10,6 +10,7 @@ pub mod catalog;
 pub mod checkout;
 pub mod forge;
 pub mod guard;
+pub mod plan;
 pub mod policy;
 pub mod questions;
 pub mod reconcile;
