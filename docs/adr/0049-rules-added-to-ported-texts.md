@@ -34,7 +34,7 @@ The question is whether a ported text may carry such a rule, and how it stays vi
 
 Chosen option: **3**, because it keeps every change from Cadence listed and reviewed, puts the owner's rule in the text its reader follows, and costs no ADR per rule.
 
-A ported text may add a rule that an accepted owner decision requires, where a Baley design document states that decision as a requirement. Each such addition is listed beside the text, in the doc comment of its Rust constant, naming this record and the design requirement that states the rule. A rule no committed design document states is not added; the decision is first written into its design document.
+A ported text may add a rule that an accepted owner decision requires, where a Baley design document states that decision as a requirement. Each such addition is listed beside the text, in the doc comment of the Rust module that holds the text's constant, naming this record and the design requirement that states the rule. A rule no committed design document states is not added; the decision is first written into its design document.
 
 This adds to ADR 0048's rule and changes nothing else in it. A change that replaces a Cadence file, command or state name with Baley's still needs no listing, a change an accepted ADR forces is still listed with that ADR, and a design document whose wording only contradicts Cadence is still corrected to Cadence's rule.
 
