@@ -122,8 +122,8 @@ pub struct ApprovedItem {
 /// recorded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
-    pub(super) phase: u64,
-    pub(super) stories: Vec<u64>,
+    pub(super) phase: u32,
+    pub(super) stories: Vec<u32>,
     pub(super) files: Vec<Value>,
     pub(super) directories: Vec<Value>,
     pub(super) goal: String,
@@ -136,12 +136,12 @@ pub struct Plan {
 
 impl Plan {
     /// The phase the plan is for.
-    pub fn phase(&self) -> u64 {
+    pub fn phase(&self) -> u32 {
         self.phase
     }
 
     /// The stories the plan serves, in submitted order.
-    pub fn stories(&self) -> &[u64] {
+    pub fn stories(&self) -> &[u32] {
         &self.stories
     }
 
