@@ -1,25 +1,27 @@
 //! The rounds relay's served text, pinned in source: how a host session
-//! reads a question set's round, puts it to the owner and relays the
-//! owner's answers and deferrals (design 0005 section 10, PLN-R24 to
-//! PLN-R26, HST-R9). It is no help row, so it gets no skill stub: the round
-//! read and the `questions-answer` receipt name it.
-//!
-//! This version starts from a set already open. The Rounds row's first
-//! step, submitting the analyzer's questions as returned, arrives with T7's
-//! `story questions submit` as version 2 of this text.
+//! submits the analyzer's questions as returned, reads a question set's
+//! round, puts it to the owner and relays the owner's answers and deferrals
+//! (design 0005 section 10, PLN-R6, PLN-R24 to PLN-R26, HST-R9). It is no
+//! help row, so it gets no skill stub: `bal-context`, the round read and
+//! the `questions-answer` receipt name it.
 
 /// The registry identity of the rounds relay's text.
 pub const IDENTITY: &str = "bal-rounds";
 
 /// Pinned by hand: raise it by one whenever [`TEXT`] changes.
-pub const VERSION: &str = "1";
+pub const VERSION: &str = "2";
 
 /// Lowercase hex SHA-256 of [`TEXT`]'s exact bytes, computed outside the
 /// code so a changed text without a new pin fails the registry's pin test.
-pub const HASH: &str = "8bab77d68c4253a45e63cf5f16397e58e058c21f94781674c0cf08c09bfa3e6d";
+pub const HASH: &str = "420c5ece69f5f29e60337a0ab905db6a2c00439f77b7422290062a0fd358bb66";
 
-/// What a session reads before it puts a set's rounds to the owner.
+/// What a session reads before it submits a story's questions or puts a
+/// set's rounds to the owner.
 pub const TEXT: &str = r#"Baley's rounds relay puts a question set to the owner one round at a time and records each of the owner's decisions exactly as the owner gave it.
+
+When the analyzer returns its questions for a story, send them first, with one `baley_apply` call: `{"operation":"story-questions-submit","request_id":"<a fresh lowercase UUID>","story":<the story's id>,"work_order":"<the questions order's id>","questions":[...]}`. Send the `questions` exactly as returned: never edit, drop, merge, reword or reorder a question, and answer none of them yourself. The receipt gives the set id in `set` and its first round in `now`. An empty list's receipt is already `closed` and names the analyzer's drafting order in `drafting`.
+
+When a receipt shows a story's set `closed`, its `drafting` names the analyzer's drafting order: return to the instruction that sent you here, which launches it. If you get a closed receipt with no drafting, another analyzer order of the story is still pending, so no drafting order was issued: return to the instruction that sent you here, which calls `story-refine` again. That call is refused `analyzer-order-pending` naming the pending order, which you read with `document`, or fail with `work-order-fail` and retry with `work-order-retry`, as that instruction says. A refused submission is also returned to that instruction, never fixed.
 
 Read the set's round with one `baley_query` call: `{"operation":"document","identity":{"kind":"questions","set":"<the set id>"}}`. The answer gives the set's state, `open`, `closed` or `abandoned`, the round number, every question of the current round with its `recommended` answer, every waiting question with what it waits on, marked open or `deferred`, and the questions already answered or deferred.
 

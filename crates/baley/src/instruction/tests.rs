@@ -167,6 +167,11 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "3",
         "31ecd5654bebed4db300e611dc9bb8dfa4cd2993c79e251bef681ed6495e3f5a",
     ),
+    (
+        "bal-rounds",
+        "2",
+        "420c5ece69f5f29e60337a0ab905db6a2c00439f77b7422290062a0fd358bb66",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {
@@ -463,7 +468,7 @@ fn a_rounds_instruction_given_a_help_row_or_a_skill_stub_is_caught() {
         panic!("bal-rounds is served");
     };
     assert_eq!(entry.build, 4);
-    assert_eq!(text.version, "1");
+    assert_eq!(text.version, "2");
     assert!(
         !crate::help::table::COMMANDS
             .iter()
@@ -590,4 +595,33 @@ fn an_analyzer_text_given_a_help_row_or_a_skill_stub_is_caught() {
             "{identity} is a front door"
         );
     }
+}
+
+#[test]
+fn a_rounds_text_without_its_submit_step_or_editing_questions_is_caught() {
+    let Lookup::Served { text, .. } = lookup("bal-rounds") else {
+        panic!("bal-rounds is served");
+    };
+    assert_eq!(text.version, "2");
+    let body = text.body;
+    for needle in [
+        "story-questions-submit",
+        r#""work_order""#,
+        r#""questions""#,
+        "`drafting`",
+        "a closed receipt with no drafting",
+        "analyzer-order-pending",
+    ] {
+        assert!(body.contains(needle), "the rounds relay lacks {needle}");
+    }
+    let sending = body
+        .split(". ")
+        .find(|sentence| sentence.contains("exactly as returned"))
+        .expect("a sentence sends the questions as returned");
+    for word in ["edit", "drop", "merge", "reword", "reorder"] {
+        assert!(sending.contains(word), "the sending lacks {word}");
+    }
+    let submit = body.find("story-questions-submit").unwrap();
+    let read = body.find(r#""operation":"document""#).unwrap();
+    assert!(submit < read, "the submit step comes after the round read");
 }
