@@ -13,8 +13,9 @@
 //! across the phase; (9) each link's value named by its truth; (10) every
 //! truth the plan serves named by an item of the phase; (11) each such
 //! truth holding a check; (12) each such truth a person must prove holding
-//! an observation. The judge trusts the facts and judges the plan. Nothing
-//! here records anything.
+//! an observation; (13) each such truth holding one check at most. The
+//! judge trusts the facts and judges the plan. Nothing here records
+//! anything.
 
 use std::num::NonZeroU32;
 
@@ -66,6 +67,9 @@ pub const TRUTH_WITHOUT_CHECK: &str = "truth-without-check";
 /// live (`human_verify`) and whose evidence items across the phase hold no
 /// observation (D-04). Its one check is still required.
 pub const TRUTH_WITHOUT_OBSERVATION: &str = "truth-without-observation";
+/// The refusal code for a truth the plan serves whose evidence items across
+/// the phase hold more than one distinct check for its current version.
+pub const TRUTH_CHECK_LIMIT: &str = "truth-check-limit";
 
 /// Why a plan is refused. Positions count from 0 in the list as submitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +143,15 @@ pub enum PlanRefusal {
         truth: String,
         version: u32,
     },
+    /// The items of the phase naming `truth` of `story` at `version`, its
+    /// current version, hold the distinct checks `checks`, more than one,
+    /// in the order the approved plans and then this plan list them.
+    TruthCheckLimit {
+        story: u32,
+        truth: String,
+        version: u32,
+        checks: Vec<String>,
+    },
 }
 
 impl PlanRefusal {
@@ -161,6 +174,7 @@ impl PlanRefusal {
             Self::UncoveredTruth { .. } => UNCOVERED_TRUTH,
             Self::TruthWithoutCheck { .. } => TRUTH_WITHOUT_CHECK,
             Self::TruthWithoutObservation { .. } => TRUTH_WITHOUT_OBSERVATION,
+            Self::TruthCheckLimit { .. } => TRUTH_CHECK_LIMIT,
         }
     }
 
@@ -329,7 +343,8 @@ impl Plan {
 /// (8) `evidence-item-conflict`, item by item;
 /// (9) `link-value-not-named`, link by link; then over the served truths
 /// in order, with the approved plans' items, (10) `uncovered-truth`,
-/// (11) `truth-without-check` and (12) `truth-without-observation`.
+/// (11) `truth-without-check`, (12) `truth-without-observation` and
+/// (13) `truth-check-limit`.
 pub fn judge_plan(submitted: &Value, facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
     let plan = content::read(submitted)?;
     task::within_lease(&plan.tasks, &plan.files, &plan.directories)?;
@@ -347,6 +362,7 @@ pub fn judge_plan(submitted: &Value, facts: &PlanFacts) -> Result<Plan, PlanRefu
     phase.covered()?;
     phase.checked()?;
     phase.observed()?;
+    phase.limited()?;
     Ok(plan)
 }
 
@@ -358,7 +374,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::plan::fixtures::{accepted, f0, f1, p1, qa, qb, refusal, typed, with, without};
+    use crate::plan::fixtures::{
+        a1, a2, accepted, c3, c5, dropping, f0, f1, f3, l1, p1, p2, plus, qa, qb, refusal,
+        replacing, typed, under, with, without,
+    };
     use crate::questions::Question;
 
     #[test]
@@ -540,6 +559,111 @@ mod tests {
         assert_eq!(
             refusal(&with(p1(), "", "stories", json!([1, 4])), &f0()),
             PlanRefusal::NoTruths
+        );
+    }
+
+    fn served(story: u32, truth: &str, version: u32) -> (u32, String, u32) {
+        (story, truth.into(), version)
+    }
+
+    #[test]
+    fn an_evidence_map_judged_per_plan_or_by_truth_id_alone_is_caught() {
+        let facts = f1();
+        accepted(&p1(), &facts);
+        accepted(&p2(), &facts);
+        let (story, truth, version) = served(1, "t1", 1);
+        assert_eq!(
+            refusal(&dropping(p1(), &["c1"]), &facts),
+            PlanRefusal::UncoveredTruth {
+                story,
+                truth,
+                version
+            }
+        );
+        accepted(&dropping(p1(), &["c1"]), &under(a2()));
+        let (story, truth, version) = served(1, "t2", 2);
+        assert_eq!(
+            refusal(&dropping(p1(), &["c2"]), &facts),
+            PlanRefusal::TruthWithoutCheck {
+                story,
+                truth,
+                version
+            }
+        );
+        let (story, truth, version) = served(1, "t2", 2);
+        assert_eq!(
+            refusal(&dropping(p1(), &["o1"]), &facts),
+            PlanRefusal::TruthWithoutObservation {
+                story,
+                truth,
+                version
+            }
+        );
+        let (story, truth, version) = served(1, "t1", 1);
+        assert_eq!(
+            refusal(&plus(p1(), c3()), &facts),
+            PlanRefusal::TruthCheckLimit {
+                story,
+                truth,
+                version,
+                checks: vec!["c1".into(), "c3".into()]
+            }
+        );
+        accepted(&p1(), &under(a2()));
+        let untrue = PlanRefusal::EvidenceItemTruth {
+            position: 0,
+            id: "c1".into(),
+        };
+        let first = "/evidence_map/0";
+        assert_eq!(
+            refusal(&with(p1(), first, "truth", json!("t9")), &facts),
+            untrue
+        );
+        assert_eq!(
+            refusal(&with(p1(), first, "story", json!(2)), &facts),
+            untrue
+        );
+        let stale = PlanRefusal::TruthVersionMismatch {
+            position: 0,
+            id: "c1".into(),
+            current: 1,
+        };
+        assert_eq!(
+            refusal(&with(p1(), first, "truth_version", json!(2)), &facts),
+            stale
+        );
+        assert_eq!(
+            refusal(&with(p2(), first, "truth_version", json!(3)), &facts),
+            stale
+        );
+        assert_eq!(
+            refusal(&p1(), &under(a1())),
+            PlanRefusal::EvidenceItemConflict {
+                position: 0,
+                id: "c1".into(),
+                plan: 1
+            }
+        );
+        accepted(&plus(p1(), l1()), &facts);
+        assert_eq!(
+            refusal(
+                &plus(p1(), with(l1(), "/spec", "value", json!("id"))),
+                &facts
+            ),
+            PlanRefusal::LinkValueNotNamed {
+                position: 3,
+                id: "l1".into()
+            }
+        );
+        accepted(&replacing(p2(), "c4", c5()), &f3());
+        let (story, truth, version) = served(2, "t1", 1);
+        assert_eq!(
+            refusal(&dropping(p2(), &["c4"]), &f3()),
+            PlanRefusal::UncoveredTruth {
+                story,
+                truth,
+                version
+            }
         );
     }
 }

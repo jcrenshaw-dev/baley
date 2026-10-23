@@ -34,8 +34,9 @@ pub(super) fn consistent(
     Ok(())
 }
 
-/// One item of the union: the truth it serves and its kind.
+/// One item of the union: its id, the truth it serves and its kind.
 struct Proof<'a> {
+    id: &'a str,
     story: u32,
     truth: &'a str,
     version: u32,
@@ -74,12 +75,14 @@ impl<'a> Phase<'a> {
             .iter()
             .filter(|item| !facts.approved.iter().any(|other| other.id == item.id));
         let approved = approved.map(|(_, item)| Proof {
+            id: &item.id,
             story: item.story,
             truth: &item.truth,
             version: item.truth_version,
             kind: item.kind,
         });
         let submitted = submitted.map(|item| Proof {
+            id: &item.id,
             story: item.story,
             truth: &item.truth,
             version: item.truth_version,
@@ -91,23 +94,31 @@ impl<'a> Phase<'a> {
         }
     }
 
-    /// The kinds of the union's items that name `truth` of `story` at its
-    /// current version. An item naming another version proves nothing here.
-    fn kinds(&self, story: u32, truth: &CurrentTruth) -> Vec<EvidenceKind> {
+    /// The union's items that name `truth` of `story` at its current
+    /// version, in union order. An item naming another version proves
+    /// nothing here.
+    fn naming(&self, story: u32, truth: &CurrentTruth) -> Vec<&Proof<'a>> {
         self.union
             .iter()
             .filter(|proof| {
                 proof.story == story && proof.truth == truth.id && proof.version == truth.version
             })
-            .map(|proof| proof.kind)
             .collect()
+    }
+
+    /// Whether an item naming `truth` of `story` at its current version is
+    /// of `kind`.
+    fn holds(&self, story: u32, truth: &CurrentTruth, kind: EvidenceKind) -> bool {
+        self.naming(story, truth)
+            .iter()
+            .any(|proof| proof.kind == kind)
     }
 
     /// Step (10): the first served truth no item names is refused
     /// `uncovered-truth`.
     pub(super) fn covered(&self) -> Result<(), PlanRefusal> {
         for &(story, truth) in &self.served {
-            if self.kinds(story, truth).is_empty() {
+            if self.naming(story, truth).is_empty() {
                 return Err(PlanRefusal::UncoveredTruth {
                     story,
                     truth: truth.id.clone(),
@@ -122,7 +133,7 @@ impl<'a> Phase<'a> {
     /// refused `truth-without-check`.
     pub(super) fn checked(&self) -> Result<(), PlanRefusal> {
         for &(story, truth) in &self.served {
-            if !self.kinds(story, truth).contains(&EvidenceKind::Check) {
+            if !self.holds(story, truth, EvidenceKind::Check) {
                 return Err(PlanRefusal::TruthWithoutCheck {
                     story,
                     truth: truth.id.clone(),
@@ -139,15 +150,35 @@ impl<'a> Phase<'a> {
     /// for its one check.
     pub(super) fn observed(&self) -> Result<(), PlanRefusal> {
         for &(story, truth) in &self.served {
-            if truth.human_verify.is_some()
-                && !self
-                    .kinds(story, truth)
-                    .contains(&EvidenceKind::Observation)
+            if truth.human_verify.is_some() && !self.holds(story, truth, EvidenceKind::Observation)
             {
                 return Err(PlanRefusal::TruthWithoutObservation {
                     story,
                     truth: truth.id.clone(),
                     version: truth.version,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Step (13): the first served truth whose items hold more than one
+    /// distinct check id is refused `truth-check-limit`, naming every one
+    /// in union order. An id counts once however many plans list it.
+    pub(super) fn limited(&self) -> Result<(), PlanRefusal> {
+        for &(story, truth) in &self.served {
+            let mut checks: Vec<String> = Vec::new();
+            for proof in self.naming(story, truth) {
+                if proof.kind == EvidenceKind::Check && !checks.iter().any(|id| id == proof.id) {
+                    checks.push(proof.id.to_owned());
+                }
+            }
+            if checks.len() > 1 {
+                return Err(PlanRefusal::TruthCheckLimit {
+                    story,
+                    truth: truth.id.clone(),
+                    version: truth.version,
+                    checks,
                 });
             }
         }
@@ -164,8 +195,8 @@ mod tests {
 
     use crate::plan::PlanRefusal;
     use crate::plan::fixtures::{
-        accepted, approved, ar, c1, c2, dropping, f1, f3, o1, p1, p2, refusal, replacing, under,
-        with,
+        accepted, approved, ar, c1, c2, c3, c5, c6, dropping, f1, f3, o1, p1, p2, plus, refusal,
+        replacing, under, with,
     };
 
     fn conflict(plan: u32) -> PlanRefusal {
@@ -280,5 +311,39 @@ mod tests {
             unobserved
         );
         assert_eq!(unobserved.code(), "truth-without-observation");
+    }
+
+    fn limit(checks: &[&str]) -> PlanRefusal {
+        PlanRefusal::TruthCheckLimit {
+            story: 1,
+            truth: "t1".into(),
+            version: 1,
+            checks: checks.iter().map(|&id| id.to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_second_check_in_an_approved_plan_missed_or_a_listed_again_check_counted_twice_is_caught() {
+        assert_eq!(
+            refusal(&p1(), &under(vec![approved(1, c3())])),
+            limit(&["c3", "c1"])
+        );
+        accepted(&p1(), &under(vec![approved(1, c1()), approved(2, c1())]));
+        assert_eq!(
+            refusal(&plus(p1(), c6()), &under(vec![approved(1, c3())])),
+            limit(&["c3", "c1", "c6"])
+        );
+        assert_eq!(limit(&["c3", "c1"]).code(), "truth-check-limit");
+    }
+
+    #[test]
+    fn a_check_of_an_older_version_counted_against_the_current_is_caught() {
+        let mut moved = under(vec![approved(1, c3())]);
+        moved.stories[0].truths[0].version = 2;
+        accepted(
+            &with(p1(), "/evidence_map/0", "truth_version", json!(2)),
+            &moved,
+        );
+        accepted(&replacing(p2(), "c4", c5()), &f3());
     }
 }
