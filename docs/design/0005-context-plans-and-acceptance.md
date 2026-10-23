@@ -343,9 +343,9 @@ The work order selects the full-plan input or the delta and blocker input from t
 stateDiagram-v2
   [*] --> Unrefined: story.declared
   Unrefined --> Asking: questions.opened with a question
-  Unrefined --> Drafting: questions.opened with no question, drafting work order issued
+  Unrefined --> Drafting: questions.opened with no question, drafting work order issued unless another analyzer order is pending
   Asking --> Asking: a round answered, a question still open
-  Asking --> Drafting: no question open, drafting work order issued
+  Asking --> Drafting: no question open, drafting work order issued by a close over MCP unless an analyzer order is pending
   Drafting --> Refined: story.refined (version 1, or the next version for a changed truth)
   Refined --> Asking: story refine again, questions.opened with a question
   Refined --> Drafting: story refine again, questions.opened with no question
@@ -356,7 +356,7 @@ stateDiagram-v2
   Planned --> Delivered: phase complete with its truths met or waived
 ```
 
-*Figure 1. States of a story in this area. A story's refinement state is never stored: it is worked out when read from its latest question set and its refined marker, the set its latest `story.refined` names. Unrefined is a story with no set, Asking one whose latest set has an open question, Drafting one whose latest set is closed with no approval naming it, and Refined one whose latest approval names its latest set. An empty set closes at once, so its story goes straight to Drafting. A story refined before keeps its approved truths while it is asked again and drafted, until new ones are approved. `story refine` in Asking is refused `question-open`, so a story's open set is never abandoned by a new one and no `story refine` leads from Asking: the owner ends a set early only by deferring its open questions, each with a reason. Withdrawn and dropped states are in [0004](0004-starting-a-project-and-changing-scope.md) Figure 2.*
+*Figure 1. States of a story in this area. A story's refinement state is never stored: it is worked out when read from its latest question set and its refined marker, the set its latest `story.refined` names. Unrefined is a story with no set, Asking one whose latest set has an open question, Drafting one whose latest set is closed with no approval naming it, and Refined one whose latest approval names its latest set. An empty set closes at once, so its story goes straight to Drafting. A drafting work order is issued with the close only over MCP and only while no other analyzer order of the story is pending; a close at the terminal with `baley questions answer` issues none, and the session's next `story refine` issues it (section 5). A story refined before keeps its approved truths while it is asked again and drafted, until new ones are approved. `story refine` in Asking is refused `question-open`, so a story's open set is never abandoned by a new one and no `story refine` leads from Asking: the owner ends a set early only by deferring its open questions, each with a reason. Withdrawn and dropped states are in [0004](0004-starting-a-project-and-changing-scope.md) Figure 2.*
 
 ```mermaid
 stateDiagram-v2
@@ -474,7 +474,7 @@ sequenceDiagram
   end
 ```
 
-*Figure 4. Refining a story. The analyzer is dispatched twice: once for its questions and, after the owner's rounds, once for the draft truths. Every refusal records nothing, and a story's earlier set is abandoned only once it is closed. An empty question set closes at once and the submit's receipt names the drafting order; a closing `questions-answer` over MCP names it in its receipt's `drafting`; after a close at the terminal the session's next `story-refine` issues it. While another analyzer order of the story is pending, neither close issues one. The session checks the draft truths against the code and the answers before the owner edits and attests them, and the owner approves at the terminal with `baley story truths approve`, which records `story.refined`; the session never approves ([ADR 0044](../adr/0044-owner-acts-on-the-command-line.md)).*
+*Figure 4. Refining a story. The analyzer is dispatched twice: once for its questions and, after the owner's rounds, once for the draft truths. Every refusal the figure draws and section 5's refusal tables list records nothing. An `unknown-model` refusal while an analyzer order's route is composed records no work order, while a `checkout.seen` or `policy.effective` the preparation steps recorded before it stays ([0003](0003-configuration-and-routing.md) section 5, route resolution, and Figure 5). A story's earlier set is abandoned only once it is closed. An empty question set closes at once and the submit's receipt names the drafting order; a closing `questions-answer` over MCP names it in its receipt's `drafting`; after a close at the terminal the session's next `story-refine` issues it. While another analyzer order of the story is pending, neither close issues one. The session checks the draft truths against the code and the answers before the owner edits and attests them, and the owner approves at the terminal with `baley story truths approve`, which records `story.refined`; the session never approves ([ADR 0044](../adr/0044-owner-acts-on-the-command-line.md)).*
 
 ```mermaid
 sequenceDiagram
