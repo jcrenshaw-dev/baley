@@ -166,7 +166,7 @@ fn unreadable(view: &str) -> ReadError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! Stores are real SQLite stores in fresh temporary directories, with
     //! times supplied; expected values are written out from design 0005
     //! PLN-R4, D-02, D-03, D-10 and the plan's data S1, T1, T2, T2', T3 and
