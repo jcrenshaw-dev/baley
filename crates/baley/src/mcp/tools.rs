@@ -391,7 +391,8 @@ mod tests {
         // questions-answer takes request_id, set and items,
         // story-refine takes request_id, story and instruction,
         // story-questions-submit takes request_id, story, work_order and
-        // questions,
+        // questions, context-submit takes request_id, work_order, story, set
+        // and truths,
         // and route takes role or work_order.
         let names = |tool| {
             let schema = input_schema(tool);
@@ -433,6 +434,7 @@ mod tests {
                 "story",
                 "submission",
                 "text",
+                "truths",
                 "work_order"
             ]
         );

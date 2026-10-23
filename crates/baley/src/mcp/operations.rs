@@ -154,7 +154,7 @@ pub const APPLY_OPERATIONS: &[Operation] = &[
     retired("execution-extend", 5),
     retired("execution-authorize", 5),
     retired("plan-submit", 4),
-    retired("context-submit", 4),
+    with_project("context-submit"),
     retired("review-admit", 4),
     retired("review-observation", 4),
     retired("review-return", 4),
@@ -381,6 +381,9 @@ enum RequestShape {
     // `story-refine` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "story-refine")]
     StoryRefine(#[allow(dead_code)] crate::mcp::refine::RefineShape),
+    // `context-submit` parses its own arguments, so this variant is here for its schema.
+    #[serde(rename = "context-submit")]
+    ContextSubmit(#[allow(dead_code)] crate::mcp::refine::ContextShape),
     // `story-questions-submit` parses its own arguments, so this variant is here for its schema.
     #[serde(rename = "story-questions-submit")]
     StoryQuestionsSubmit(#[allow(dead_code)] crate::mcp::refine::QuestionsShape),
@@ -737,6 +740,7 @@ mod tests {
                     "questions-answer",
                     "story-refine",
                     "story-questions-submit",
+                    "context-submit",
                     "route",
                 ]
                 .contains(n)
@@ -780,6 +784,7 @@ mod tests {
             "questions-answer",
             "story-refine",
             "story-questions-submit",
+            "context-submit",
         ] {
             assert_eq!(
                 lookup(Tool::Apply, Some(name)),

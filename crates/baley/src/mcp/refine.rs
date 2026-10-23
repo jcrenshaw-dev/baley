@@ -1,7 +1,10 @@
-//! `story-refine` and `story-questions-submit` on `baley_apply`: a session
-//! asks for the analyzer's next order for one story, and submits the
-//! questions the analyzer returned as the story's set (design 0005 `story
-//! refine` and `story questions submit`, PLN-R6, D-07, D-08, D-09, D-19).
+//! `story-refine`, `story-questions-submit` and `context-submit` on
+//! `baley_apply`: a session asks for the analyzer's next order for one
+//! story, submits the questions the analyzer returned as the story's set,
+//! and submits the truths it drafted as a draft the owner approves at the
+//! terminal (design 0005 `story refine`, `story questions submit` and
+//! `story truths submit`, PLN-R2 to PLN-R6, D-06, D-07, D-08, D-09, D-19).
+//! No operation here approves anything (ADR 0044).
 //!
 //! Each call's arguments are judged before anything is prepared. The write
 //! is then prepared with the call's check as its own check, so every refusal
@@ -11,9 +14,11 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 
 use baley_core::policy::AcceptedNames;
 use baley_core::questions::{QuestionSet, SetRefusal, judge_set};
+use baley_core::truth::{TruthRefusal, TruthSubmission, judge_truths};
 use baley_store::{CommandKind, InstructionEvidence, ProjectId, RequestId, request_digest};
 use baley_store_sqlite::SqliteStore;
 use schemars::JsonSchema;
@@ -30,7 +35,8 @@ use crate::mcp::work_order::{
 };
 use crate::refine::order;
 use crate::refine::questions::{self, QUESTIONS_SUBMIT_COMMAND};
-use crate::scope::submit::NOT_RECORDED_BUSY;
+use crate::refine::submit as truths;
+use crate::scope::submit::{NOT_RECORDED_BUSY, SUBMIT_COMMAND};
 use crate::work_order::issue as recording;
 use crate::work_order::route::host_names;
 
@@ -338,6 +344,170 @@ pub fn serve_questions(arguments: &Value, preparation: &Preparation) -> Value {
     )
 }
 
+// `schema` serves this same declaration, so its doc comments are wire text.
+/// The arguments `context-submit` takes beside its `operation`. Unknown
+/// fields are refused.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContextShape {
+    /// A fresh UUID for this submission in lowercase hyphenated form. A
+    /// retry of the same submission sends the same id.
+    pub request_id: String,
+    /// The id of the analyzer's drafting work order these truths answer, as
+    /// its receipt gave it, a UUID in lowercase hyphenated form.
+    pub work_order: String,
+    /// The id of the story the truths are for.
+    pub story: NonZeroU32,
+    /// The id of the question set the truths were drafted from.
+    pub set: String,
+    /// The drafted truths, each
+    /// `{"id":"<id>","form":"when"|"for-any","trigger":"<one trigger>","observer":"<one observer>","verb":"sees"|"gets"|"is refused","outcome":"<one outcome>","kind":"literal"|"property","observable":true,"fixed_oracle":true}`,
+    /// with `human_verify` naming the tool or live service a person needs to
+    /// prove it, when one is needed. Every text at most 4096 bytes of UTF-8.
+    // Typed as a list of objects in the schema, but taken as a value so the
+    // truth judge judges it and a fault is the judge's own code.
+    #[schemars(with = "Vec<Map<String, Value>>")]
+    pub truths: Value,
+}
+
+/// The tagged form `context-submit`'s arguments arrive in.
+#[derive(Deserialize)]
+#[serde(tag = "operation")]
+enum ContextCall {
+    #[serde(rename = "context-submit")]
+    Submit(ContextShape),
+}
+
+/// A truth submission whose arguments passed every check made before
+/// preparation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JudgedContext {
+    /// The write preparation carries into the domain command.
+    pub request: WriteRequest,
+    /// The drafting order it answers.
+    pub work_order: String,
+    /// The accepted submission.
+    pub submission: TruthSubmission,
+}
+
+/// Judges `context-submit`'s arguments before anything is prepared or
+/// recorded: the shape, then the request id, the order id's form and the
+/// truths whole. A fault is the `refused` answer, which records nothing; a
+/// truth the judge refuses is answered with its code at slot `truths` (D-01).
+/// The request digest covers the command kind, the submission's digest and
+/// the order, as `scope-submit`'s does, so the same content and order under
+/// the same id replay and other content is a reused id.
+pub fn judge_context_arguments(arguments: &Value) -> Result<JudgedContext, Value> {
+    let shape = match serde_json::from_value::<ContextCall>(arguments.clone()) {
+        Ok(ContextCall::Submit(shape)) => shape,
+        Err(error) => return Err(shape_fault(&error)),
+    };
+    judge_request_id(&shape.request_id, "submission")?;
+    judge_order_id(&shape.work_order)?;
+    let submission = judge_truths(shape.story, &shape.set, &shape.truths)
+        .map_err(|refusal| truth_refused(&refusal))?;
+    let digest = request_digest(&json!({"command": SUBMIT_COMMAND,
+        "submission": submission.digest().to_hex(), "work_order": shape.work_order}))
+    .expect("text is canonical");
+    Ok(JudgedContext {
+        request: WriteRequest {
+            kind: CommandKind(SUBMIT_COMMAND.into()),
+            request_id: RequestId(shape.request_id),
+            digest,
+        },
+        work_order: shape.work_order,
+        submission,
+    })
+}
+
+/// The `refused` answer for a truth the judge refuses, at slot `truths`,
+/// naming the truth's position, counted from 0, and its id once it was read.
+fn truth_refused(refusal: &TruthRefusal) -> Value {
+    let (position, id, why) = match refusal {
+        TruthRefusal::Form { position, id } => (
+            *position,
+            id.as_deref(),
+            "is out of form: one trigger, one observer, a verb of `sees`, `gets` or `is refused`, a kind of `literal` or `property`, no blank part, a `for-any` truth only as `gets` with kind `property`, and only the members a truth takes",
+        ),
+        TruthRefusal::Id { position, id } => (
+            Some(*position),
+            Some(id.as_str()),
+            "has a blank id or one an earlier truth has",
+        ),
+        TruthRefusal::Attestation { position, id } => (
+            Some(*position),
+            Some(id.as_str()),
+            "lacks `observable` or `fixed_oracle`, or one is not true or false",
+        ),
+        TruthRefusal::Internal { position, id } => (
+            Some(*position),
+            Some(id.as_str()),
+            "is attested as not observable from outside",
+        ),
+        TruthRefusal::ProseOracle { position, id } => (
+            Some(*position),
+            Some(id.as_str()),
+            "is attested as having no fixed oracle",
+        ),
+    };
+    let reason = match position {
+        Some(position) => format!("the truth at {position} {why}, so nothing was recorded"),
+        None => "truths must be a list of truth objects, so nothing was recorded".to_owned(),
+    };
+    let mut answer = Refusal::new(refusal.code(), reason).slot("truths");
+    if let Some(position) = position {
+        answer = answer.entry(position);
+    }
+    if let Some(id) = id {
+        answer = answer.id(id);
+    }
+    answer.value()
+}
+
+/// Serves one `context-submit` call for the session's `preparation`, as
+/// `scope-submit` serves a start: the arguments are judged first; then the
+/// write is prepared under the caller carrying the drafting order, with the
+/// truth submission's check as its own check, so every refusal comes before
+/// checkout admission and the policy step and records nothing; then the
+/// command's caller takes the order's instruction evidence (D-19) and the
+/// draft is recorded through the truth-submission library function (D-06).
+/// A replay goes to the recording with no read, and the store answers it
+/// from its record.
+pub fn serve_context(arguments: &Value, preparation: &Preparation) -> Value {
+    let judged = match judge_context_arguments(arguments) {
+        Ok(judged) => judged,
+        Err(refusal) => return refusal,
+    };
+    let caller = match order_caller(&preparation.caller, &judged.work_order) {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    // Kept for the binding and the recording. A replay skips the check.
+    let kept = RefCell::new(None);
+    let check = |store: &SqliteStore, project: &ProjectId| {
+        *kept.borrow_mut() = Some(truths::check(
+            store,
+            project,
+            &judged.submission,
+            &judged.work_order,
+        )?);
+        Ok(())
+    };
+    let (store, command, _) = match prepared_write(preparation, &caller, &judged.request, &check) {
+        Ok(prepared) => prepared,
+        Err(answer) => return answer,
+    };
+    let kept = kept.borrow();
+    let evidence = kept.as_ref().map(|checked| checked.evidence.as_slice());
+    match bind_instructions(command, evidence) {
+        Ok(command) => crate::scope::submit::answer(
+            truths::record(store, &command, &judged.submission, kept.as_ref()),
+            store,
+        ),
+        Err(answer) => answer,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Expected answers are written out from design 0005, D-19 and
@@ -538,6 +708,99 @@ mod tests {
         // No ledger and no checkout to discover, so a served call reaches
         // preparation and answers `failed` at its project check, never
         // `unknown-operation`.
+        assert_eq!(answer["status"], "failed", "{answer}");
+        assert_eq!(answer["recorded"], false, "{answer}");
+        assert!(
+            ["project-context-invalid", "not-a-project"]
+                .contains(&answer["code"].as_str().unwrap()),
+            "{answer}"
+        );
+    }
+
+    const S: &str = "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+
+    fn context(request_id: &str, truths: Value) -> Value {
+        json!({"operation": "context-submit", "request_id": request_id, "work_order": Q,
+            "story": 1, "set": S, "truths": truths})
+    }
+
+    #[test]
+    fn a_context_submit_judged_loosely_or_under_another_digest_is_caught() {
+        use crate::refine::submit::tests::{t1, t2, with};
+
+        let u1 = judge_context_arguments(&context(R1, json!([t1(), t2()]))).expect("accepted");
+        assert_eq!(
+            u1.submission.digest().to_hex(),
+            "c85deb14471b95d360f3d94b276751e67770ea1ce447597bce8cec83436e2bab"
+        );
+        assert_eq!(u1.work_order, Q);
+        assert_eq!(u1.request.kind, CommandKind("scope.submit".into()));
+
+        let refusal =
+            judge_context_arguments(&context(R1, json!([t1(), with(t2(), "verb", "sees")])))
+                .expect_err("refused");
+        assert_eq!(refusal["status"], "refused", "{refusal}");
+        assert_eq!(refusal["code"], "truth-form");
+        assert_eq!(refusal["slot"], "truths");
+        assert_eq!(refusal["entry"], 1);
+        assert_eq!(refusal["id"], "t2");
+
+        let mut instructed = context(R1, json!([t1(), t2()]));
+        instructed["instruction"] = json!("bal-analyzer-drafting");
+        let refusal = judge_context_arguments(&instructed).expect_err("refused");
+        assert_eq!(refusal["code"], "invalid-arguments");
+        assert_eq!(refusal["slot"], "arguments");
+
+        let again = judge_context_arguments(&context(R1, json!([t1(), t2()]))).expect("accepted");
+        assert_eq!(again.request.digest, u1.request.digest);
+    }
+
+    #[test]
+    fn context_submit_left_retired_or_moved_is_caught() {
+        let names: Vec<&str> = APPLY_OPERATIONS.iter().map(|op| op.name).collect();
+        let at = names
+            .iter()
+            .position(|name| *name == "context-submit")
+            .expect("listed");
+        assert_eq!(names[at - 1], "plan-submit");
+        assert_eq!(names[at + 1], "review-admit");
+        assert_eq!(
+            lookup(Tool::Apply, Some("context-submit")),
+            Lookup::Available {
+                needs_project: true
+            }
+        );
+        let answer = schema_answer(
+            &json!({"operation": "schema", "tool": "apply", "for": "context-submit"}),
+        );
+        assert_eq!(answer["status"], "ok", "{answer}");
+        let required = answer["schema"]["required"].as_array().unwrap();
+        for field in ["request_id", "work_order", "story", "set", "truths"] {
+            assert!(required.contains(&json!(field)), "{field} in {answer}");
+        }
+
+        let caller = ServerCaller::new(
+            "/real/r",
+            "/real/r",
+            "claude-code",
+            "0b7e4a52-3c1d-4f6a-8e9b-1a2b3c4d5e6f",
+            &json!(7),
+        )
+        .unwrap();
+        let preparation = Preparation {
+            ledger: None,
+            host: Host::ClaudeCode,
+            caller,
+            at: "2026-10-22T09:00:00Z".into(),
+        };
+        let answer = crate::mcp::handler::operate(
+            &Called::Operation(Tool::Apply, "context-submit".into()),
+            Some(&context(R1, json!([]))),
+            Some(&preparation),
+        );
+        // No ledger and no checkout to discover, so a served call reaches
+        // preparation and answers `failed` at its project check, never
+        // `operation-unavailable`.
         assert_eq!(answer["status"], "failed", "{answer}");
         assert_eq!(answer["recorded"], false, "{answer}");
         assert!(
