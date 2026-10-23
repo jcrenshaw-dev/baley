@@ -9,9 +9,9 @@
 //! judge; (3) each task file inside the lease; (4) no check field with a
 //! code blank; (5) a committed story holding a truth; (6) every story the
 //! plan serves committed to the phase; (7) each evidence item bound to its
-//! own story's current truth; (9) each link's value named by its truth.
-//! The judge trusts the facts and judges the plan. Nothing here records
-//! anything.
+//! own story's current truth; (8) each item id holding one definition
+//! across the phase; (9) each link's value named by its truth. The judge
+//! trusts the facts and judges the plan. Nothing here records anything.
 
 use std::num::NonZeroU32;
 
@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use super::evidence::{self, EvidenceItem};
 use super::task::{self, Task};
-use super::{binding, content, link, stories};
+use super::{binding, content, coverage, link, stories};
 use crate::questions::{QuestionSet, SetRefusal};
 
 /// The refusal code for a plan out of its grammar: not an object, or a
@@ -48,6 +48,9 @@ pub const EVIDENCE_ITEM_TRUTH: &str = "evidence-item-truth";
 /// The refusal code for an evidence item naming its truth at a version
 /// other than the current one.
 pub const TRUTH_VERSION_MISMATCH: &str = "truth-version-mismatch";
+/// The refusal code for an evidence item whose id an approved plan of the
+/// phase holds with another definition.
+pub const EVIDENCE_ITEM_CONFLICT: &str = "evidence-item-conflict";
 /// The refusal code for a link whose value its truth does not name.
 pub const LINK_VALUE_NOT_NAMED: &str = "link-value-not-named";
 
@@ -91,6 +94,13 @@ pub enum PlanRefusal {
         id: String,
         current: u32,
     },
+    /// The item at `position`, whose id is `id`, differs from the item of
+    /// approved plan `plan` that holds the same id.
+    EvidenceItemConflict {
+        position: usize,
+        id: String,
+        plan: u32,
+    },
     /// The link at `position`, whose id is `id`, carries a value its truth
     /// does not name.
     LinkValueNotNamed { position: usize, id: String },
@@ -111,6 +121,7 @@ impl PlanRefusal {
             Self::StoryNotInPhase { .. } => STORY_NOT_IN_PHASE,
             Self::EvidenceItemTruth { .. } => EVIDENCE_ITEM_TRUTH,
             Self::TruthVersionMismatch { .. } => TRUTH_VERSION_MISMATCH,
+            Self::EvidenceItemConflict { .. } => EVIDENCE_ITEM_CONFLICT,
             Self::LinkValueNotNamed { .. } => LINK_VALUE_NOT_NAMED,
         }
     }
@@ -271,20 +282,26 @@ impl Plan {
     }
 }
 
-/// Judges the submitted plan `plan` against the phase's `facts` in the
+/// Judges the submitted plan `submitted` against the phase's `facts` in the
 /// fixed order, the first fault answering: (1) the plan's own members;
 /// (2) the `questions` member through `judge_set`; (3) `lease`, task by
 /// task and file by file; (4) the blank check fields, item by item;
 /// (5) `no-truths`; (6) `story-not-in-phase`, in the plan's story order;
 /// (7) `evidence-item-truth` and `truth-version-mismatch`, item by item;
+/// (8) `evidence-item-conflict`, item by item;
 /// (9) `link-value-not-named`, link by link.
-pub fn judge_plan(plan: &Value, facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
-    let plan = content::read(plan)?;
+pub fn judge_plan(submitted: &Value, facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
+    let plan = content::read(submitted)?;
     task::within_lease(&plan.tasks, &plan.files, &plan.directories)?;
     evidence::blank_fields(&plan.evidence_map)?;
     stories::holds_truths(facts)?;
     stories::committed(&plan.stories, facts)?;
     let truths = binding::bind(&plan.stories, &plan.evidence_map, facts)?;
+    // The member walk has read `evidence_map` as a list by now.
+    let definitions = submitted["evidence_map"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    coverage::consistent(definitions, &plan.evidence_map, &facts.approved)?;
     link::named(&plan.evidence_map, &truths)?;
     Ok(plan)
 }

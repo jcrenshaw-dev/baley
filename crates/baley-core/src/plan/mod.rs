@@ -8,6 +8,7 @@
 
 mod binding;
 mod content;
+mod coverage;
 mod evidence;
 #[cfg(test)]
 mod fixtures;
@@ -22,8 +23,9 @@ pub use evidence::{
 };
 pub use judge::{
     ApprovedItem, CHECK_BOUNDARY, CHECK_COMMAND, CHECK_EXPECTED, CHECK_TEST_FILE, CommittedStory,
-    CurrentTruth, EVIDENCE_ITEM_TRUTH, EvidenceKind, LEASE, LINK_VALUE_NOT_NAMED, NO_TRUTHS, Plan,
-    PlanFacts, PlanRefusal, STORY_NOT_IN_PHASE, TRUTH_VERSION_MISMATCH, TYPED_CONTENT, judge_plan,
+    CurrentTruth, EVIDENCE_ITEM_CONFLICT, EVIDENCE_ITEM_TRUTH, EvidenceKind, LEASE,
+    LINK_VALUE_NOT_NAMED, NO_TRUTHS, Plan, PlanFacts, PlanRefusal, STORY_NOT_IN_PHASE,
+    TRUTH_VERSION_MISMATCH, TYPED_CONTENT, judge_plan,
 };
 pub use lease::{inside_lease, plain_relative_path};
 pub use task::Task;
