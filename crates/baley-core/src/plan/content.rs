@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use serde_json::{Map, Value};
 
 use super::judge::{Plan, PlanRefusal};
+use super::lease;
 
 /// The plan's members, in the order they are judged. The plan number, the
 /// question set, the size and the suite are written by Baley at approval,
@@ -25,8 +26,8 @@ const MEMBERS: [&str; 10] = [
 ];
 
 /// Reads a plan into the accepted plan: an unknown member first, the first
-/// by name, then each member in the judge's order:
-/// `phase`, `stories`, `files`, `directories`, `goal`, `context`, `notes`,
+/// by name, then each member in the judge's order: `phase`, `stories`,
+/// `files`, `directories` with the lease rules, `goal`, `context`, `notes`,
 /// `tasks`, `evidence_map`, then the presence of `questions`, whose value
 /// step (2) judges.
 pub(super) fn read(value: &Value) -> Result<Plan, PlanRefusal> {
@@ -53,8 +54,9 @@ pub(super) fn read(value: &Value) -> Result<Plan, PlanRefusal> {
                 .ok_or_else(|| PlanRefusal::typed(format!("stories[{n}]")))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let files = list(plan, "files")?.clone();
-    let directories = list(plan, "directories")?.clone();
+    let files = list(plan, "files")?;
+    let directories = list(plan, "directories")?;
+    let (files, directories) = lease::read(files, directories)?;
     let goal = text(plan, "goal")?;
     let context = text(plan, "context")?;
     let notes = text(plan, "notes")?;

@@ -124,8 +124,8 @@ pub struct ApprovedItem {
 pub struct Plan {
     pub(super) phase: u32,
     pub(super) stories: Vec<u32>,
-    pub(super) files: Vec<Value>,
-    pub(super) directories: Vec<Value>,
+    pub(super) files: Vec<String>,
+    pub(super) directories: Vec<String>,
     pub(super) goal: String,
     pub(super) context: String,
     pub(super) notes: String,
@@ -146,12 +146,12 @@ impl Plan {
     }
 
     /// The lease's files, in submitted order.
-    pub fn files(&self) -> &[Value] {
+    pub fn files(&self) -> &[String] {
         &self.files
     }
 
     /// The lease's directories, in submitted order.
-    pub fn directories(&self) -> &[Value] {
+    pub fn directories(&self) -> &[String] {
         &self.directories
     }
 

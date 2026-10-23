@@ -10,8 +10,10 @@ mod content;
 #[cfg(test)]
 mod fixtures;
 mod judge;
+mod lease;
 
 pub use judge::{
     ApprovedItem, CommittedStory, CurrentTruth, EvidenceKind, Plan, PlanFacts, PlanRefusal,
     TYPED_CONTENT, judge_plan,
 };
+pub use lease::{inside_lease, plain_relative_path};
