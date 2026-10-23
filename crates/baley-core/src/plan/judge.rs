@@ -4,8 +4,9 @@
 //! A plan arrives as plain JSON and the phase's facts as plain values the
 //! binary gathered from its views. The plan is judged in one fixed order,
 //! the first fault answering, so one plan always gets one answer: (1) the
-//! plan's own members, task by task within `tasks`; (3) each task file
-//! inside the lease. The judge trusts the facts and judges the plan.
+//! plan's own members, task by task within `tasks`; (2) the `questions`
+//! member through the question set judge; (3) each task file inside the
+//! lease. The judge trusts the facts and judges the plan.
 //! Nothing here records anything.
 
 use std::num::NonZeroU32;
@@ -14,6 +15,7 @@ use serde_json::Value;
 
 use super::content;
 use super::task::{self, Task};
+use crate::questions::{QuestionSet, SetRefusal};
 
 /// The refusal code for a plan out of its grammar: not an object, or a
 /// member unknown, missing, of another type or out of range. It names the
@@ -36,6 +38,9 @@ pub enum PlanRefusal {
         id: String,
         file: String,
     },
+    /// The question set judge refused the `questions` member: its refusal
+    /// unchanged, positions counting within `questions` (D-10).
+    Questions(SetRefusal),
 }
 
 impl PlanRefusal {
@@ -44,6 +49,7 @@ impl PlanRefusal {
         match self {
             Self::TypedContent { .. } => TYPED_CONTENT,
             Self::Lease { .. } => LEASE,
+            Self::Questions(refusal) => refusal.code(),
         }
     }
 
@@ -143,7 +149,7 @@ pub struct Plan {
     pub(super) notes: String,
     pub(super) tasks: Vec<Task>,
     pub(super) evidence_map: Vec<Value>,
-    pub(super) questions: Value,
+    pub(super) questions: QuestionSet,
 }
 
 impl Plan {
@@ -192,8 +198,8 @@ impl Plan {
         &self.evidence_map
     }
 
-    /// The `questions` member as submitted.
-    pub fn questions(&self) -> &Value {
+    /// The plan's accepted question set, its questions as written.
+    pub fn questions(&self) -> &QuestionSet {
         &self.questions
     }
 
@@ -205,9 +211,63 @@ impl Plan {
 
 /// Judges the submitted plan `plan` against the phase's `facts` in the
 /// fixed order, the first fault answering: (1) the plan's own members;
-/// (3) `lease`, task by task and file by file.
+/// (2) the `questions` member through `judge_set`; (3) `lease`, task by
+/// task and file by file.
 pub fn judge_plan(plan: &Value, _facts: &PlanFacts) -> Result<Plan, PlanRefusal> {
     let plan = content::read(plan)?;
     task::within_lease(&plan.tasks, &plan.files, &plan.directories)?;
     Ok(plan)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Expected answers are written out from design 0005, the phase's
+    //! decisions and the plan's test data, never from running this code.
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::plan::fixtures::{accepted, f1, p1, qa, qb, refusal, with};
+    use crate::questions::Question;
+
+    #[test]
+    fn a_question_refusal_renamed_or_a_plan_question_rule_added_is_caught() {
+        let facts = f1();
+        let plan = accepted(&with(p1(), "", "questions", json!([qa(), qb()])), &facts);
+        assert_eq!(
+            plan.questions().questions(),
+            [
+                Question {
+                    id: "q1".into(),
+                    question: "Which store backs the ledger?".into(),
+                    recommended: "SQLite".into(),
+                    depends_on: Vec::new(),
+                },
+                Question {
+                    id: "q2".into(),
+                    question: "Where does the ledger live?".into(),
+                    recommended: "Outside the checkout".into(),
+                    depends_on: vec!["q1".into()],
+                },
+            ]
+        );
+        let twice = refusal(&with(p1(), "", "questions", json!([qa(), qa()])), &facts);
+        assert_eq!(
+            twice,
+            PlanRefusal::Questions(SetRefusal::QuestionId {
+                position: 1,
+                id: "q1".into()
+            })
+        );
+        assert_eq!(twice.code(), "question-id");
+        let waiting = refusal(&with(p1(), "", "questions", json!([qb()])), &facts);
+        assert_eq!(
+            waiting,
+            PlanRefusal::Questions(SetRefusal::QuestionDependency {
+                position: 0,
+                id: "q2".into()
+            })
+        );
+        assert_eq!(waiting.code(), "question-dependency");
+    }
 }

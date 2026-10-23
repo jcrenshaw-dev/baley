@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 
 use super::judge::{Plan, PlanRefusal};
 use super::{lease, task};
+use crate::questions::judge_set;
 
 /// The plan's members, in the order they are judged. The plan number, the
 /// question set, the size and the suite are written by Baley at approval,
@@ -28,8 +29,8 @@ const MEMBERS: [&str; 10] = [
 /// Reads a plan into the accepted plan: an unknown member first, the first
 /// by name, then each member in the judge's order: `phase`, `stories`,
 /// `files`, `directories` with the lease rules, `goal`, `context`, `notes`,
-/// `tasks`, `evidence_map`, then the presence of `questions`, whose value
-/// step (2) judges.
+/// `tasks`, `evidence_map`, then the presence of `questions`; then step (2),
+/// the `questions` value through the question set judge.
 pub(super) fn read(value: &Value) -> Result<Plan, PlanRefusal> {
     let Value::Object(plan) = value else {
         return Err(PlanRefusal::TypedContent { path: None });
@@ -59,8 +60,10 @@ pub(super) fn read(value: &Value) -> Result<Plan, PlanRefusal> {
     let evidence_map = list(plan, "evidence_map")?.clone();
     let questions = plan
         .get("questions")
-        .ok_or_else(|| PlanRefusal::typed("questions"))?
-        .clone();
+        .ok_or_else(|| PlanRefusal::typed("questions"))?;
+    // Step (2) follows at once: the value through the question set judge,
+    // its refusal passed on unchanged (D-10).
+    let questions = judge_set(questions).map_err(PlanRefusal::Questions)?;
     Ok(Plan {
         phase,
         stories,
