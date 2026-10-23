@@ -61,7 +61,8 @@
 //! - It drafts truths for one story, not criteria for a phase (ADR 0017),
 //!   from the owner's answers to the story's questions, in the second of
 //!   the analyzer's two dispatches (ADR 0030), and says owner where
-//!   Cadence says user (ADR 0031).
+//!   Cadence says user (ADR 0031). Its rules say what is promised where
+//!   Cadence's say what is decided, since a truth is a promise.
 //! - No count of 3 to 7 and no size question (ADR 0017).
 //! - No CONTEXT.md is written: the session submits the drafts as a truth
 //!   submission and the ledger records it (ADR 0006).

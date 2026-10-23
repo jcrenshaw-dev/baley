@@ -15,7 +15,9 @@
 //! `close_gray_areas` and `confirm_decisions` become the rounds through
 //! `bal-rounds`; `acceptance_criteria` becomes the drafted truths and
 //! `context-submit`, its tool-availability tag the truth's `human_verify`
-//! field. These changes from Cadence's wording are forced by accepted
+//! field. Where Cadence names a command, the text names the Baley operation
+//! with how its request ids, receipts, refusals, settings lines and parts
+//! are read. These changes from Cadence's wording are forced by accepted
 //! Baley ADRs:
 //!
 //! - It takes a story id, not a phase, since truths belong to stories
@@ -27,7 +29,11 @@
 //!   skip or a failed dispatch: a failed order is retried instead.
 //! - Decisions are the owner's answers and deferrals, recorded round by
 //!   round, with no decision list to confirm, no durability filter and no
-//!   flagged assumptions (ADR 0030).
+//!   flagged assumptions (ADR 0030). The session sees only questions, so
+//!   its question budget says a question the code settles is never asked
+//!   where Cadence's says `Confident` items cost none, and its last
+//!   guardrail speaks of what a truth promises where Cadence's speaks of
+//!   what was decided.
 //! - No size question and no count of 3 to 7 criteria (ADR 0017).
 //! - No CONTEXT.md, no requirement row correction, no cursor update and no
 //!   commit of planning files: the ledger records every step (ADR 0006).
