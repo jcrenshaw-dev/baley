@@ -64,7 +64,10 @@
 //!   becomes one or more commands, and a proof that needs a tool or live
 //!   service the run cannot reach becomes the truth's `human_verify`,
 //!   proven by an `observation` beside its check (D-04), never a
-//!   human-verify Verify.
+//!   human-verify Verify. Cadence's "Running X shows Y" form is dropped,
+//!   since Baley runs each entry as written: an entry is the bare command,
+//!   and what its output must show goes in the action or a check's
+//!   `expected`.
 //! - Decisions go to the owner as typed questions (ADR 0030): missing
 //!   information, and extra work that looks necessary, become a question in
 //!   `questions` where Cadence returns them to the human in its marker.
@@ -116,7 +119,7 @@ pub const VERSION: &str = "1";
 
 /// Lowercase hex SHA-256 of [`TEXT`]'s exact bytes, computed outside the
 /// code so a changed text without a new pin fails the registry's pin test.
-pub const HASH: &str = "11fde32288a4c9baff41036736182c88140caa5c4089e49ae8189eda9a1a4507";
+pub const HASH: &str = "65a03cb2fcbee8ff52445f5363a51054404085166b9ff2e285117f084315d8c6";
 
 /// What the planner reads once it holds a planning or revision order.
 /// Ported from Cadence tag `v3.9.0`: `skills/cad-planner-contract/SKILL.md`
@@ -180,7 +183,7 @@ Every task has these members, all concrete:
 - `title` - an action-oriented name.
 - `files` - exact paths created or modified, each a plain relative path. "src/auth/login.rs", never "the auth files". It is a LEASE: a task file outside the plan's lease is refused `lease` when the plan is submitted, and a change outside it is stopped at close until the owner rules. A dependency change writes the lockfile too (`Cargo.lock`, `package-lock.json`, `uv.lock`, `go.sum`, `Gemfile.lock`). `files` holds paths only, so when the truths, the answers or what you read already point at evidence inside a file this task touches, carry that anchor into the `action` - file plus SYMBOL (function, export, heading), never a line number, which rots between the decision and the task. The anchor says where the executor STARTS reading; it never narrows the lease and never licenses skipping a caller check.
 - `action` - what must become true, the constraints that bind it, and what to avoid with WHY. Directive prose, no fenced code blocks. Name symbols that ALREADY EXIST - you read them, so they are facts. Never invent an identifier, signature, field name, line number or call path for code this task has yet to write: you cannot know it, and the guess reaches the executor as an instruction, meets a codebase that disagrees, and becomes a deviation someone must log, defend or work around. "Add a POST /login route validating the credential pair against the existing user store with the password hash this tree already uses, issuing a short-lived session cookie" - never "make login work", and never a signature you have not read.
-- `verify` - one or more commands Baley runs, each the narrowest command whose output settles the task, such as `cargo test auth::`. THIS FIELD IS THE TASK'S AUTHORITY: any implementation satisfying it is authorized, and the executor owes no deviation for building it differently than you pictured. So it must be falsifiable and must pin the property the task exists for - everything you left unspecified in `action` is a choice this field is the only check on. "Running X shows Y", never "X works" or "looks good". If proving the task needs a tool or service the run cannot reach (probe with `command -v`; e.g. docker, a cloud CLI, a live endpoint), never write a command the run cannot execute, which only turns into a mid-task deferral that later masquerades as a pass: the truth's `human_verify` names that tool or service, and the plan proves the truth with an `observation` item beside its check.
+- `verify` - one or more commands Baley runs, each the narrowest command whose output settles the task, such as `cargo test auth::`. THIS FIELD IS THE TASK'S AUTHORITY: any implementation satisfying it is authorized, and the executor owes no deviation for building it differently than you pictured. So it must be falsifiable and must pin the property the task exists for - everything you left unspecified in `action` is a choice this field is the only check on. Write each entry as the bare command and nothing around it: `cargo test auth::`, never "Running cargo test auth:: shows the auth tests pass", "X works" or "looks good". What its output must show goes in the task's `action`, and for a check in its `expected`. If proving the task needs a tool or service the run cannot reach (probe with `command -v`; e.g. docker, a cloud CLI, a live endpoint), never write a command the run cannot execute, which only turns into a mid-task deferral that later masquerades as a pass: the truth's `human_verify` names that tool or service, and the plan proves the truth with an `observation` item beside its check.
 
 Atomic means: ONE concern, independently verifiable, leaves the repo committable. One concern is the binding half: a task whose title needs "and" or a comma to describe it - "scaffolding, license, typed errors and the CLI skeleton" - is that many tasks, however few files it touches. A task touching many files is usually more than one task as well, but the file count is the weaker signal and it catches less.
 
