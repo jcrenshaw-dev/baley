@@ -17,15 +17,6 @@ updates:
       github-actions:
         patterns:
           - "*"
-  # The .sentinel pin, so a kit change arrives as a pull request that runs the
-  # new kit's checks before it is merged.
-  - package-ecosystem: gitsubmodule
-    directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 0
-    cooldown:
-      default-days: 7
   - package-ecosystem: cargo
     directory: /
     schedule:

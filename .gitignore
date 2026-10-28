@@ -15,7 +15,3 @@ scratch/
 
 # Cargo build output
 target/
-
-# Security audit output and Claude Security scan reports, which can name unfixed findings, never committed
-audit/
-CLAUDE-SECURITY-*/
