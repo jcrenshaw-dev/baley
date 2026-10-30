@@ -44,7 +44,7 @@ In the component view of [0002](0002-system-design.md) (Figure 4) this area is o
 | Phase | The working increment of the roadmap, defined in [0004](0004-starting-a-project-and-changing-scope.md) (Terms): a goal and the stories committed to it. One phase is active per project (PLN-R7). |
 | Phase planning | Committing stories to a phase and writing its plans. |
 | Increment | What a completed phase delivers: something the owner can use, proven by its stories' truths and the suite. |
-| Unit of work | One task: one signed commit with one narrowest verify command. |
+| Unit of work | One task: one signed commit with one or more verify commands, each the narrowest command that settles the task. |
 | Size | A story's size counts the tasks of the approved plans that serve it; a phase's size counts each of its approved plans' tasks once, so a plan serving two stories is counted once. |
 | Capacity | The owner's ceiling on a phase's size, in tasks. |
 | Velocity | Tasks completed per phase, as a fact shown, never a decision input. |
