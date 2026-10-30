@@ -186,6 +186,11 @@ const SERVED_EVER: &[(&str, &str, &str)] = &[
         "2",
         "0dad9202903bc4ee1ba81792681c893b3abe5a098cb950fe40135d9fa74ed116",
     ),
+    (
+        "bal-phase-planner",
+        "1",
+        "65a03cb2fcbee8ff52445f5363a51054404085166b9ff2e285117f084315d8c6",
+    ),
 ];
 
 fn served() -> impl Iterator<Item = (&'static str, &'static Text)> {
@@ -705,5 +710,308 @@ fn a_context_door_keyed_by_phase_or_naming_cadence_state_is_caught() {
     );
     for name in CADENCE_NAMES.iter().chain(&["STATE", "cursor"]) {
         assert!(!body.contains(name), "the context front door names {name}");
+    }
+}
+
+#[test]
+fn a_default_test_style_missing_a_rule_of_its_design_row_is_caught() {
+    // The five rules of design 0005 section 10's Default test style row.
+    for rule in [
+        "Test a unit through what it exposes",
+        "Fake only the outside world",
+        "Never start a program",
+        "Skip trivial code",
+        "Write the expected value by hand",
+    ] {
+        assert!(
+            test_style::TEXT.contains(rule),
+            "the default test style lacks {rule}"
+        );
+    }
+}
+
+/// The only numbers the planner text may hold: the two grammar limits
+/// design 0005 states and the two phrases of its section 10 test rules that
+/// count units, which the text carries word for word (D-18, D-19).
+const PLANNER_NUMBERS: &[&str] = &[
+    "at most 256 declarations",
+    "at most 4,096 bytes",
+    "two or more of the project's own units",
+    "split a unit that touches two",
+];
+
+/// Count words a number handed to the planner would be spelled with.
+const COUNT_WORDS: &[&str] = &[
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+    "thirty",
+    "forty",
+    "fifty",
+    "sixty",
+    "seventy",
+    "eighty",
+    "ninety",
+    "hundred",
+    "thousand",
+    "dozen",
+];
+
+#[test]
+fn a_number_handed_to_the_planner_is_caught() {
+    let served = served_text("bal-phase-planner");
+    let mut body = served.to_owned();
+    for phrase in PLANNER_NUMBERS {
+        body = body.replace(phrase, "");
+    }
+    if let Some(at) = body.find(|c: char| c.is_ascii_digit()) {
+        let start = body.floor_char_boundary(at.saturating_sub(40));
+        let end = body.ceil_char_boundary((at + 40).min(body.len()));
+        panic!("the planner text holds a digit: {}", &body[start..end]);
+    }
+    for word in body.split(|c: char| !c.is_ascii_alphabetic()) {
+        assert!(
+            !COUNT_WORDS.contains(&word.to_ascii_lowercase().as_str()),
+            "the planner text holds the count word {word}"
+        );
+    }
+    for name in CADENCE_NAMES {
+        assert!(!served.contains(name), "the planner text names {name}");
+    }
+    assert_eq!(
+        lookup("bal-plan"),
+        Lookup::Unavailable {
+            identity: "bal-plan",
+            build: 4
+        }
+    );
+}
+
+#[test]
+fn a_planner_text_missing_its_grammar_or_a_refusal_is_caught() {
+    let body = served_text("bal-phase-planner");
+    // The plan's members, a task's, an item's and each spec's (Plan 1's
+    // Context, D-01, D-12), the members Baley adds at approval (D-03), and
+    // every refusal code of PLN-R11 to PLN-R13, PLN-R9 and PLN-R23.
+    for name in [
+        "phase",
+        "stories",
+        "files",
+        "directories",
+        "goal",
+        "context",
+        "notes",
+        "tasks",
+        "evidence_map",
+        "questions",
+        "id",
+        "title",
+        "action",
+        "verify",
+        "story",
+        "truth",
+        "truth_version",
+        "kind",
+        "spec",
+        "reason",
+        "artifact",
+        "link",
+        "check",
+        "observation",
+        "path",
+        "record",
+        "caller",
+        "callee",
+        "value",
+        "what",
+        "by",
+        "command",
+        "expected",
+        "literal",
+        "property",
+        "test",
+        "file",
+        "function",
+        "setup",
+        "call",
+        "level",
+        "unit",
+        "integration",
+        "boundary",
+        "fakes",
+        "human_verify",
+        "plan",
+        "question_set",
+        "size",
+        "suite",
+        "typed-content",
+        "lease",
+        "story-not-in-phase",
+        "no-truths",
+        "evidence-item-truth",
+        "truth-version-mismatch",
+        "evidence-item-conflict",
+        "link-value-not-named",
+        "uncovered-truth",
+        "truth-without-check",
+        "truth-without-observation",
+        "truth-check-limit",
+        "check-command",
+        "check-expected",
+        "check-test-file",
+        "check-boundary",
+        "over-capacity",
+        "question-id",
+        "question-blank",
+        "question-dependency",
+        "question-cycle",
+    ] {
+        assert!(
+            body.contains(&format!("`{name}`")),
+            "the planner text lacks `{name}`"
+        );
+    }
+    for needle in [
+        "propose a split rather than overfill",
+        "put every decision the plan needs from the owner in `questions` with a recommended answer, write the plan on the recommended answers, and leave no decision in `notes` or task prose",
+        "Proposed split:",
+        "Call no `baley_apply` operation",
+    ] {
+        assert!(body.contains(needle), "the planner text lacks {needle}");
+    }
+}
+
+#[test]
+fn a_planner_text_without_the_test_rules_word_for_word_or_the_default_style_is_caught() {
+    let body = served_text("bal-phase-planner");
+    // Design 0005 section 10's test derivation rules, copied by hand
+    // without the quote marks (PLN-R18, D-19).
+    let rules = [
+        "Treat a plan step as a container for work; separate its independently testable responsibilities instead of testing the whole step. For each responsibility, choose input classes, decision edges and failure responses justified by the requirement. Take expected values from that requirement; never invent behavior to make an answer available. Put each ambiguity the requirement leaves as a question in the plan's `questions` field, with a recommended answer, for the owner to decide.",
+        "A generated unit test exercises one responsibility and one behavior, using at most one simulated external seam; split a unit that touches two. Run the real logic that owns the decision with supplied observations and independently justified expectations. In the one check's existing fields, connect the approved truth, production responsibility, inputs or seam, expected observable result and test. Name every other test in the task action with the meaningful defect it would catch. Stop when another case would distinguish no new required behavior or meaningful failure. Reuse adequate existing tests and relevant regressions; do not pursue test counts, a test per function, blanket permutations or coverage percentages. Use the managed project's approved language and test framework; Baley being written in Rust does not choose the project's language.",
+        "Give every check a `level`. Write a unit check at one unit: `boundary` is the one unit the check exercises, named as a unit and not as a workflow, and `fakes` names every filesystem, process and clock seam that unit touches; do not leave it empty when the unit touches one. A check never starts a program to get its answer: not the project's binary, not git, not gpg, not a shell.",
+        "When a truth's outcome depends on two or more of the project's own units working together, write its check as an integration check. Run those units together for real, and name them in `boundary`. Mock every outside boundary they reach, the database, the network, a third-party API, the clock, the filesystem or a host program, and name each in `fakes`. A mock sits behind an interface the project owns and serves the results and the failures the test needs. Never mock one of the project's own units inside an integration check. Where the project has no interface of its own at a boundary, say so in the plan and plan the seam first. Integration tests belong to the project's test command, so the suite runs them.",
+        "Naming a fake is not permission to script one. A check builds the values it needs and asserts the rule over them. If the check has to supply the answer the unit is about to reach for, it measures nothing. When the unit stops in the middle of judging to ask git, the filesystem or the clock, that unit is not testable as written: say so in the plan and move the asking out, so the judging takes its facts as arguments. The small function that does the asking gets no check of its own.",
+        "A generated test may rely only on the project's language toolchain and test libraries, including mocking libraries, from that language's package ecosystem. It must need no other language runtime, host-installed program, particular hardware or pre-existing machine state, and give the same result wherever the project builds. Test code starts no program. A test may create a fresh temporary directory as its one filesystem seam, keeps its reads and writes inside it, and makes no assertion depend on filesystem permissions, case sensitivity, symlink support or crash durability.",
+        "When this phase first makes a running-program obligation runnable, add it to the map as a pending observation. Checks with mocked boundaries cannot establish real persistence, a real service, GUI interaction, performance or a live run of the assembled program, and passing them does not close that obligation. State what remains unverified.",
+    ];
+    for rule in rules {
+        assert!(
+            body.contains(rule),
+            "the planner text lacks the rule beginning {}",
+            &rule[..40]
+        );
+    }
+    assert!(
+        body.contains(test_style::TEXT),
+        "the planner text lacks the default test style"
+    );
+}
+
+#[test]
+fn a_planner_text_given_a_help_row_or_a_skill_stub_is_caught() {
+    let identity = "bal-phase-planner";
+    let Lookup::Served { entry, text } = lookup(identity) else {
+        panic!("{identity} is served");
+    };
+    assert_eq!(entry.build, 4);
+    assert_eq!(text.version, "1");
+    assert!(
+        !crate::help::table::COMMANDS
+            .iter()
+            .any(|command| command.name == identity),
+        "{identity} is a help row"
+    );
+    assert!(
+        !crate::host_artifacts::stubs::front_doors()
+            .iter()
+            .any(|(name, _)| *name == identity),
+        "{identity} is a front door"
+    );
+    assert!(!identity.starts_with("bal-planner-"));
+}
+
+#[test]
+fn a_planner_text_naming_cadence_files_or_markers_is_caught() {
+    let body = served_text("bal-phase-planner");
+    for name in [
+        "PLAN.md",
+        "PLAN-",
+        "frontmatter",
+        "STATE",
+        "cursor",
+        "## ",
+        "Task ceiling",
+        "lease-check",
+        "undeclared-files",
+        "max_plan_tasks",
+    ] {
+        assert!(!body.contains(name), "the planner text names {name}");
+    }
+}
+
+#[test]
+fn a_plan_door_missing_a_step_it_owns_is_caught() {
+    // The steps D-17 keeps: the planner order, its launch, failure and
+    // retry, the submit, the rounds, the split and the terminal approval.
+    for needle in [
+        "phase-plan",
+        r#""instruction":"bal-plan""#,
+        "launch",
+        "prompt",
+        "work-order-fail",
+        "work-order-retry",
+        "plan-submit",
+        "bal-rounds",
+        "Proposed split:",
+        "over-capacity",
+        "question-open",
+        "baley scope preview",
+        "baley plan approve",
+        "Nothing is approved over MCP",
+    ] {
+        assert!(
+            plan::TEXT.contains(needle),
+            "the plan front door lacks {needle}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_door_naming_cadence_state_or_a_later_tasks_step_is_caught() {
+    for name in CADENCE_NAMES.iter().chain(&[
+        "STATE",
+        "cursor",
+        "PLAN.md",
+        "checker",
+        "plan_check",
+        "--gaps",
+        "--inline",
+        "--skip-check",
+        "seed-reqs",
+        "cite-count",
+        "lease-check",
+        "max_plan_tasks",
+    ]) {
+        assert!(
+            !plan::TEXT.contains(name),
+            "the plan front door names {name}"
+        );
     }
 }

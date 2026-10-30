@@ -101,7 +101,7 @@ Two notes on history:
 | Deferral | The owner's recorded choice to leave a question undecided for now, with a reason ([0005](docs/design/0005-context-plans-and-acceptance.md#2-terms)). | skip, postponement |
 | Phase planning | Committing stories to a phase and writing its plans ([0005](docs/design/0005-context-plans-and-acceptance.md#2-terms)). | sprint planning |
 | Increment | What a completed phase delivers: something the owner can use, proven by its truths and the suite ([0005](docs/design/0005-context-plans-and-acceptance.md#2-terms)). | deliverable, release (a release is a tagged version) |
-| Size | The number of tasks a story's approved plans need; a phase's size is the sum ([0005](docs/design/0005-context-plans-and-acceptance.md#2-terms)). | estimate, story points |
+| Size | A story's size counts the tasks of the approved plans that serve it; a phase's size counts each of its approved plans' tasks once, so a plan serving two stories is counted once ([0005](docs/design/0005-context-plans-and-acceptance.md#2-terms)). | estimate, story points |
 | Capacity | The owner's ceiling on a phase's size in tasks, `planning.phase_capacity` ([0005](docs/design/0005-context-plans-and-acceptance.md#2-terms)). | budget, sprint capacity |
 | Velocity | Tasks completed per closed phase, shown as a fact and never used to decide ([0005](docs/design/0005-context-plans-and-acceptance.md#2-terms)). | throughput, speed |
 | Plan | One typed document for a phase: the stories it serves, its file lease, its tasks, its suite, its evidence map and its questions. A phase may have several ([0005](docs/design/0005-context-plans-and-acceptance.md#2-terms)). | roadmap, spec, PLAN file |
