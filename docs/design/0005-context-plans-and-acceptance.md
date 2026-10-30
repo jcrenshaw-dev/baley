@@ -213,7 +213,7 @@ Baley recognizes a checker revision from the draft awaiting the one revision gra
 | `trigger`, `observer`, `verb`, `outcome` | text | The sentence's slots; `verb` is `sees`, `gets` or `is refused` |
 | `kind` | `literal`, `property` | Whether the outcome is one value or a property |
 | `observable`, `fixed_oracle` | bool | The owner's attestations, true in every recorded truth |
-| `human_verify` | text, or absent | The tool or live service a person needs to prove the truth; absent when none is needed |
+| `human_verify` | text, or absent | The tool or live service a person needs to prove the truth; absent when none is needed. Such a truth also needs an `observation` item in the phase's evidence map, beside its one check (`truth-without-observation`, PLN-R13) |
 
 Each of a truth's texts, `id`, `form`, `trigger`, `observer`, `verb`, `outcome`, `kind` and `human_verify`, is at most 4,096 bytes as written, before any trimming, the limit questions and answers use; an over-long one is refused `truth-form` with nothing recorded.
 
@@ -225,23 +225,26 @@ Each of a truth's texts, `id`, `form`, `trigger`, `observer`, `verb`, `outcome`,
 |---|---|---|
 | `phase`, `plan` | integers | The phase and the plan number |
 | `stories` | list of story ids | The stories it serves |
-| `files`, `directories` | lists of paths | The lease |
+| `files`, `directories` | lists of paths | The lease: each entry a plain relative path under the PLN-R11 rule |
 | `goal`, `context`, `notes` | text | For the executor |
-| `tasks` | list | `id`, `title`, `files`, `action`, `verify` |
+| `tasks` | list | `id`, `title`, `files`, `action`, `verify` (one or more commands) |
 | `suite` | command | The suite Baley runs at close |
 | `evidence_map` | list of items | See below |
 | `questions` | list of questions | The plan's questions (PLN-R23), as submitted |
 | `question_set` | set id | The set its questions were put to the owner in; the answers and deferrals are that set's records |
 | `size` | integer | The number of tasks |
 
+The planner submits `phase`, `stories`, `files`, `directories`, `goal`, `context`, `notes`, `tasks`, `evidence_map` and `questions`. Baley writes `plan`, `question_set`, `size` and `suite` when the plan is approved, `suite` from `workflow.test_command`, so a submitted plan carrying any of them is refused `typed-content` (PLN-R11).
+
 ### evidence item
 
 | Field | Type | Meaning |
 |---|---|---|
-| `id` | item id | Unique within the phase |
-| `truth`, `truth_version` | truth id, integer | The truth it serves |
+| `id` | item id | Unique within the phase: the same id in another plan is the same item and must keep one definition (`evidence-item-conflict`) |
+| `story` | story id | The story whose truth it serves |
+| `truth`, `truth_version` | truth id, integer | The truth it serves, found by its story, id and version, since a truth id is unique only within its story |
 | `kind` | `artifact`, `link`, `check`, `observation` | |
-| `spec` | table | `artifact`: path or record. `link`: caller, callee, value. `check`: command, expected {literal or property, value}, test {file, function}, setup, call, level (`unit` or `integration`), boundary, fakes. `observation`: what is to be seen, by whom. |
+| `spec` | table | `artifact`: exactly one of `path` or `record`. `link`: `caller`, `callee`, `value`. `check`: `command`, `expected` {`kind` `literal` or `property`, `value`}, `test` {`file`, `function`}, `setup`, `call`, `level` (`unit` or `integration`), `boundary`, `fakes`. `observation`: `what`, what is to be seen, and `by`, by whom. |
 | `reason` | text | What change would break this |
 
 ### questions.opened (event; `roadmap` stream for a story's set, `phase/<n>` stream for a plan draft's set)
@@ -499,7 +502,7 @@ sequenceDiagram
     alt map or grammar refused
       B-->>H: refusal naming the item
     else over capacity
-      B-->>H: over-capacity, naming the story and count
+      B-->>H: over-capacity, naming every story the plan serves and the size the phase would reach
     else
       alt plan gate on
         B-->>H: checker work order with the full plan and versioned truths
